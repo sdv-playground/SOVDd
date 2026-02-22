@@ -1,0 +1,47 @@
+[package]
+name = "sovd-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Integration tests for SOVD server"
+publish = false
+
+[dependencies]
+# Workspace crates
+sovd-core.workspace = true
+sovd-api.workspace = true
+sovd-uds.workspace = true
+sovd-gateway.workspace = true
+sovd-conv.workspace = true
+sovd-client.workspace = true
+
+# Async runtime
+tokio.workspace = true
+
+# HTTP client
+reqwest.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Async utilities
+futures-util.workspace = true
+async-trait.workspace = true
+
+# Testing
+serial_test.workspace = true
+
+# Utilities
+hex.workspace = true
+chrono.workspace = true
+libc = "0.2"
+
+# Temp directory for test configs
+tempfile.workspace = true
+
+# Crypto (for firmware checksum generation)
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio-test.workspace = true

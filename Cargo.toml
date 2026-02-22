@@ -1,0 +1,95 @@
+[workspace]
+resolver = "2"
+members = [
+    # Libraries
+    "crates/sovd-core",
+    "crates/sovd-api",
+    "crates/sovd-uds",
+    "crates/sovd-gateway",
+    "crates/sovd-conv",
+    "crates/sovd-client",
+    "crates/sovd-proxy",
+    # Binaries
+    "crates/sovdd",
+    "crates/example-ecu",
+    "crates/example-app",
+    "crates/sovd-cli",
+    # Tests
+    "crates/sovd-tests",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/user/sovd"
+
+[workspace.dependencies]
+# Internal crates
+sovd-core = { path = "crates/sovd-core" }
+sovd-api = { path = "crates/sovd-api" }
+sovd-uds = { path = "crates/sovd-uds" }
+sovd-gateway = { path = "crates/sovd-gateway" }
+sovd-conv = { path = "crates/sovd-conv" }
+sovd-client = { path = "crates/sovd-client" }
+sovd-proxy = { path = "crates/sovd-proxy" }
+example-ecu = { path = "crates/example-ecu" }
+
+# Async runtime
+tokio = { version = "1", features = ["full", "sync", "time", "signal"] }
+
+# Web framework
+axum = { version = "0.7", features = ["macros"] }
+axum-extra = { version = "0.9", features = ["typed-header"] }
+tower = { version = "0.4", features = ["util", "timeout"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "timeout"] }
+
+# SSE streaming
+tokio-stream = { version = "0.1", features = ["sync"] }
+async-stream = "0.3"
+futures = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+toml = "0.8"
+
+# Validation
+validator = { version = "0.18", features = ["derive"] }
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1"
+anyhow = "1"
+bytes = "1"
+parking_lot = "0.12"
+hex = "0.4"
+crc = "3"
+url = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Async utilities
+async-trait = "0.1"
+
+# DoIP (Diagnostics over IP)
+# Using git versions to avoid dependency conflicts between crates.io versions
+doip-definitions = { git = "https://github.com/theswiftfox/doip-definitions.git", rev = "bdeab8c" }
+doip-sockets = { git = "https://github.com/theswiftfox/doip-sockets.git", rev = "0771453", features = ["ssl"] }
+socket2 = "0.5"
+
+# Testing
+tokio-test = "0.4"
+mockall = "0.12"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
+rstest = "0.18"
+pretty_assertions = "1.4"
+tempfile = "3"
+axum-test = "14"
+serial_test = "3"
+

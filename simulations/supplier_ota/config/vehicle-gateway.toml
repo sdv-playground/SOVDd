@@ -1,0 +1,37 @@
+# Vehicle Gateway - Top-level SOVD aggregation point
+#
+# This is the OEM's central compute gateway. It has NO direct CAN access.
+# It aggregates two downstream SOVD endpoints over HTTP:
+#   1. The UDS gateway (port 4002) - all ECUs (engine, transmission, body, vtx_vx500)
+#   2. The app entity (port 4001) - supplier container for managed ECU access
+#
+# The vtx_vx500 ECU is reachable via two paths:
+#   - uds_gw/vtx_vx500              (raw UDS diagnostic access)
+#   - vortex_engine/apps/vtx_vx500  (managed access via supplier app)
+#
+# Port: 4000
+
+[server]
+port = 4000
+
+[gateway]
+enabled = true
+id = "vehicle_gateway"
+name = "Vehicle Gateway"
+
+# =============================================================================
+# UDS/CAN gateway (accessed via SOVD HTTP)
+# =============================================================================
+[proxy.uds_gw]
+name = "UDS Gateway"
+url = "http://localhost:4002"
+component_id = "uds_gw"
+
+# =============================================================================
+# Vortex engine app entity (accessed via SOVD HTTP)
+# =============================================================================
+[proxy.vortex_engine]
+name = "Vortex Motors Engine App"
+url = "http://localhost:4001"
+component_id = "vortex_engine"
+auth_token = "supplier-secret-123"

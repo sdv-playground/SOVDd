@@ -1,0 +1,51 @@
+[package]
+name = "sovd-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SOVD REST API client for communicating with SOVD servers"
+
+[dependencies]
+# HTTP client
+reqwest = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+
+# Core types
+sovd-core = { workspace = true }
+
+# DID conversions (optional, for client-side conversion of private data)
+sovd-conv = { workspace = true, optional = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Utilities
+url = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+
+# Server for testing module
+axum = { workspace = true }
+
+[features]
+default = []
+# Enable client-side DID conversion (re-exports sovd-conv)
+conversion = ["sovd-conv"]
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+sovd-api = { workspace = true }
+sovd-conv = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }

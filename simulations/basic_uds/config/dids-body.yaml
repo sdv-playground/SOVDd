@@ -1,0 +1,43 @@
+meta:
+  name: Body ECU
+  component_id: body_ecu
+  version: "1.0"
+
+dids:
+  0xF405:
+    id: ambient_temp
+    name: Ambient Temperature
+    type: uint8
+    scale: 1.0
+    offset: -40.0
+    unit: "°C"
+
+  0xF40C:
+    id: battery_voltage
+    name: Battery Voltage
+    type: uint16
+    byte_order: big
+    scale: 0.01
+    unit: V
+
+  0xF401:
+    id: door_status
+    name: Door Status
+    type: uint8
+
+  0xF402:
+    id: light_status
+    name: Light Status
+    type: uint8
+
+  0xF403:
+    id: fuel_level
+    name: Fuel Level
+    type: uint8
+    unit: "%"
+
+  0xF189:
+    id: software_version
+    name: ECU Software Version
+    type: string
+    length: 32

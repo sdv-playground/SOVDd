@@ -1,0 +1,141 @@
+# Engine Control Module - Test ECU Configuration
+id = "engine_ecu"
+name = "Engine Control Module"
+
+[transport]
+interface = "vcan1"
+rx_id = "0x18DA00F1"
+tx_id = "0x18DAF100"
+
+[security]
+secret = "ff"
+
+[transfer]
+block_counter_start = 1
+block_counter_wrap = 1
+
+# Parameter definitions (DIDs that this ECU responds to)
+[[parameters]]
+did = "0xF40C"
+id = "engine_rpm"
+data_type = "uint16"
+value = 2500
+min = 800
+max = 6000
+varies = true
+
+[[parameters]]
+did = "0xF405"
+id = "coolant_temp"
+data_type = "uint8"
+value = 90
+min = 70
+max = 105
+varies = true
+
+[[parameters]]
+did = "0xF40D"
+id = "intake_pressure"
+data_type = "uint8"
+value = 101
+min = 80
+max = 120
+varies = true
+
+[[parameters]]
+did = "0xF40E"
+id = "vehicle_speed"
+data_type = "uint8"
+value = 60
+min = 0
+max = 180
+varies = true
+
+[[parameters]]
+did = "0xF48A"
+id = "oil_pressure"
+data_type = "uint16"
+value = 350
+min = 200
+max = 500
+varies = true
+
+[[parameters]]
+did = "0xF190"
+id = "vin"
+data_type = "string"
+value = "1HGBH41JXMN109186"
+varies = false
+
+[[parameters]]
+did = "0xF189"
+id = "ecu_sw_version"
+data_type = "string"
+value = "v1.0.0"
+varies = false
+
+# Routine definitions
+[[routines]]
+id = "0x0203"
+name = "Self Test"
+requires_security = false
+instant = true
+result = [0x00]
+description = "Run ECU self-test diagnostics"
+
+[[routines]]
+id = "0x0204"
+name = "Clear Learned Values"
+requires_security = true
+instant = true
+result = [0x00]
+description = "Reset adaptive learning data"
+
+[[routines]]
+id = "0xFF00"
+name = "Injector Buzz Test"
+requires_security = true
+instant = false
+result = [0x00, 0x01, 0x02, 0x03]
+description = "Activate injectors sequentially"
+
+[[routines]]
+id = "0xFF01"
+name = "Firmware Commit"
+requires_security = false
+instant = true
+result = [0x00]
+description = "Commit activated firmware (A/B bank)"
+
+[[routines]]
+id = "0xFF02"
+name = "Firmware Rollback"
+requires_security = false
+instant = true
+result = [0x00]
+description = "Rollback to previous firmware (A/B bank)"
+
+# I/O Output definitions (UDS 0x2F)
+[[outputs]]
+id = "0xF000"
+name = "Throttle Position"
+size = 1
+default = [0x00]
+requires_security = true
+description = "Electronic throttle body position control"
+
+[[outputs]]
+id = "0xF010"
+name = "Check Engine Light (MIL)"
+size = 1
+default = [0x00]
+requires_security = false
+description = "Malfunction Indicator Lamp control"
+
+[[outputs]]
+id = "0xF020"
+name = "Cooling Fan Relay"
+size = 1
+default = [0x00]
+requires_security = false
+description = "Engine cooling fan relay control"

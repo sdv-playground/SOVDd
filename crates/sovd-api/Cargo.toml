@@ -1,0 +1,34 @@
+[package]
+name = "sovd-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SOVD REST API layer with generic handlers"
+
+[dependencies]
+sovd-core.workspace = true
+sovd-conv.workspace = true
+sovd-uds.workspace = true
+tokio.workspace = true
+axum.workspace = true
+axum-extra.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tokio-stream.workspace = true
+async-stream.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+hex.workspace = true
+crc32fast = "1.4"
+parking_lot.workspace = true
+
+[dev-dependencies]
+sovd-client.workspace = true
+tokio-test.workspace = true

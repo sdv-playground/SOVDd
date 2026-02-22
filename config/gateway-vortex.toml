@@ -1,0 +1,118 @@
+# Gateway SOVD Server Configuration - Vortex Motors Mode
+#
+# Uses Vortex Motors-specific UDS service IDs.
+# Use together with example-ecu-vortex.toml for testing.
+
+[server]
+host = "0.0.0.0"
+port = 18083
+
+[gateway]
+enabled = true
+id = "vehicle_gateway"
+name = "Vehicle Gateway (Vortex Motors)"
+
+[transport]
+type = "socketcan"
+interface = "vcan0"
+bitrate = 500000
+
+[transport.isotp]
+tx_id = "0x18DA00F1"
+rx_id = "0x18DAF100"
+tx_padding = 0xCC
+rx_padding = 0xCC
+block_size = 0
+st_min_us = 0
+tx_dl = 8
+
+[session]
+default_session = 0x01
+extended_session = 0x03
+engineering_session = 0x60
+
+# Vortex Motors-specific service ID overrides
+[service_overrides]
+read_data_by_periodic_id = 0xBB
+dynamically_define_data_id = 0xBA
+write_data_by_id = 0xBC
+
+[ecu.vtx_ecm]
+id = "vtx_ecm"
+name = "VTX ECM (Vortex Motors)"
+description = "Vortex Motors Engine Control Module"
+
+# ============================================================================
+# Parameters
+# ============================================================================
+
+[[ecu.vtx_ecm.params]]
+id = "vin"
+name = "Vehicle Identification Number"
+did = "0xF190"
+data_type = "string"
+byte_length = 17
+
+[[ecu.vtx_ecm.params]]
+id = "coolant_temp"
+name = "Coolant Temperature"
+did = "0xF405"
+data_type = "uint8"
+unit = "°C"
+scale = 1.0
+offset = -40.0
+
+[[ecu.vtx_ecm.params]]
+id = "engine_rpm"
+name = "Engine RPM"
+did = "0xF40C"
+data_type = "uint16"
+unit = "rpm"
+scale = 0.25
+
+# ============================================================================
+# Operations
+# ============================================================================
+
+[[ecu.vtx_ecm.operations]]
+id = "check_preconditions"
+name = "Check Programming Preconditions"
+rid = "0x0203"
+description = "Verify ECU is ready for programming"
+security_level = 0
+
+# ============================================================================
+# I/O Outputs
+# ============================================================================
+
+[[ecu.vtx_ecm.outputs]]
+id = "led_status"
+name = "LED Status"
+ioid = "0xF000"
+default_value = "00"
+data_type = "uint8"
+allowed = ["off", "on"]
+description = "Status LED on/off control"
+security_level = 0
+
+[[ecu.vtx_ecm.outputs]]
+id = "fan_speed"
+name = "Fan Speed"
+ioid = "0xF001"
+default_value = "0000"
+data_type = "uint16"
+unit = "rpm"
+min = 0.0
+max = 10000.0
+description = "Cooling fan motor speed"
+security_level = 0
+
+[[ecu.vtx_ecm.outputs]]
+id = "relay_1"
+name = "Relay 1"
+ioid = "0xF002"
+default_value = "00"
+data_type = "uint8"
+allowed = ["off", "on"]
+description = "General purpose relay 1"
+security_level = 0

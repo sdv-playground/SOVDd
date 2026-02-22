@@ -1,0 +1,19 @@
+# Test ECU Configuration - Standard UDS Mode
+#
+# Standard ECU using ISO 14229 compliant service IDs.
+# Uses CAN IDs: RX=0x18DA00F1, TX=0x18DAF100
+
+id = "standard_ecu"
+name = "Standard UDS ECU"
+
+[transport]
+interface = "vcan0"
+rx_id = "0x18DA00F1"
+tx_id = "0x18DAF100"
+
+[security]
+secret = "ff"
+
+# Standard UDS service IDs (defaults)
+[service_ids]
+# All defaults - no overrides needed

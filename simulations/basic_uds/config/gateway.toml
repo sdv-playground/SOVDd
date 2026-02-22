@@ -1,0 +1,404 @@
+# SOVD Gateway - 3-ECU vehicle network on vcan1
+#
+# Engine ECU:       0x18DA00F1 / 0x18DAF100
+# Transmission ECU: 0x18DA01F1 / 0x18DAF101
+# Body ECU:         0x18DA02F1 / 0x18DAF102
+
+[server]
+port = 4000
+
+[gateway]
+enabled = true
+id = "vehicle_gateway"
+name = "Vehicle Gateway"
+
+# Auto-discover ECUs on can0 at startup (in addition to explicitly configured ECUs)
+[gateway.scan]
+interface = "can0"
+timeout_ms = 2000
+
+[gateway.scan.flash]
+supports_rollback = true
+commit_routine = "0xFF01"
+rollback_routine = "0xFF02"
+
+# =============================================================================
+# ECU 1: Engine Control Module
+# =============================================================================
+[ecu.engine_ecu]
+id = "engine_ecu"
+name = "Engine Control Module"
+
+[ecu.engine_ecu.transport]
+type = "socketcan"
+interface = "vcan1"
+
+[ecu.engine_ecu.transport.isotp]
+tx_id = "0x18DA00F1"
+rx_id = "0x18DAF100"
+
+[ecu.engine_ecu.security]
+secret = "ff"
+
+[ecu.engine_ecu.session]
+transfer_data_block_counter_start = 1
+transfer_data_block_counter_wrap = 1
+
+[[ecu.engine_ecu.parameters]]
+id = "engine_rpm"
+did = "0xF40C"
+name = "Engine Speed"
+data_type = "uint16"
+byte_order = "big"
+scale = 0.25
+unit = "rpm"
+
+[[ecu.engine_ecu.parameters]]
+id = "coolant_temp"
+did = "0xF405"
+name = "Coolant Temperature"
+data_type = "uint8"
+offset = -40.0
+unit = "°C"
+
+[[ecu.engine_ecu.parameters]]
+id = "intake_pressure"
+did = "0xF40D"
+name = "Intake Manifold Pressure"
+data_type = "uint8"
+unit = "kPa"
+
+[[ecu.engine_ecu.parameters]]
+id = "vehicle_speed"
+did = "0xF40E"
+name = "Vehicle Speed"
+data_type = "uint8"
+unit = "km/h"
+
+[[ecu.engine_ecu.parameters]]
+id = "oil_pressure"
+did = "0xF48A"
+name = "Oil Pressure"
+data_type = "uint16"
+byte_order = "big"
+scale = 0.1
+unit = "kPa"
+
+[[ecu.engine_ecu.parameters]]
+id = "vin"
+did = "0xF190"
+name = "Vehicle Identification Number"
+data_type = "string"
+
+[[ecu.engine_ecu.parameters]]
+id = "programming_date"
+did = "0xF199"
+name = "Programming Date"
+data_type = "string"
+writable = true
+
+[ecu.engine_ecu.flash]
+supports_rollback = true
+commit_routine = "0xFF01"
+rollback_routine = "0xFF02"
+
+[[ecu.engine_ecu.operations]]
+id = "firmware_commit"
+name = "Firmware Commit"
+rid = "0xFF01"
+description = "Commit activated firmware (A/B bank)"
+security_level = 0
+
+[[ecu.engine_ecu.operations]]
+id = "firmware_rollback"
+name = "Firmware Rollback"
+rid = "0xFF02"
+description = "Rollback to previous firmware (A/B bank)"
+security_level = 0
+
+[[ecu.engine_ecu.operations]]
+id = "self_test"
+name = "Self Test"
+rid = "0x0203"
+description = "Run ECU self-test diagnostics"
+security_level = 0
+
+[[ecu.engine_ecu.operations]]
+id = "clear_learned"
+name = "Clear Learned Values"
+rid = "0x0204"
+description = "Reset adaptive learning data"
+security_level = 1
+
+[[ecu.engine_ecu.operations]]
+id = "injector_test"
+name = "Injector Buzz Test"
+rid = "0xFF00"
+description = "Activate injectors sequentially"
+security_level = 1
+
+# I/O Controls (UDS 0x2F)
+[[ecu.engine_ecu.outputs]]
+id = "throttle_position"
+name = "Throttle Position"
+ioid = "0xF000"
+default_value = "00"
+data_type = "uint8"
+scale = 0.392157
+unit = "%"
+min = 0.0
+max = 100.0
+description = "Electronic throttle body position control"
+security_level = 1
+
+[[ecu.engine_ecu.outputs]]
+id = "check_engine_light"
+name = "Check Engine Light (MIL)"
+ioid = "0xF010"
+default_value = "00"
+data_type = "uint8"
+allowed = ["off", "on"]
+description = "Malfunction Indicator Lamp control"
+security_level = 0
+
+[[ecu.engine_ecu.outputs]]
+id = "cooling_fan"
+name = "Cooling Fan Relay"
+ioid = "0xF020"
+default_value = "00"
+data_type = "uint8"
+allowed = ["off", "on"]
+description = "Engine cooling fan relay control"
+security_level = 0
+
+# =============================================================================
+# ECU 2: Transmission Control Module
+# =============================================================================
+[ecu.transmission_ecu]
+id = "transmission_ecu"
+name = "Transmission Control Module"
+
+[ecu.transmission_ecu.transport]
+type = "socketcan"
+interface = "vcan1"
+
+[ecu.transmission_ecu.transport.isotp]
+tx_id = "0x18DA01F1"
+rx_id = "0x18DAF101"
+
+[ecu.transmission_ecu.security]
+secret = "aa"
+
+[ecu.transmission_ecu.session]
+transfer_data_block_counter_start = 1
+transfer_data_block_counter_wrap = 1
+
+[[ecu.transmission_ecu.parameters]]
+id = "input_shaft_speed"
+did = "0xF40C"
+name = "Input Shaft Speed"
+data_type = "uint16"
+byte_order = "big"
+unit = "rpm"
+
+[[ecu.transmission_ecu.parameters]]
+id = "output_shaft_speed"
+did = "0xF40D"
+name = "Output Shaft Speed"
+data_type = "uint16"
+byte_order = "big"
+unit = "rpm"
+
+[[ecu.transmission_ecu.parameters]]
+id = "trans_temp"
+did = "0xF405"
+name = "Transmission Temperature"
+data_type = "uint8"
+offset = -40.0
+unit = "°C"
+
+[[ecu.transmission_ecu.parameters]]
+id = "gear_position"
+did = "0xF401"
+name = "Current Gear"
+data_type = "uint8"
+
+[[ecu.transmission_ecu.parameters]]
+id = "gear_ratio"
+did = "0xF402"
+name = "Gear Ratio"
+data_type = "uint16"
+byte_order = "big"
+scale = 0.001
+
+[ecu.transmission_ecu.flash]
+supports_rollback = true
+commit_routine = "0xFF01"
+rollback_routine = "0xFF02"
+
+[[ecu.transmission_ecu.operations]]
+id = "firmware_commit"
+name = "Firmware Commit"
+rid = "0xFF01"
+description = "Commit activated firmware (A/B bank)"
+security_level = 0
+
+[[ecu.transmission_ecu.operations]]
+id = "firmware_rollback"
+name = "Firmware Rollback"
+rid = "0xFF02"
+description = "Rollback to previous firmware (A/B bank)"
+security_level = 0
+
+[[ecu.transmission_ecu.operations]]
+id = "shift_adapt_reset"
+name = "Reset Shift Adaptation"
+rid = "0x0203"
+description = "Clear transmission shift adaptation data"
+security_level = 1
+
+[[ecu.transmission_ecu.operations]]
+id = "clutch_test"
+name = "Clutch Apply Test"
+rid = "0x0204"
+description = "Test clutch pack engagement"
+security_level = 1
+
+# =============================================================================
+# ECU 3: Body Control Module
+# =============================================================================
+[ecu.body_ecu]
+id = "body_ecu"
+name = "Body Control Module"
+
+[ecu.body_ecu.transport]
+type = "socketcan"
+interface = "vcan1"
+
+[ecu.body_ecu.transport.isotp]
+tx_id = "0x18DA02F1"
+rx_id = "0x18DAF102"
+
+[ecu.body_ecu.security]
+secret = "bb"
+
+[ecu.body_ecu.session]
+transfer_data_block_counter_start = 1
+transfer_data_block_counter_wrap = 1
+
+[[ecu.body_ecu.parameters]]
+id = "ambient_temp"
+did = "0xF405"
+name = "Ambient Temperature"
+data_type = "uint8"
+offset = -40.0
+unit = "°C"
+
+[[ecu.body_ecu.parameters]]
+id = "battery_voltage"
+did = "0xF40C"
+name = "Battery Voltage"
+data_type = "uint16"
+byte_order = "big"
+scale = 0.01
+unit = "V"
+
+[[ecu.body_ecu.parameters]]
+id = "door_status"
+did = "0xF401"
+name = "Door Status"
+data_type = "uint8"
+
+[[ecu.body_ecu.parameters]]
+id = "light_status"
+did = "0xF402"
+name = "Light Status"
+data_type = "uint8"
+
+[[ecu.body_ecu.parameters]]
+id = "fuel_level"
+did = "0xF403"
+name = "Fuel Level"
+data_type = "uint8"
+unit = "%"
+
+[ecu.body_ecu.flash]
+supports_rollback = true
+commit_routine = "0xFF01"
+rollback_routine = "0xFF02"
+
+[[ecu.body_ecu.operations]]
+id = "firmware_commit"
+name = "Firmware Commit"
+rid = "0xFF01"
+description = "Commit activated firmware (A/B bank)"
+security_level = 0
+
+[[ecu.body_ecu.operations]]
+id = "firmware_rollback"
+name = "Firmware Rollback"
+rid = "0xFF02"
+description = "Rollback to previous firmware (A/B bank)"
+security_level = 0
+
+[[ecu.body_ecu.operations]]
+id = "lamp_test"
+name = "All Lamps Test"
+rid = "0x0203"
+description = "Activate all exterior lamps"
+security_level = 0
+
+[[ecu.body_ecu.operations]]
+id = "horn_test"
+name = "Horn Test"
+rid = "0x0204"
+description = "Sound horn briefly"
+security_level = 0
+
+[[ecu.body_ecu.operations]]
+id = "central_lock"
+name = "Central Lock Cycle"
+rid = "0x0205"
+description = "Lock and unlock all doors"
+security_level = 1
+
+# I/O Controls for Body ECU
+[[ecu.body_ecu.outputs]]
+id = "headlights"
+name = "Headlights"
+ioid = "0xF100"
+default_value = "00"
+data_type = "uint8"
+allowed = ["off", "on"]
+description = "Headlight on/off control"
+security_level = 0
+
+[[ecu.body_ecu.outputs]]
+id = "horn"
+name = "Horn"
+ioid = "0xF101"
+default_value = "00"
+data_type = "uint8"
+allowed = ["off", "on"]
+description = "Horn activation"
+security_level = 0
+
+[[ecu.body_ecu.outputs]]
+id = "door_locks"
+name = "Door Locks"
+ioid = "0xF102"
+default_value = "00"
+data_type = "uint8"
+allowed = ["unlocked", "locked"]
+description = "Central door lock control"
+security_level = 0
+
+[[ecu.body_ecu.outputs]]
+id = "wipers"
+name = "Windshield Wipers"
+ioid = "0xF103"
+default_value = "00"
+data_type = "uint8"
+allowed = ["off", "slow", "fast"]
+description = "Wiper motor control"
+security_level = 0

@@ -1,0 +1,132 @@
+# Supplier Engine ECU - Test ECU Configuration
+#
+# Represents a tier-1 supplier ECU (e.g., Vortex Motors engine controller)
+# that is only accessible through the supplier container, NOT directly
+# by the OEM vehicle gateway.
+#
+# CAN IDs: 0x18DA03F1 / 0x18DAF103 (next in sequence after body ECU)
+
+id = "vtx_vx500"
+name = "Vortex VX500 Engine ECU"
+
+[transport]
+interface = "vcan1"
+rx_id = "0x18DA03F1"
+tx_id = "0x18DAF103"
+
+[security]
+secret = "cc"
+
+[transfer]
+block_counter_start = 1
+block_counter_wrap = 1
+
+# Parameter definitions
+[[parameters]]
+did = "0xF40C"
+id = "boost_pressure"
+data_type = "uint16"
+value = 1200
+min = 900
+max = 2400
+varies = true
+
+[[parameters]]
+did = "0xF405"
+id = "exhaust_temp"
+data_type = "uint8"
+value = 180
+min = 100
+max = 220
+varies = true
+
+[[parameters]]
+did = "0xF40D"
+id = "fuel_rail_pressure"
+data_type = "uint16"
+value = 1800
+min = 1200
+max = 2500
+varies = true
+
+[[parameters]]
+did = "0xF40E"
+id = "dpf_soot_load"
+data_type = "uint8"
+value = 35
+min = 0
+max = 100
+varies = true
+
+[[parameters]]
+did = "0xF190"
+id = "vin"
+data_type = "string"
+value = "1HGBH41JXMN109186"
+varies = false
+
+[[parameters]]
+did = "0xF189"
+id = "ecu_sw_version"
+data_type = "string"
+value = "VORTEX-VX500-v2.4.1"
+varies = false
+
+[[parameters]]
+did = "0xF199"
+id = "programming_date"
+data_type = "string"
+value = "2025-01-15"
+varies = false
+
+# Routines
+# I/O Outputs (respond to UDS 0x2F InputOutputControlById)
+[[outputs]]
+id = "0xF100"
+name = "Boost Pressure Control Valve"
+size = 2
+default = "0000"
+
+[[outputs]]
+id = "0xF101"
+name = "EGR Valve Position"
+size = 1
+default = "00"
+
+[[outputs]]
+id = "0xF102"
+name = "DPF Regeneration Lamp"
+size = 1
+default = "00"
+
+[[routines]]
+id = "0x0203"
+name = "DPF Regeneration"
+requires_security = false
+instant = false
+result = [0x00]
+description = "Initiate diesel particulate filter regeneration"
+
+[[routines]]
+id = "0x0204"
+name = "Injector Calibration"
+requires_security = true
+instant = true
+result = [0x00]
+description = "Run injector calibration routine"
+
+[[routines]]
+id = "0xFF01"
+name = "Firmware Commit"
+requires_security = false
+instant = true
+result = [0x00]
+description = "Commit activated firmware"
+
+[[routines]]
+id = "0xFF02"
+name = "Firmware Rollback"
+requires_security = false
+instant = true
+result = [0x00]
+description = "Rollback to previous firmware"

@@ -1,0 +1,33 @@
+[package]
+name = "example-ecu"
+version = "0.1.0"
+edition = "2021"
+description = "Example ECU simulator for SOVD server development"
+
+[dependencies]
+tokio = { version = "1", features = ["full", "sync", "time", "signal"] }
+socketcan = "3.5"
+socketcan-isotp = "1.0"
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.8"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+crc = "3"
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "1"
+sovd-uds = { path = "../sovd-uds", default-features = false }
+
+[lib]
+name = "example_ecu"
+path = "src/lib.rs"
+
+[[bin]]
+name = "example-ecu"
+path = "src/main.rs"

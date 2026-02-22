@@ -1,0 +1,120 @@
+# Example App Configuration
+#
+# The app entity is the authority on its managed ECU's public interface.
+# Parameters, operations, and outputs are declared under [managed_ecu]
+# and are exposed to clients via the sub-entity path.
+
+# =============================================================================
+# Managed ECU sub-entity — the Vortex VX500 engine ECU
+# =============================================================================
+
+[managed_ecu]
+id = "vtx_vx500"
+name = "Vortex VX500 Engine ECU"
+secret = "cc"
+
+# Parameters — the 6 custom DIDs exposed by the supplier engine ECU
+[[managed_ecu.parameters]]
+id = "boost_pressure"
+name = "Boost Pressure"
+did = "0xF40C"
+data_type = "uint16"
+unit = "kPa"
+
+[[managed_ecu.parameters]]
+id = "exhaust_temp"
+name = "Exhaust Gas Temperature"
+did = "0xF405"
+data_type = "uint8"
+unit = "°C"
+
+[[managed_ecu.parameters]]
+id = "fuel_rail_pressure"
+name = "Fuel Rail Pressure"
+did = "0xF40D"
+data_type = "uint16"
+unit = "bar"
+
+[[managed_ecu.parameters]]
+id = "dpf_soot_load"
+name = "DPF Soot Load"
+did = "0xF40E"
+data_type = "uint8"
+unit = "%"
+
+[[managed_ecu.parameters]]
+id = "vin"
+name = "Vehicle Identification Number"
+did = "0xF190"
+data_type = "string"
+
+[[managed_ecu.parameters]]
+id = "programming_date"
+name = "Programming Date"
+did = "0xF199"
+data_type = "string"
+writable = true
+
+# Operations — routines supported by the supplier engine ECU
+[[managed_ecu.operations]]
+id = "firmware_commit"
+name = "Firmware Commit"
+rid = "0xFF01"
+description = "Commit activated firmware"
+security_level = 0
+
+[[managed_ecu.operations]]
+id = "firmware_rollback"
+name = "Firmware Rollback"
+rid = "0xFF02"
+description = "Rollback to previous firmware"
+security_level = 0
+
+[[managed_ecu.operations]]
+id = "dpf_regen"
+name = "DPF Regeneration"
+rid = "0x0203"
+description = "Initiate diesel particulate filter regeneration"
+security_level = 0
+
+[[managed_ecu.operations]]
+id = "injector_calibration"
+name = "Injector Calibration"
+rid = "0x0204"
+description = "Run injector calibration routine"
+security_level = 1
+
+# Outputs — I/O control points with rich type metadata
+[[managed_ecu.outputs]]
+id = "boost_control"
+name = "Boost Pressure Control Valve"
+ioid = "0xF100"
+default_value = "0000"
+data_type = "uint16"
+unit = "kPa"
+scale = 0.1
+min = 0.0
+max = 300.0
+security_level = 1
+description = "Controls turbocharger waste gate position"
+
+[[managed_ecu.outputs]]
+id = "egr_valve"
+name = "EGR Valve Position"
+ioid = "0xF101"
+default_value = "00"
+data_type = "uint8"
+scale = 0.392157
+unit = "%"
+min = 0.0
+max = 100.0
+security_level = 0
+
+[[managed_ecu.outputs]]
+id = "dpf_regen_lamp"
+name = "DPF Regeneration Lamp"
+ioid = "0xF102"
+default_value = "00"
+data_type = "uint8"
+allowed = ["off", "on"]
+security_level = 0

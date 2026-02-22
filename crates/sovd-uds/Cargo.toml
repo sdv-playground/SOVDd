@@ -1,0 +1,42 @@
+[package]
+name = "sovd-uds"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "UDS/CAN diagnostic backend for SOVD"
+
+[dependencies]
+sovd-core.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+parking_lot.workspace = true
+hex.workspace = true
+crc.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+
+# DoIP (Diagnostics over IP) - optional with TLS support
+doip-definitions = { workspace = true, optional = true }
+doip-sockets = { workspace = true, optional = true, features = ["ssl"] }
+
+# CAN/ISO-TP (SocketCAN) - Linux only
+[target.'cfg(target_os = "linux")'.dependencies]
+socketcan = { version = "3.5", optional = true }
+socketcan-isotp = { version = "1.0", optional = true }
+tokio-socketcan-isotp = { version = "0.2", optional = true }
+
+[features]
+default = ["socketcan"]
+socketcan = ["dep:socketcan", "dep:socketcan-isotp", "dep:tokio-socketcan-isotp"]
+doip = ["dep:doip-definitions", "dep:doip-sockets"]
+
+[lib]
+name = "sovd_uds"
+path = "src/lib.rs"

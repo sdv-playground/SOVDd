@@ -1,0 +1,32 @@
+# Test ECU Configuration - Vortex Motors Mode
+#
+# This configuration uses Vortex Motors-specific UDS service IDs.
+# Uses different CAN IDs to coexist with standard ECU on same bus.
+# CAN IDs: RX=0x18DA01F1, TX=0x18DAF101
+
+id = "vortex_ecu"
+name = "Vortex Motors VTX ECM"
+
+[transport]
+interface = "vcan0"
+# Different CAN IDs from standard ECU
+rx_id = "0x18DA01F1"
+tx_id = "0x18DAF101"
+
+[security]
+# Hex string for security access key seed
+secret = "deadbeef"
+
+# Vortex Motors-specific service ID overrides
+[service_ids]
+# Standard UDS uses 0x2A for ReadDataByPeriodicIdentifier
+# Vortex Motors uses 0xBB
+read_data_by_periodic_id = 0xBB
+
+# Standard UDS uses 0x2C for DynamicallyDefineDataIdentifier
+# Vortex Motors uses 0xBA
+dynamically_define_data_id = 0xBA
+
+# Standard UDS uses 0x2E for WriteDataByIdentifier
+# Vortex Motors uses 0xBC
+write_data_by_id = 0xBC

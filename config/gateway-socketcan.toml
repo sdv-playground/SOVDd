@@ -1,0 +1,196 @@
+# Gateway SOVD Server Configuration with SocketCAN
+# Used for e2e testing with example-ecu simulator
+
+[server]
+host = "0.0.0.0"
+port = 18082
+
+[gateway]
+enabled = true
+id = "vehicle_gateway"
+name = "Vehicle Gateway"
+
+[transport]
+type = "socketcan"
+interface = "vcan0"
+bitrate = 500000
+
+[transport.isotp]
+tx_id = "0x18DA00F1"
+rx_id = "0x18DAF100"
+tx_padding = 0xCC
+rx_padding = 0xCC
+block_size = 0
+st_min_us = 0
+tx_dl = 8
+
+[session]
+default_session = 0x01
+extended_session = 0x03
+engineering_session = 0x60
+
+[ecu.vtx_ecm]
+id = "vtx_ecm"
+name = "VTX ECM"
+description = "Vortex Motors Engine Control Module"
+
+# ============================================================================
+# Public Parameters (readable in default session)
+# ============================================================================
+
+[[ecu.vtx_ecm.params]]
+id = "vin"
+name = "Vehicle Identification Number"
+did = "0xF190"
+data_type = "string"
+byte_length = 17
+
+[[ecu.vtx_ecm.params]]
+id = "part_number"
+name = "Part Number"
+did = "0xF187"
+data_type = "string"
+byte_length = 16
+
+[[ecu.vtx_ecm.params]]
+id = "serial_number"
+name = "Serial Number"
+did = "0xF18C"
+data_type = "string"
+byte_length = 11
+
+[[ecu.vtx_ecm.params]]
+id = "supplier_sw_version"
+name = "Supplier Software Version"
+did = "0xF195"
+data_type = "string"
+byte_length = 13
+
+[[ecu.vtx_ecm.params]]
+id = "coolant_temp"
+name = "Coolant Temperature"
+did = "0xF405"
+data_type = "uint8"
+unit = "°C"
+scale = 1.0
+offset = -40.0
+
+[[ecu.vtx_ecm.params]]
+id = "vehicle_speed"
+name = "Vehicle Speed"
+did = "0xF40E"
+data_type = "uint8"
+unit = "km/h"
+scale = 1.0
+
+# ============================================================================
+# Extended Parameters (require extended session 0x03)
+# ============================================================================
+
+[[ecu.vtx_ecm.params]]
+id = "engine_rpm"
+name = "Engine RPM"
+did = "0xF40C"
+data_type = "uint16"
+unit = "rpm"
+scale = 0.25
+security_level = 0
+
+[[ecu.vtx_ecm.params]]
+id = "oil_pressure"
+name = "Oil Pressure"
+did = "0xF48A"
+data_type = "uint16"
+unit = "kPa"
+scale = 0.1
+security_level = 0
+
+# ============================================================================
+# Writable Parameters (for write tests)
+# ============================================================================
+
+[[ecu.vtx_ecm.params]]
+id = "programming_date"
+name = "Programming Date"
+did = "0xF199"
+data_type = "bytes"
+byte_length = 4
+writable = true
+security_level = 0
+
+# ============================================================================
+# Operations/Routines
+# ============================================================================
+
+[[ecu.vtx_ecm.operations]]
+id = "check_preconditions"
+name = "Check Programming Preconditions"
+rid = "0x0203"
+description = "Verify ECU is ready for programming"
+security_level = 0
+
+[[ecu.vtx_ecm.operations]]
+id = "erase_memory"
+name = "Erase Memory"
+rid = "0xFF00"
+description = "Erase ECU flash memory (requires security)"
+security_level = 1
+
+# ============================================================================
+# I/O Outputs
+# ============================================================================
+
+[[ecu.vtx_ecm.outputs]]
+id = "led_status"
+name = "LED Status"
+ioid = "0xF000"
+default_value = "00"
+data_type = "uint8"
+allowed = ["off", "on"]
+description = "Status LED on/off control"
+security_level = 0
+
+[[ecu.vtx_ecm.outputs]]
+id = "fan_speed"
+name = "Fan Speed"
+ioid = "0xF001"
+default_value = "0000"
+data_type = "uint16"
+unit = "rpm"
+min = 0.0
+max = 10000.0
+description = "Cooling fan motor speed"
+security_level = 0
+
+[[ecu.vtx_ecm.outputs]]
+id = "relay_1"
+name = "Relay 1"
+ioid = "0xF002"
+default_value = "00"
+data_type = "uint8"
+allowed = ["off", "on"]
+description = "General purpose relay 1"
+security_level = 0
+
+[[ecu.vtx_ecm.outputs]]
+id = "relay_2"
+name = "Relay 2"
+ioid = "0xF003"
+default_value = "00"
+data_type = "uint8"
+allowed = ["off", "on"]
+description = "General purpose relay 2 (secured)"
+security_level = 1
+
+[[ecu.vtx_ecm.outputs]]
+id = "pwm_output"
+name = "PWM Output"
+ioid = "0xF004"
+default_value = "80"
+data_type = "uint8"
+scale = 0.392157
+unit = "%"
+min = 0.0
+max = 100.0
+description = "Pulse-width modulated output duty cycle"
+security_level = 0

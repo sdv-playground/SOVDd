@@ -1,0 +1,106 @@
+meta:
+  name: Vortex VX500 Engine ECU
+  component_id: vtx_vx500
+  version: "1.0"
+
+dids:
+  # =========================================================================
+  # Live data
+  # =========================================================================
+  0xF40C:
+    id: boost_pressure
+    name: Boost Pressure
+    type: uint16
+    byte_order: big
+    scale: 0.1
+    unit: kPa
+
+  0xF405:
+    id: exhaust_temp
+    name: Exhaust Gas Temperature
+    type: uint8
+    offset: -40.0
+    unit: "°C"
+
+  0xF40D:
+    id: fuel_rail_pressure
+    name: Fuel Rail Pressure
+    type: uint16
+    byte_order: big
+    scale: 0.1
+    unit: bar
+
+  0xF40E:
+    id: dpf_soot_load
+    name: DPF Soot Load
+    type: uint8
+    unit: "%"
+
+  # =========================================================================
+  # Identification DIDs (ISO 14229-1 Annex C)
+  # =========================================================================
+  0xF190:
+    id: vin
+    name: Vehicle Identification Number
+    type: string
+    length: 17
+
+  0xF189:
+    id: ecu_sw_version
+    name: ECU Software Version
+    type: string
+    length: 32
+
+  0xF199:
+    id: programming_date
+    name: Programming Date
+    type: string
+    writable: true
+
+  0xF197:
+    id: system_name
+    name: System Name
+    type: string
+    length: 64
+
+  0xF18C:
+    id: ecu_serial
+    name: ECU Serial Number
+    type: string
+    length: 32
+
+  0xF187:
+    id: spare_part_number
+    name: Spare Part Number
+    type: string
+    length: 32
+
+  0xF188:
+    id: ecu_sw_number
+    name: ECU Software Number
+    type: string
+    length: 32
+
+  0xF191:
+    id: ecu_hw_number
+    name: ECU Hardware Number
+    type: string
+    length: 32
+
+  0xF18A:
+    id: system_supplier_id
+    name: System Supplier Identifier
+    type: string
+    length: 32
+
+  0xF193:
+    id: supplier_hw_version
+    name: Supplier Hardware Version
+    type: string
+    length: 16
+
+  0xF195:
+    id: supplier_sw_version
+    name: Supplier Software Version
+    type: string
+    length: 32

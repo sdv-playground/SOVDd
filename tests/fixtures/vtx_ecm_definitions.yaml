@@ -1,0 +1,119 @@
+# VTX ECM DID Definitions for testing
+# This file defines the parameters exposed by the example-ecu simulator
+# and should be uploaded to sovdd for e2e tests
+
+dids:
+  # === PUBLIC DIDs (readable in default session) ===
+  0xF190:
+    id: vin
+    name: Vehicle Identification Number
+    type: string
+    length: 17
+
+  0xF187:
+    id: part_number
+    name: Part Number
+    type: string
+
+  0xF18C:
+    id: serial_number
+    name: Serial Number
+    type: string
+
+  0xF191:
+    id: hardware_number
+    name: Hardware Number
+    type: string
+
+  0xF193:
+    id: hardware_version
+    name: Hardware Version
+    type: string
+
+  0xF189:
+    id: ecu_sw_version
+    name: ECU Software Version
+    type: string
+
+  0xF195:
+    id: supplier_sw_version
+    name: Supplier Software Version
+    type: string
+
+  0xF40E:
+    id: vehicle_speed
+    name: Vehicle Speed
+    type: uint8
+    unit: km/h
+
+  0xF404:
+    id: engine_load
+    name: Engine Load
+    type: uint8
+    unit: "%"
+
+  0xF405:
+    id: coolant_temp
+    name: Coolant Temperature
+    type: uint8
+    scale: 1.0
+    offset: -40.0
+    unit: "°C"
+
+  # === EXTENDED DIDs (require extended session 0x03) ===
+  0xF40C:
+    id: engine_rpm
+    name: Engine RPM
+    type: uint16
+    scale: 0.25
+    unit: rpm
+
+  0xF48A:
+    id: oil_pressure
+    name: Oil Pressure
+    type: uint16
+    unit: kPa
+
+  0xF40D:
+    id: fuel_rate
+    name: Fuel Rate
+    type: uint16
+    unit: L/h
+
+  0xF406:
+    id: intake_temp
+    name: Intake Air Temperature
+    type: uint8
+    scale: 1.0
+    offset: -40.0
+    unit: "°C"
+
+  # === PROTECTED DIDs (require security access) ===
+  0xF42F:
+    id: boost_pressure
+    name: Boost Pressure
+    type: uint16
+    unit: kPa
+
+  0xF478:
+    id: exhaust_temp
+    name: Exhaust Temperature
+    type: uint16
+    unit: "°C"
+
+  0xF411:
+    id: throttle_position
+    name: Throttle Position
+    type: uint8
+    unit: "%"
+
+  # === WRITABLE DIDs ===
+  0xF199:
+    id: programming_date
+    name: Programming Date
+    type: bytes
+
+  0xF19D:
+    id: installation_date
+    name: Installation Date
+    type: bytes

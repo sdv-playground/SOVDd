@@ -1,0 +1,17 @@
+[package]
+name = "sovd-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SOVD Proxy Backend - proxies DiagnosticBackend over HTTP to a remote SOVD server"
+
+[dependencies]
+sovd-core.workspace = true
+sovd-client.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+hex.workspace = true
+chrono.workspace = true

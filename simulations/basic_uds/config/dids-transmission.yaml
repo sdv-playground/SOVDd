@@ -1,0 +1,45 @@
+meta:
+  name: Transmission ECU
+  component_id: transmission_ecu
+  version: "1.0"
+
+dids:
+  0xF40C:
+    id: input_shaft_speed
+    name: Input Shaft Speed
+    type: uint16
+    byte_order: big
+    unit: rpm
+
+  0xF40D:
+    id: output_shaft_speed
+    name: Output Shaft Speed
+    type: uint16
+    byte_order: big
+    unit: rpm
+
+  0xF405:
+    id: trans_temp
+    name: Transmission Temperature
+    type: uint8
+    scale: 1.0
+    offset: -40.0
+    unit: "°C"
+
+  0xF401:
+    id: gear_position
+    name: Gear Position
+    type: uint8
+
+  0xF402:
+    id: gear_ratio
+    name: Gear Ratio
+    type: uint16
+    byte_order: big
+    scale: 0.001
+
+  0xF189:
+    id: software_version
+    name: ECU Software Version
+    type: string
+    length: 32

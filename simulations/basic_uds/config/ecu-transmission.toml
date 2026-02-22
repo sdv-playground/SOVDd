@@ -1,0 +1,96 @@
+# Transmission Control Module - Test ECU Configuration
+id = "transmission_ecu"
+name = "Transmission Control Module"
+
+[transport]
+interface = "vcan1"
+rx_id = "0x18DA01F1"
+tx_id = "0x18DAF101"
+
+[security]
+secret = "aa"
+
+[transfer]
+block_counter_start = 1
+block_counter_wrap = 1
+
+# Parameter definitions
+[[parameters]]
+did = "0xF40C"
+id = "input_shaft_speed"
+data_type = "uint16"
+value = 2200
+min = 0
+max = 6000
+varies = true
+
+[[parameters]]
+did = "0xF40D"
+id = "output_shaft_speed"
+data_type = "uint16"
+value = 1800
+min = 0
+max = 4000
+varies = true
+
+[[parameters]]
+did = "0xF405"
+id = "trans_temp"
+data_type = "uint8"
+value = 85
+min = 60
+max = 120
+varies = true
+
+[[parameters]]
+did = "0xF401"
+id = "gear_position"
+data_type = "uint8"
+value = 4
+min = 0
+max = 8
+varies = false
+
+[[parameters]]
+did = "0xF402"
+id = "gear_ratio"
+data_type = "uint16"
+value = 1200
+varies = false
+
+[[parameters]]
+did = "0xF189"
+id = "ecu_sw_version"
+data_type = "string"
+value = "v1.0.0"
+varies = false
+
+[[routines]]
+id = "0xFF01"
+name = "Firmware Commit"
+requires_security = false
+instant = true
+result = [0x00]
+description = "Commit activated firmware (A/B bank)"
+
+[[routines]]
+id = "0xFF02"
+name = "Firmware Rollback"
+requires_security = false
+instant = true
+result = [0x00]
+description = "Rollback to previous firmware (A/B bank)"
+
+[[routines]]
+id = "0x0203"
+name = "Reset Shift Adaptation"
+requires_security = true
+instant = true
+result = [0x00]
+
+[[routines]]
+id = "0x0204"
+name = "Clutch Apply Test"
+requires_security = true
+instant = false
+result = [0x00, 0x55]

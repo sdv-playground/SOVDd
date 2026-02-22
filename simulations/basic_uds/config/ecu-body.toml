@@ -1,0 +1,135 @@
+# Body Control Module - Test ECU Configuration
+id = "body_ecu"
+name = "Body Control Module"
+
+[transport]
+interface = "vcan1"
+rx_id = "0x18DA02F1"
+tx_id = "0x18DAF102"
+
+[security]
+secret = "bb"
+
+[transfer]
+block_counter_start = 1
+block_counter_wrap = 1
+
+# Parameter definitions
+# Raw value 72 with offset -40 = 32C ambient
+[[parameters]]
+did = "0xF405"
+id = "ambient_temp"
+data_type = "uint8"
+value = 72
+min = 40
+max = 100
+varies = true
+
+[[parameters]]
+did = "0xF40C"
+id = "battery_voltage"
+data_type = "uint16"
+value = 1380
+min = 1100
+max = 1500
+varies = true
+
+[[parameters]]
+did = "0xF401"
+id = "door_status"
+data_type = "uint8"
+value = 0
+varies = false
+
+[[parameters]]
+did = "0xF402"
+id = "light_status"
+data_type = "uint8"
+value = 1
+varies = false
+
+[[parameters]]
+did = "0xF403"
+id = "fuel_level"
+data_type = "uint8"
+value = 75
+min = 0
+max = 100
+varies = true
+
+[[parameters]]
+did = "0xF189"
+id = "ecu_sw_version"
+data_type = "string"
+value = "v1.0.0"
+varies = false
+
+[[routines]]
+id = "0xFF01"
+name = "Firmware Commit"
+requires_security = false
+instant = true
+result = [0x00]
+description = "Commit activated firmware (A/B bank)"
+
+[[routines]]
+id = "0xFF02"
+name = "Firmware Rollback"
+requires_security = false
+instant = true
+result = [0x00]
+description = "Rollback to previous firmware (A/B bank)"
+
+[[routines]]
+id = "0x0203"
+name = "All Lamps Test"
+requires_security = false
+instant = true
+result = [0x00]
+
+[[routines]]
+id = "0x0204"
+name = "Horn Test"
+requires_security = false
+instant = true
+result = [0x00]
+
+[[routines]]
+id = "0x0205"
+name = "Central Lock Cycle"
+requires_security = true
+instant = false
+result = [0x00, 0x01]
+
+# I/O Output definitions (UDS 0x2F)
+[[outputs]]
+id = "0xF100"
+name = "Headlights"
+size = 1
+default = [0x00]
+requires_security = false
+description = "Headlight on/off control"
+
+[[outputs]]
+id = "0xF101"
+name = "Horn"
+size = 1
+default = [0x00]
+requires_security = false
+description = "Horn activation"
+
+[[outputs]]
+id = "0xF102"
+name = "Door Locks"
+size = 1
+default = [0x00]
+requires_security = false
+description = "Central door lock control"
+
+[[outputs]]
+id = "0xF103"
+name = "Windshield Wipers"
+size = 1
+default = [0x00]
+requires_security = false
+description = "Wiper motor control"

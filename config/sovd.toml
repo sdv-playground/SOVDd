@@ -1,0 +1,70 @@
+# SOVD Server Configuration
+
+[server]
+host = "0.0.0.0"
+port = 9080
+request_timeout_ms = 5000
+
+# Transport configuration
+# Options: "socketcan", "someip", "mock"
+[transport]
+type = "mock"
+latency_ms = 10
+
+# SocketCAN configuration (uncomment to use)
+# [transport]
+# type = "socketcan"
+# interface = "can0"
+# bitrate = 500000
+#
+# [transport.isotp]
+# tx_id = "0x18DA00F1"
+# rx_id = "0x18DAF100"
+# tx_padding = 0xCC
+# rx_padding = 0xCC
+# block_size = 0
+# st_min_us = 0
+# tx_dl = 8
+
+# Session configuration
+[session]
+default_session = 0x01
+extended_session = 0x03
+engineering_session = 0x60
+
+[session.security]
+enabled = false
+level = 0x01
+
+[session.keepalive]
+enabled = true
+interval_ms = 2000
+suppress_response = true
+
+# Subscription limits
+[subscriptions]
+max_concurrent = 10
+max_params_per_subscription = 50
+default_timeout_ms = 30000
+
+# ECU Configuration: VTX ECM
+[ecu.vtx_ecm]
+id = "vtx_ecm"
+name = "VTX ECM"
+description = "Vortex Motors Engine Control Module"
+
+[ecu.vtx_ecm.capabilities]
+read_data = true
+write_data = false
+periodic_identifier = true
+response_on_event = true
+max_dids_per_request = 8
+max_periodic_dids = 16
+
+[ecu.vtx_ecm.periodic_rates]
+slow_hz = 1
+medium_hz = 5
+fast_hz = 10
+
+[ecu.vtx_ecm.parameters]
+config_file = "parameters/vtx_ecm.toml"

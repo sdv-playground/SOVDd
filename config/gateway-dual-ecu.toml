@@ -1,0 +1,161 @@
+# Dual ECU Gateway Configuration
+#
+# Gateway aggregating two ECUs on the same CAN bus:
+# - Standard UDS ECU (ISO 14229 compliant)
+# - Vortex Motors VTX ECM (with OEM-specific service IDs)
+#
+# Each ECU uses different CAN IDs for ISO-TP addressing.
+#
+# NOTE: Parameter conversions (DID → value) are now registered dynamically
+# via the /admin/conversions API at runtime.
+
+[server]
+host = "0.0.0.0"
+port = 9080
+
+[gateway]
+enabled = true
+id = "vehicle_gateway"
+name = "Vehicle Gateway"
+
+# ============================================================================
+# Standard UDS ECU
+# ============================================================================
+
+[ecu.standard_ecu]
+id = "standard_ecu"
+name = "Standard UDS ECU"
+description = "ISO 14229 compliant diagnostic ECU"
+
+[ecu.standard_ecu.transport]
+type = "socketcan"
+interface = "vcan0"
+bitrate = 500000
+
+[ecu.standard_ecu.transport.isotp]
+tx_id = "0x18DA00F1"
+rx_id = "0x18DAF100"
+tx_padding = 0xCC
+rx_padding = 0xCC
+block_size = 0
+st_min_us = 0
+tx_dl = 8
+
+[[ecu.standard_ecu.operations]]
+id = "self_test"
+name = "Run Self Test"
+rid = "0x0203"
+description = "Execute ECU self-test routine"
+security_level = 0
+
+# I/O Outputs for Standard ECU
+[[ecu.standard_ecu.outputs]]
+id = "led_status"
+name = "LED Status"
+ioid = "0xF000"
+default_value = "00"
+data_type = "uint8"
+allowed = ["off", "on"]
+description = "Status LED on/off control"
+security_level = 0
+
+[[ecu.standard_ecu.outputs]]
+id = "fan_speed"
+name = "Fan Speed"
+ioid = "0xF001"
+default_value = "0000"
+data_type = "uint16"
+unit = "rpm"
+min = 0.0
+max = 10000.0
+description = "Cooling fan motor speed"
+security_level = 0
+
+[[ecu.standard_ecu.outputs]]
+id = "relay_1"
+name = "Relay 1"
+ioid = "0xF002"
+default_value = "00"
+data_type = "uint8"
+allowed = ["off", "on"]
+description = "General purpose relay 1"
+security_level = 0
+
+# ============================================================================
+# Vortex Motors VTX ECM (OEM-specific service IDs)
+# ============================================================================
+
+[ecu.vortex_ecu]
+id = "vortex_ecu"
+name = "Vortex Motors VTX ECM"
+description = "Vortex Motors Engine Control Module with OEM-specific service IDs"
+
+[ecu.vortex_ecu.transport]
+type = "socketcan"
+interface = "vcan0"
+bitrate = 500000
+
+[ecu.vortex_ecu.transport.isotp]
+tx_id = "0x18DA01F1"
+rx_id = "0x18DAF101"
+tx_padding = 0xCC
+rx_padding = 0xCC
+block_size = 0
+st_min_us = 0
+tx_dl = 8
+
+# Vortex Motors-specific service ID overrides
+[ecu.vortex_ecu.service_overrides]
+read_data_by_periodic_id = 0xBB
+dynamically_define_data_id = 0xBA
+write_data_by_id = 0xBC
+
+[[ecu.vortex_ecu.operations]]
+id = "check_preconditions"
+name = "Check Programming Preconditions"
+rid = "0x0203"
+description = "Verify ECU is ready for programming"
+security_level = 0
+
+[[ecu.vortex_ecu.operations]]
+id = "dpf_regen"
+name = "DPF Regeneration"
+rid = "0x0301"
+description = "Initiate diesel particulate filter regeneration"
+security_level = 1
+
+# I/O Outputs for Vortex Motors ECU
+[[ecu.vortex_ecu.outputs]]
+id = "led_status"
+name = "LED Status"
+ioid = "0xF000"
+default_value = "00"
+data_type = "uint8"
+allowed = ["off", "on"]
+description = "Status LED on/off control"
+security_level = 0
+
+[[ecu.vortex_ecu.outputs]]
+id = "fan_speed"
+name = "Fan Speed"
+ioid = "0xF001"
+default_value = "0000"
+data_type = "uint16"
+unit = "rpm"
+min = 0.0
+max = 10000.0
+description = "Cooling fan motor speed"
+security_level = 0
+
+[[ecu.vortex_ecu.outputs]]
+id = "pwm_output"
+name = "PWM Output"
+ioid = "0xF004"
+default_value = "80"
+data_type = "uint8"
+scale = 0.392157
+unit = "%"
+min = 0.0
+max = 100.0
+description = "Pulse-width modulated output duty cycle"
+security_level = 0

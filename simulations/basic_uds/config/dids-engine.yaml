@@ -1,0 +1,59 @@
+meta:
+  name: Engine ECU
+  component_id: engine_ecu
+  version: "1.0"
+
+dids:
+  0xF40C:
+    id: engine_rpm
+    name: Engine RPM
+    type: uint16
+    byte_order: big
+    scale: 0.25
+    unit: rpm
+
+  0xF405:
+    id: coolant_temp
+    name: Coolant Temperature
+    type: uint8
+    scale: 1.0
+    offset: -40.0
+    unit: "°C"
+
+  0xF40D:
+    id: intake_pressure
+    name: Intake Manifold Pressure
+    type: uint8
+    unit: kPa
+
+  0xF40E:
+    id: vehicle_speed
+    name: Vehicle Speed
+    type: uint8
+    unit: km/h
+
+  0xF48A:
+    id: oil_pressure
+    name: Oil Pressure
+    type: uint16
+    byte_order: big
+    scale: 0.1
+    unit: kPa
+
+  0xF190:
+    id: vin
+    name: VIN
+    type: string
+    length: 17
+
+  0xF189:
+    id: software_version
+    name: ECU Software Version
+    type: string
+    length: 32
+
+  0xF199:
+    id: programming_date
+    name: Programming Date
+    type: string
+    writable: true

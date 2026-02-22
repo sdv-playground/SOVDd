@@ -1,0 +1,225 @@
+# VTX ECM Parameter Definitions
+
+# =============================================================================
+# Standard UDS DIDs (ISO 14229) - Public, readable in default session
+# =============================================================================
+
+[[parameters]]
+id = "vin"
+name = "Vehicle Identification Number"
+did = "0xF190"
+byte_length = 17
+data_type = "ascii"
+description = "17-character VIN"
+
+[[parameters]]
+id = "part_number"
+name = "ECU Part Number"
+did = "0xF187"
+byte_length = 16
+data_type = "ascii"
+description = "Vehicle Manufacturer Spare Part Number"
+
+[[parameters]]
+id = "serial_number"
+name = "ECU Serial Number"
+did = "0xF18C"
+byte_length = 11
+data_type = "ascii"
+description = "ECU Serial Number"
+
+[[parameters]]
+id = "hardware_number"
+name = "ECU Hardware Number"
+did = "0xF191"
+byte_length = 8
+data_type = "ascii"
+description = "Vehicle Manufacturer ECU Hardware Number"
+
+[[parameters]]
+id = "hardware_version"
+name = "Hardware Version"
+did = "0xF193"
+byte_length = 5
+data_type = "ascii"
+description = "System Supplier ECU Hardware Version"
+
+[[parameters]]
+id = "supplier_sw_version"
+name = "Supplier Software Version"
+did = "0xF195"
+byte_length = 13
+data_type = "ascii"
+description = "System Supplier ECU Software Version"
+
+# =============================================================================
+# Live Data Parameters
+# =============================================================================
+
+[[parameters]]
+id = "engine_rpm"
+name = "Engine Speed"
+did = "0xF40C"
+byte_length = 2
+data_type = "uint16"
+unit = "rpm"
+scale = 0.25
+offset = 0
+min = 0
+max = 8000
+description = "Engine rotational speed"
+
+[[parameters]]
+id = "coolant_temp"
+name = "Engine Coolant Temperature"
+did = "0xF405"
+byte_length = 1
+data_type = "uint8"
+unit = "°C"
+scale = 1.0
+offset = -40
+min = -40
+max = 215
+description = "Engine coolant temperature"
+
+[[parameters]]
+id = "oil_pressure"
+name = "Engine Oil Pressure"
+did = "0xF48A"
+byte_length = 2
+data_type = "uint16"
+unit = "kPa"
+scale = 0.1
+offset = 0
+min = 0
+max = 1000
+description = "Engine oil pressure"
+
+[[parameters]]
+id = "fuel_rate"
+name = "Engine Fuel Rate"
+did = "0xF40D"
+byte_length = 2
+data_type = "uint16"
+unit = "L/h"
+scale = 0.05
+offset = 0
+min = 0
+max = 500
+description = "Engine fuel consumption rate"
+
+[[parameters]]
+id = "vehicle_speed"
+name = "Vehicle Speed"
+did = "0xF40E"
+byte_length = 1
+data_type = "uint8"
+unit = "km/h"
+scale = 1.0
+offset = 0
+min = 0
+max = 255
+description = "Vehicle ground speed"
+
+[[parameters]]
+id = "boost_pressure"
+name = "Turbo Boost Pressure"
+did = "0xF42F"
+byte_length = 2
+data_type = "uint16"
+unit = "kPa"
+scale = 0.1
+offset = 0
+min = 0
+max = 500
+description = "Turbocharger boost pressure"
+
+[[parameters]]
+id = "intake_temp"
+name = "Intake Air Temperature"
+did = "0xF406"
+byte_length = 1
+data_type = "uint8"
+unit = "°C"
+scale = 1.0
+offset = -40
+min = -40
+max = 215
+description = "Engine intake air temperature"
+
+[[parameters]]
+id = "exhaust_temp"
+name = "Exhaust Gas Temperature"
+did = "0xF478"
+byte_length = 2
+data_type = "uint16"
+unit = "°C"
+scale = 0.1
+offset = 0
+min = 0
+max = 1000
+description = "Exhaust gas temperature"
+
+[[parameters]]
+id = "throttle_position"
+name = "Throttle Position"
+did = "0xF411"
+byte_length = 1
+data_type = "uint8"
+unit = "%"
+scale = 0.392157
+offset = 0
+min = 0
+max = 100
+description = "Throttle pedal position"
+
+[[parameters]]
+id = "engine_load"
+name = "Engine Load"
+did = "0xF404"
+byte_length = 1
+data_type = "uint8"
+unit = "%"
+scale = 0.392157
+offset = 0
+min = 0
+max = 100
+description = "Calculated engine load"
+
+# =============================================================================
+# Writable Parameters
+# =============================================================================
+
+[[parameters]]
+id = "programming_date"
+name = "Programming Date"
+did = "0xF199"
+byte_length = 4
+data_type = "raw"
+description = "ECU programming date (BCD format: YYYY-MM-DD)"
+writable = true
+
+[[parameters]]
+id = "installation_date"
+name = "Installation Date"
+did = "0xF19D"
+byte_length = 4
+data_type = "raw"
+description = "ECU installation date (BCD format: YYYY-MM-DD)"
+writable = true
+
+# Parameter Groups
+[[parameter_groups]]
+id = "engine_basics"
+name = "Basic Engine Parameters"
+parameters = ["engine_rpm", "coolant_temp", "oil_pressure", "engine_load"]
+
+[[parameter_groups]]
+id = "fuel_economy"
+name = "Fuel Economy Parameters"
+parameters = ["fuel_rate", "vehicle_speed", "throttle_position"]
+
+[[parameter_groups]]
+id = "temperatures"
+name = "Temperature Parameters"
+parameters = ["coolant_temp", "intake_temp", "exhaust_temp"]

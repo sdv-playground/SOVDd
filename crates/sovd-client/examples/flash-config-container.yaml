@@ -1,0 +1,20 @@
+# Flash client configuration for OEM Container
+# This config works with the manufacturer container server
+
+connection:
+  base_url: "http://localhost:8080"
+  api_key: "UPDATE_MGR_SECRET"
+  api_key_header: "X-API-Key"
+
+endpoints:
+  files: "/files"
+  flash: "/flash"
+
+timeouts:
+  upload_ms: 300000      # 5 min for large packages
+  flash_poll_ms: 500     # Poll every 500ms during flash
+  request_ms: 30000      # 30s general timeout
+  connect_ms: 10000      # 10s connect timeout
+
+# Optional: specify component for SOVD-style routing
+# component_id: "vtx_ecm"

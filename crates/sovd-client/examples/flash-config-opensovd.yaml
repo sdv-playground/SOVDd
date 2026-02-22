@@ -1,0 +1,27 @@
+# Flash client configuration for direct OpenSOVD access
+# This config works with the opensovd/SOVDd server directly
+
+connection:
+  base_url: "http://localhost:9080"
+  # No API key needed for direct access (security handled via UDS)
+
+endpoints:
+  # OpenSOVD-style paths
+  files: "/apps/sovd2uds/bulk-data/flashfiles"
+  flash: "/components/engine_ecu/x-sovd2uds-download"
+
+  # Optional: detailed endpoint overrides
+  detail:
+    files_list: "/apps/sovd2uds/bulk-data/flashfiles"
+    flash_transfer: "/components/engine_ecu/x-sovd2uds-download/flashtransfer"
+    flash_transfer_status: "/components/engine_ecu/x-sovd2uds-download/flashtransfer/{id}"
+    flash_transfer_exit: "/components/engine_ecu/x-sovd2uds-download/transferexit"
+    flash_reset: "/components/engine_ecu/operations/ecu_reset"
+
+timeouts:
+  upload_ms: 300000
+  flash_poll_ms: 500
+  request_ms: 30000
+  connect_ms: 10000
+
+component_id: "engine_ecu"
