@@ -117,10 +117,6 @@ dids:
 | Encrypted | - | DidStore | E2E encryption |
 | Hybrid | Optional | DidStore | Gradual rollout |
 
-## Documentation
-
-See [docs/did-conversion.md](../../docs/did-conversion.md) for full documentation.
-
 ## License
 
-MIT
+Apache-2.0

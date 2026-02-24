@@ -3,7 +3,7 @@ name: test-automation
 description: Running and interpreting SOVD e2e tests. Use when running tests, debugging test failures, adding new tests, or validating SOVD server functionality.
 metadata:
   author: sovd-team
-  version: "1.0"
+  version: "2.0"
 ---
 
 # Test Automation
@@ -15,78 +15,102 @@ This skill covers running, interpreting, and creating tests for the SOVD server.
 ```
 crates/sovd-tests/
 ├── tests/
-│   └── e2e_test.rs      # Main e2e test file
+│   ├── e2e_test.rs           # Main e2e test suite
+│   ├── gateway_e2e_test.rs   # Gateway-specific tests
+│   └── api_integration_test.rs
 └── src/
-    └── lib.rs           # Test utilities
+    └── lib.rs
 
-crates/example-ecu/          # ECU simulator for testing
+crates/example-ecu/           # ECU simulator (runs on vcan0)
 ├── src/
-│   ├── main.rs          # ECU simulator entry point
-│   ├── config.rs        # ECU configuration
-│   └── parameters.rs    # Simulated DIDs, DTCs, routines
+│   ├── main.rs               # Entry point with CLI args
+│   ├── config.rs             # Default ECU configuration (DIDs, DTCs, routines, outputs)
+│   ├── parameters.rs         # UDS request handling
+│   └── uds.rs                # UDS service dispatch
 ```
 
 ## Running Tests
 
-### All E2E Tests
+### Unit Tests (no vcan required)
 ```bash
-cargo test --test e2e_test
+cargo test --lib
 ```
 
-### Specific Test
+### All E2E Tests
 ```bash
-cargo test --test e2e_test test_read_vin -- --nocapture
+# Tests must run serially (shared vcan0)
+cargo test -p sovd-tests -- --test-threads=1
+```
+
+### Single Test
+```bash
+cargo test -p sovd-tests test_read_vin -- --test-threads=1
 ```
 
 ### With Debug Output
 ```bash
-RUST_LOG=debug cargo test --test e2e_test test_name -- --nocapture
+RUST_LOG=debug cargo test -p sovd-tests test_name -- --test-threads=1 --nocapture
 ```
 
-### Filtered Tests
+### Using the E2E Script
 ```bash
-# Run all DTC tests
-cargo test --test e2e_test dtc
+# Runs all e2e tests (sets up vcan, builds, runs)
+./run-e2e-tests.sh
 
-# Run all session tests
-cargo test --test e2e_test session
-
-# Run all security tests
-cargo test --test e2e_test security
+# Single test
+./run-e2e-tests.sh test_list_components
 ```
 
-## Test Categories
-
-| Category | Pattern | Description |
-|----------|---------|-------------|
-| Data | `test_read_*`, `test_write_*` | DID read/write |
-| Faults | `test_*fault*`, `test_*dtc*` | DTC operations |
-| Operations | `test_*routine*`, `test_*operation*` | Routine control |
-| Session | `test_*session*` | Session management |
-| Security | `test_*security*` | Authentication |
-| Software | `test_*download*`, `test_*upload*` | Flash operations |
-| Discovery | `test_*discovery*` | ECU discovery |
-| Streaming | `test_*stream*`, `test_*sse*` | Real-time data |
+### Full CI Check
+```bash
+./build-and-test.sh --all
+```
 
 ## Test Harness
 
-The `TestHarness` manages test infrastructure:
+The `TestHarness` in `e2e_test.rs` manages the full test lifecycle:
+
+1. Sets up vcan0 interface
+2. Starts `example-ecu` process on vcan0
+3. Creates a test TOML config (inline in the test file)
+4. Starts `sovdd` server on port 18080
+5. Provides a `SovdClient` for making SOVD API calls
+
+### TestHarness API
 
 ```rust
 let harness = TestHarness::new().await?;
 
-// Make requests
-let (status, json) = harness.get("/vehicle/v1/components").await?;
-let (status, json) = harness.post("/path", json_body).await?;
-let (status, json) = harness.put("/path", json_body).await?;
-let status = harness.delete("/path").await?;
+// Get a typed SOVD client
+let client = harness.sovd_client();
+
+// Direct HTTP access
+let http = harness.http_client();
+let base = harness.base_url();  // "http://localhost:18080"
 ```
 
-### Harness Setup
-- Starts `example-ecu` simulator on vcan0
-- Starts `sovdd` server on port 18080
-- Uploads test DID definitions
-- Provides HTTP client methods
+### TestHarnessOptions
+
+```rust
+let opts = TestHarnessOptions {
+    block_counter_start: 1,  // 0 or 1
+    block_counter_wrap: 0,   // wrap-to value at 255
+    supports_rollback: true, // enable commit/rollback
+};
+let harness = TestHarness::new_with_options(opts).await?;
+```
+
+### Helper Methods
+
+```rust
+// Set up programming session + security for flash tests
+harness.setup_programming_and_security().await?;
+
+// Set up extended session + security (for commit/rollback after ECU reset)
+harness.setup_extended_and_security().await?;
+```
+
+Both helpers follow: `set_session()` → `security_access_request_seed()` → XOR with 0xFF → `security_access_send_key()`.
 
 ## Writing New Tests
 
@@ -99,13 +123,10 @@ async fn test_my_feature() {
         .await
         .expect("Failed to create test harness");
 
-    // Test implementation
-    let (status, json) = harness.get("/vehicle/v1/components/vtx_ecm/data/vin")
-        .await
-        .expect("Request failed");
+    let client = harness.sovd_client();
 
-    assert_eq!(status, 200);
-    assert!(json["value"].is_string());
+    let data = client.read_data("vtx_ecm", "vin").await.unwrap();
+    assert!(data.value.is_string());
 }
 ```
 
@@ -113,18 +134,16 @@ async fn test_my_feature() {
 ```rust
 #[tokio::test]
 #[serial_test::serial]
-async fn test_extended_session_feature() {
+async fn test_extended_feature() {
     let harness = TestHarness::new().await.expect("Harness failed");
+    let client = harness.sovd_client();
 
     // Switch to extended session
-    let body = serde_json::json!({"value": "extended"});
-    let (status, _) = harness.put("/vehicle/v1/components/vtx_ecm/modes/session", body)
-        .await
-        .expect("Session change failed");
-    assert_eq!(status, 200);
+    client.set_session("vtx_ecm", SessionType::Extended).await.unwrap();
 
     // Now test extended-session feature
-    // ...
+    let data = client.read_data("vtx_ecm", "engine_rpm").await.unwrap();
+    assert!(data.value.is_number());
 }
 ```
 
@@ -134,145 +153,86 @@ async fn test_extended_session_feature() {
 #[serial_test::serial]
 async fn test_protected_feature() {
     let harness = TestHarness::new().await.expect("Harness failed");
+    let client = harness.sovd_client();
 
-    // Extended session first
-    let body = serde_json::json!({"value": "extended"});
-    harness.put("/vehicle/v1/components/vtx_ecm/modes/session", body)
-        .await.expect("Session failed");
+    // Extended session
+    client.set_session("vtx_ecm", SessionType::Extended).await.unwrap();
 
-    // Request seed
-    let body = serde_json::json!({"value": "level1_requestseed"});
-    let (_, json) = harness.put("/vehicle/v1/components/vtx_ecm/modes/security", body)
-        .await.expect("Seed request failed");
-
-    let seed = json["seed"].as_str().unwrap();
-    let key = calculate_key(seed);  // XOR with secret
-
-    // Send key
-    let body = serde_json::json!({"value": "level1", "key": key});
-    let (status, _) = harness.put("/vehicle/v1/components/vtx_ecm/modes/security", body)
-        .await.expect("Key send failed");
-    assert_eq!(status, 200);
+    // Security access: request seed, XOR with 0xFF, send key
+    let seed = client.security_access_request_seed("vtx_ecm", SecurityLevel::LEVEL_1).await.unwrap();
+    let key: Vec<u8> = seed.iter().map(|b| b ^ 0xFF).collect();
+    client.security_access_send_key("vtx_ecm", SecurityLevel::LEVEL_1, &key).await.unwrap();
 
     // Now test protected feature
-    // ...
 }
 ```
 
-## Common Assertions
-
+### Flash Test
 ```rust
-// Status code
-assert_eq!(status, 200);
-assert_eq!(status, 201);  // Created
-assert_eq!(status, 204);  // No Content
-assert_eq!(status, 400);  // Bad Request
-assert_eq!(status, 403);  // Forbidden (security required)
-assert_eq!(status, 404);  // Not Found
-assert_eq!(status, 412);  // Precondition Failed (session required)
+#[tokio::test]
+#[serial_test::serial]
+async fn test_flash_workflow() {
+    let harness = TestHarness::new_with_options(TestHarnessOptions {
+        supports_rollback: true,
+        ..Default::default()
+    }).await.expect("Harness failed");
 
-// JSON fields
-assert!(json["value"].is_string());
-assert_eq!(json["count"].as_u64(), Some(5));
-assert!(json["items"].is_array());
-assert!(json["error"].is_null());
+    // Session + security setup required before start_flash
+    harness.setup_programming_and_security().await.unwrap();
 
-// String content
-let value = json["value"].as_str().unwrap();
-assert!(value.contains("expected"));
-assert_eq!(value.len(), 17);  // VIN length
-```
-
-## Debugging Test Failures
-
-### 1. Check Test Output
-```bash
-cargo test --test e2e_test test_name -- --nocapture 2>&1 | tee test.log
-```
-
-### 2. Check Server Logs
-```bash
-RUST_LOG=debug cargo test --test e2e_test test_name -- --nocapture 2>&1 | \
-  grep -E "(sovdd|sovd_uds|sovd_api)"
-```
-
-### 3. Check ECU Simulator
-```bash
-RUST_LOG=debug cargo test --test e2e_test test_name -- --nocapture 2>&1 | \
-  grep "example_ecu"
-```
-
-### 4. Check UDS Messages
-```bash
-RUST_LOG=debug cargo test --test e2e_test test_name -- --nocapture 2>&1 | \
-  grep -E "(Incoming message|UDS request|UDS response)"
+    let client = harness.sovd_client();
+    // ... upload, verify, flash, poll, finalize, reset, commit
+}
 ```
 
 ## Test ECU Configuration
 
-The example-ecu simulator is configured with:
-
-### Parameters (DIDs)
-| DID | Name | Access | Description |
-|-----|------|--------|-------------|
-| 0xF190 | vin | public | VIN (WF0XXXGCDX1234567) |
-| 0xF187 | part_number | public | Part number |
-| 0x1000 | engine_speed | extended | Engine RPM |
-| 0x2000 | programming_date | protected | Requires security |
-
-### DTCs
-| DTC | Status | Description |
-|-----|--------|-------------|
-| P0100 | Active | MAF sensor |
-| P0300 | Confirmed | Misfire |
-| C0035 | Pending | ABS sensor |
-
-### Routines
-| RID | Name | Description |
-|-----|------|-------------|
-| 0xFF00 | self_test | Run self-test |
-| 0xFF01 | clear_adaptation | Clear learned values |
+The test harness uses `vtx_ecm` as the component ID. The ECU config is generated inline in the test file with the default example-ecu parameters.
 
 ### Security
-- Level 1: XOR algorithm with secret `[0x12, 0x34, 0x56, 0x78]`
+- Algorithm: XOR with secret
+- Default secret: `0xFF` (single byte)
+- Key calculation: `key[i] = seed[i] ^ 0xFF`
 
-## Continuous Integration
+### Key Parameters
+| DID | ID | Access |
+|-----|-----|--------|
+| 0xF190 | vin | Default session |
+| 0xF40C | engine_rpm | Extended session |
+| 0xF42F | boost_pressure | Extended + Security L1 |
+| 0xF199 | programming_date | Writable, Extended session |
 
-Tests run automatically on:
-- Pull requests
-- Main branch pushes
+### DTCs
+| Code | Status | Description |
+|------|--------|-------------|
+| P0101 | 0x09 (active) | Mass Air Flow Circuit |
+| P0300 | 0x24 (pending) | Random Cylinder Misfire |
+| C0420 | 0x28 (historical) | Steering Angle Sensor |
+| B1234 | 0x89 (active+MIL) | Airbag Warning Circuit |
+| U0100 | 0x28 (historical) | Lost Communication |
 
-### CI Script
+### Routines
+| RID | Name | Access |
+|-----|------|--------|
+| 0x0203 | Check Programming Preconditions | Extended session |
+| 0xFF00 | Erase Memory | Programming + Security |
+| 0xFF01 | Firmware Commit | Extended + Security |
+| 0xFF02 | Firmware Rollback | Extended + Security |
+
+## Debugging Test Failures
+
 ```bash
-./run-e2e-tests.sh
+# Full debug output
+RUST_LOG=debug cargo test -p sovd-tests test_name -- --test-threads=1 --nocapture 2>&1 | tee test.log
+
+# Filter by module
+grep -E "(sovdd|sovd_uds|sovd_api)" test.log    # Server logs
+grep "example_ecu" test.log                       # ECU simulator logs
+grep -E "(UDS request|UDS response)" test.log     # UDS traffic
 ```
 
-This script:
-1. Sets up vcan0 interface
-2. Builds all crates
-3. Runs e2e tests
-4. Reports results
-
-## Test Coverage
-
-Current test coverage by feature:
-
-| Feature | Tests | Status |
-|---------|-------|--------|
-| Component listing | 2 | ✓ |
-| DID read (public) | 5 | ✓ |
-| DID read (extended) | 3 | ✓ |
-| DID read (protected) | 2 | ✓ |
-| DID write | 4 | ✓ |
-| DTC read | 4 | ✓ |
-| DTC clear | 2 | ✓ |
-| Routines | 3 | ✓ |
-| Session control | 4 | ✓ |
-| Security access | 3 | ✓ |
-| Software download | 4 | ✓ |
-| Software upload | 2 | ✓ |
-| ECU discovery | 2 | ✓ |
-| SSE streaming | 2 | ✓ |
-| I/O control | 3 | ✓ |
-
-See [scripts/run-test.sh](scripts/run-test.sh) for a helper script.
+Common failure causes:
+- **vcan0 not set up**: Run `sudo modprobe vcan && sudo ip link add vcan0 type vcan && sudo ip link set vcan0 up`
+- **Port conflict**: Another sovdd instance running on 18080
+- **Session/security not set**: Flash tests need `setup_programming_and_security()` before `start_flash()`
+- **Serial execution**: Tests share vcan0, always use `--test-threads=1`

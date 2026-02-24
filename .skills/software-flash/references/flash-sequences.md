@@ -64,10 +64,11 @@ Low nibble: Number of bytes for memory address
 
 ## Block Sequence Counter
 
-- Starts at 1 (not 0)
+- Start value is configurable: 0 (some OEMs) or 1 (ISO 14229 default)
 - Increments with each TransferData
-- Wraps from 255 to 0
+- Wraps from 255 back to the configured start value
 - ECU tracks expected counter
+- In SOVDd, configured via `transfer_data_block_counter_start` in the TOML config
 
 ## Error Recovery
 
