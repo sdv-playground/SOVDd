@@ -96,8 +96,8 @@ impl IoControlAction {
         }
     }
 
-    /// Parse from string
-    pub fn from_str(s: &str) -> Option<Self> {
+    /// Parse from string representation
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "return_to_ecu" | "returncontrol" | "return" => Some(IoControlAction::ReturnToEcu),
             "reset_to_default" | "resettodefault" | "reset" => {

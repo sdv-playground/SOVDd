@@ -178,10 +178,8 @@ impl TransportAdapter for SocketCanAdapter {
                             return Ok(msg.data);
                         }
                         // Negative response (0x7F)
-                        if first_byte == 0x7F {
-                            if msg.data.get(1) == Some(&request_sid) {
-                                return Ok(msg.data);
-                            }
+                        if first_byte == 0x7F && msg.data.get(1) == Some(&request_sid) {
+                            return Ok(msg.data);
                         }
                         // Otherwise, it's a different message (e.g., periodic data)
                         // Continue waiting for our response

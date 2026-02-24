@@ -8,9 +8,10 @@ mod manager;
 pub use manager::{LinkState, SecurityAccessState, SessionError, SessionManager};
 
 /// UDS session state
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum SessionState {
     /// Default session (0x01)
+    #[default]
     Default,
     /// Programming session (0x02)
     Programming,
@@ -18,10 +19,4 @@ pub enum SessionState {
     Extended,
     /// Engineering/development session (0x60) with security level
     Engineering { security_level: u8 },
-}
-
-impl Default for SessionState {
-    fn default() -> Self {
-        Self::Default
-    }
 }

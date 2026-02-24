@@ -331,7 +331,6 @@ transfer_data_block_counter_wrap = {}
 [session.security]
 enabled = true
 level = 1
-secret = "ff"
 
 [ecu.vtx_ecm]
 name = "VTX ECM"
@@ -573,6 +572,64 @@ security_level = 0
     fn flash_client(&self) -> sovd_client::FlashClient {
         sovd_client::FlashClient::for_sovd(&self.base_url, "vtx_ecm")
             .expect("Failed to create flash client")
+    }
+
+    /// Set up programming session and security access for flash operations.
+    ///
+    /// The server no longer auto-unlocks during start_flash(), so tests must
+    /// set up the programming session and security access explicitly.
+    async fn setup_programming_and_security(&self) -> Result<(), Box<dyn std::error::Error>> {
+        use sovd_client::{SecurityLevel, SessionType};
+
+        let client = self.sovd_client();
+
+        client
+            .set_session("vtx_ecm", SessionType::Programming)
+            .await
+            .expect("set_session programming failed");
+
+        let seed = client
+            .security_access_request_seed("vtx_ecm", SecurityLevel::LEVEL_1)
+            .await
+            .expect("security_access_request_seed failed");
+
+        let key: Vec<u8> = seed.iter().map(|b| b ^ 0xFF).collect();
+
+        client
+            .security_access_send_key("vtx_ecm", SecurityLevel::LEVEL_1, &key)
+            .await
+            .expect("security_access_send_key failed");
+
+        Ok(())
+    }
+
+    /// Set up extended session and security access for commit/rollback operations.
+    ///
+    /// After ECU reset the session reverts to default, so commit/rollback routines
+    /// (which require extended session + security) need this setup.
+    async fn setup_extended_and_security(&self) -> Result<(), Box<dyn std::error::Error>> {
+        use sovd_client::{SecurityLevel, SessionType};
+
+        let client = self.sovd_client();
+
+        client
+            .set_session("vtx_ecm", SessionType::Extended)
+            .await
+            .expect("set_session extended failed");
+
+        let seed = client
+            .security_access_request_seed("vtx_ecm", SecurityLevel::LEVEL_1)
+            .await
+            .expect("security_access_request_seed failed");
+
+        let key: Vec<u8> = seed.iter().map(|b| b ^ 0xFF).collect();
+
+        client
+            .security_access_send_key("vtx_ecm", SecurityLevel::LEVEL_1, &key)
+            .await
+            .expect("security_access_send_key failed");
+
+        Ok(())
     }
 
     /// Create a valid firmware package for testing
@@ -2897,6 +2954,12 @@ async fn test_start_flash_transfer() {
     assert!(verify_resp.valid, "Expected file to be valid");
     eprintln!("File verified: checksum={:?}", verify_resp.checksum);
 
+    // Set up programming session + security before flash
+    harness
+        .setup_programming_and_security()
+        .await
+        .expect("setup_programming_and_security failed");
+
     // Start flash transfer
     let flash_resp = flash_client
         .start_flash(file_id)
@@ -2937,6 +3000,12 @@ async fn test_flash_transfer_status() {
         .verify_file(file_id)
         .await
         .expect("Verify failed");
+
+    // Set up programming session + security before flash
+    harness
+        .setup_programming_and_security()
+        .await
+        .expect("setup_programming_and_security failed");
 
     // Start flash
     let flash_resp = flash_client
@@ -3000,6 +3069,12 @@ async fn test_finalize_flash_transfer() {
         .verify_file(file_id)
         .await
         .expect("Verify failed");
+
+    // Set up programming session + security before flash
+    harness
+        .setup_programming_and_security()
+        .await
+        .expect("setup_programming_and_security failed");
 
     // Start flash
     let flash_resp = flash_client
@@ -3217,6 +3292,12 @@ async fn test_abort_flash_transfer() {
         .await
         .expect("verify_file failed");
 
+    // Set up programming session + security before flash
+    harness
+        .setup_programming_and_security()
+        .await
+        .expect("setup_programming_and_security failed");
+
     // Start flash
     let flash_resp = flash_client
         .start_flash(file_id)
@@ -3290,8 +3371,15 @@ async fn test_complete_flash_workflow() {
     assert!(verify_resp.valid, "File verification failed");
     eprintln!("  Checksum: {:?}", verify_resp.checksum);
 
-    // Step 3: Start flash transfer
-    eprintln!("Step 3: Starting flash transfer...");
+    // Step 3: Set up programming session + security
+    eprintln!("Step 3: Setting up programming session + security...");
+    harness
+        .setup_programming_and_security()
+        .await
+        .expect("setup_programming_and_security failed");
+
+    // Step 4: Start flash transfer
+    eprintln!("Step 4: Starting flash transfer...");
     let flash_resp = flash_client
         .start_flash(file_id)
         .await
@@ -3299,8 +3387,8 @@ async fn test_complete_flash_workflow() {
     let transfer_id = &flash_resp.transfer_id;
     eprintln!("  Transfer ID: {}", transfer_id);
 
-    // Step 4: Poll until complete with progress callback
-    eprintln!("Step 4: Polling transfer status...");
+    // Step 5: Poll until complete with progress callback
+    eprintln!("Step 5: Polling transfer status...");
     let start_time = std::time::Instant::now();
 
     let status = flash_client
@@ -3320,8 +3408,8 @@ async fn test_complete_flash_workflow() {
     let transfer_time = start_time.elapsed();
     eprintln!("  Final state: {:?}", status.state);
 
-    // Step 5: Finalize
-    eprintln!("Step 5: Finalizing transfer...");
+    // Step 6: Finalize
+    eprintln!("Step 6: Finalizing transfer...");
     let exit_resp = flash_client
         .transfer_exit()
         .await
@@ -3341,8 +3429,8 @@ async fn test_complete_flash_workflow() {
         final_status.state
     );
 
-    // Step 6: ECU Reset to apply firmware update
-    eprintln!("Step 6: Resetting ECU to apply firmware...");
+    // Step 7: ECU Reset to apply firmware update
+    eprintln!("Step 7: Resetting ECU to apply firmware...");
     let reset_resp = flash_client
         .ecu_reset_with_type("hard")
         .await
@@ -3353,8 +3441,8 @@ async fn test_complete_flash_workflow() {
     // Wait for ECU to come back
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    // Step 7: Verify software version was updated
-    eprintln!("Step 7: Verifying software version...");
+    // Step 8: Verify software version was updated
+    eprintln!("Step 8: Verifying software version...");
     let client = harness.sovd_client();
     let version_data = client
         .read_data("vtx_ecm", "ecu_sw_version")
@@ -3427,16 +3515,23 @@ async fn test_flash_workflow_block_counter_1() {
         .expect("Verify failed");
     assert!(verify_resp.valid, "File verification failed");
 
-    // Step 3: Start flash transfer
-    eprintln!("Step 3: Starting flash transfer (block_counter_start=1)...");
+    // Step 3: Set up programming session + security
+    eprintln!("Step 3: Setting up programming session + security...");
+    harness
+        .setup_programming_and_security()
+        .await
+        .expect("setup_programming_and_security failed");
+
+    // Step 4: Start flash transfer
+    eprintln!("Step 4: Starting flash transfer (block_counter_start=1)...");
     let flash_resp = flash_client
         .start_flash(file_id)
         .await
         .expect("Start flash failed");
     let transfer_id = &flash_resp.transfer_id;
 
-    // Step 4: Poll until complete
-    eprintln!("Step 4: Polling transfer status...");
+    // Step 5: Poll until complete
+    eprintln!("Step 5: Polling transfer status...");
     let status = flash_client
         .poll_flash_complete(
             transfer_id,
@@ -3453,8 +3548,8 @@ async fn test_flash_workflow_block_counter_1() {
 
     eprintln!("  Final state: {:?}", status.state);
 
-    // Step 5: Finalize
-    eprintln!("Step 5: Finalizing transfer...");
+    // Step 6: Finalize
+    eprintln!("Step 6: Finalizing transfer...");
     let exit_resp = flash_client
         .transfer_exit()
         .await
@@ -3473,8 +3568,8 @@ async fn test_flash_workflow_block_counter_1() {
         final_status.state
     );
 
-    // Step 6: ECU Reset
-    eprintln!("Step 6: Resetting ECU...");
+    // Step 7: ECU Reset
+    eprintln!("Step 7: Resetting ECU...");
     let reset_resp = flash_client
         .ecu_reset_with_type("hard")
         .await
@@ -3484,8 +3579,8 @@ async fn test_flash_workflow_block_counter_1() {
     // Wait for ECU to come back
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    // Step 7: Verify software version
-    eprintln!("Step 7: Verifying software version...");
+    // Step 8: Verify software version
+    eprintln!("Step 8: Verifying software version...");
     let client = harness.sovd_client();
     let version_data = client
         .read_data("vtx_ecm", "ecu_sw_version")
@@ -5010,16 +5105,23 @@ async fn test_flash_commit_workflow() {
         .expect("Verify failed");
     assert!(verify_resp.valid, "File verification failed");
 
-    // Step 3: Start flash transfer
-    eprintln!("Step 3: Starting flash transfer...");
+    // Step 3: Set up programming session + security
+    eprintln!("Step 3: Setting up programming session + security...");
+    harness
+        .setup_programming_and_security()
+        .await
+        .expect("setup_programming_and_security failed");
+
+    // Step 4: Start flash transfer
+    eprintln!("Step 4: Starting flash transfer...");
     let flash_resp = flash_client
         .start_flash(file_id)
         .await
         .expect("Start flash failed");
     let transfer_id = &flash_resp.transfer_id;
 
-    // Step 4: Poll until complete
-    eprintln!("Step 4: Polling transfer status...");
+    // Step 5: Poll until complete
+    eprintln!("Step 5: Polling transfer status...");
     let _status = flash_client
         .poll_flash_complete(
             transfer_id,
@@ -5034,16 +5136,16 @@ async fn test_flash_commit_workflow() {
         .await
         .expect("Flash polling failed");
 
-    // Step 5: Finalize (transfer exit)
-    eprintln!("Step 5: Finalizing transfer...");
+    // Step 6: Finalize (transfer exit)
+    eprintln!("Step 6: Finalizing transfer...");
     let exit_resp = flash_client
         .transfer_exit()
         .await
         .expect("Transfer exit failed");
     assert!(exit_resp.success, "Transfer exit failed");
 
-    // Step 5b: Verify flash state is AwaitingReset (use get_flash_status to avoid auto-detect)
-    eprintln!("Step 5b: Verifying AwaitingReset state...");
+    // Step 6b: Verify flash state is AwaitingReset (use get_flash_status to avoid auto-detect)
+    eprintln!("Step 6b: Verifying AwaitingReset state...");
     let flash_status = flash_client
         .get_flash_status(transfer_id)
         .await
@@ -5056,8 +5158,8 @@ async fn test_flash_commit_workflow() {
         flash_status.state
     );
 
-    // Step 6: ECU Reset
-    eprintln!("Step 6: Resetting ECU...");
+    // Step 7: ECU Reset
+    eprintln!("Step 7: Resetting ECU...");
     let reset_resp = flash_client
         .ecu_reset_with_type("hard")
         .await
@@ -5066,8 +5168,8 @@ async fn test_flash_commit_workflow() {
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    // Step 7: Check activation state — should be "activated" (transitioned by ecu_reset)
-    eprintln!("Step 7: Checking activation state...");
+    // Step 8: Check activation state — should be "activated" (transitioned by ecu_reset)
+    eprintln!("Step 8: Checking activation state...");
     let activation = flash_client
         .get_activation_state()
         .await
@@ -5079,16 +5181,23 @@ async fn test_flash_commit_workflow() {
     assert!(activation.supports_rollback);
     assert_eq!(activation.state, "activated");
 
-    // Step 8: Commit firmware
-    eprintln!("Step 8: Committing firmware...");
+    // Step 9: Set up extended session + security for commit
+    eprintln!("Step 9: Setting up extended session + security for commit...");
+    harness
+        .setup_extended_and_security()
+        .await
+        .expect("setup_extended_and_security failed");
+
+    // Step 10: Commit firmware
+    eprintln!("Step 10: Committing firmware...");
     let commit_resp = flash_client
         .commit_flash()
         .await
         .expect("commit_flash failed");
     assert!(commit_resp.success, "Commit failed");
 
-    // Step 9: Verify state is now "committed"
-    eprintln!("Step 9: Verifying committed state...");
+    // Step 11: Verify state is now "committed"
+    eprintln!("Step 11: Verifying committed state...");
     let activation = flash_client
         .get_activation_state()
         .await
@@ -5096,8 +5205,8 @@ async fn test_flash_commit_workflow() {
     eprintln!("  State: {}", activation.state);
     assert_eq!(activation.state, "committed");
 
-    // Step 10: Verify software version was updated
-    eprintln!("Step 10: Verifying software version...");
+    // Step 12: Verify software version was updated
+    eprintln!("Step 12: Verifying software version...");
     let client = harness.sovd_client();
     let version_data = client
         .read_data("vtx_ecm", "ecu_sw_version")
@@ -5162,6 +5271,12 @@ async fn test_flash_rollback_workflow() {
         .await
         .expect("Verify failed");
 
+    // Set up programming session + security before flash
+    harness
+        .setup_programming_and_security()
+        .await
+        .expect("setup_programming_and_security failed");
+
     let flash_resp = flash_client
         .start_flash(file_id)
         .await
@@ -5218,16 +5333,23 @@ async fn test_flash_rollback_workflow() {
     eprintln!("  Active version after flash: {}", active_version);
     assert_eq!(active_version, new_version);
 
-    // Step 4: Rollback
-    eprintln!("Step 4: Rolling back firmware...");
+    // Step 4: Set up extended session + security for rollback
+    eprintln!("Step 4: Setting up extended session + security for rollback...");
+    harness
+        .setup_extended_and_security()
+        .await
+        .expect("setup_extended_and_security failed");
+
+    // Step 5: Rollback
+    eprintln!("Step 5: Rolling back firmware...");
     let rollback_resp = flash_client
         .rollback_flash()
         .await
         .expect("rollback_flash failed");
     assert!(rollback_resp.success, "Rollback failed");
 
-    // Step 5: Verify state is "rolled_back"
-    eprintln!("Step 5: Verifying rolled back state...");
+    // Step 6: Verify state is "rolled_back"
+    eprintln!("Step 6: Verifying rolled back state...");
     let activation = flash_client
         .get_activation_state()
         .await
@@ -5235,8 +5357,8 @@ async fn test_flash_rollback_workflow() {
     eprintln!("  State: {}", activation.state);
     assert_eq!(activation.state, "rolled_back");
 
-    // Step 6: Verify old version is restored
-    eprintln!("Step 6: Verifying restored version...");
+    // Step 7: Verify old version is restored
+    eprintln!("Step 7: Verifying restored version...");
     let version_data = client
         .read_data("vtx_ecm", "ecu_sw_version")
         .await
@@ -5379,8 +5501,15 @@ async fn test_abort_during_awaiting_exit() {
         .await
         .expect("Verify failed");
 
+    // Set up programming session + security
+    eprintln!("Step 2: Setting up programming session + security...");
+    harness
+        .setup_programming_and_security()
+        .await
+        .expect("setup_programming_and_security failed");
+
     // Start flash and poll until complete (AwaitingExit)
-    eprintln!("Step 2: Flash and poll to AwaitingExit...");
+    eprintln!("Step 3: Flash and poll to AwaitingExit...");
     let flash_resp = flash_client
         .start_flash(file_id)
         .await
@@ -5475,6 +5604,12 @@ async fn test_abort_after_activated_rejected() {
         .await
         .expect("Verify failed");
 
+    // Set up programming session + security before flash
+    harness
+        .setup_programming_and_security()
+        .await
+        .expect("setup_programming_and_security failed");
+
     let flash_resp = flash_client
         .start_flash(file_id)
         .await
@@ -5534,8 +5669,15 @@ async fn test_abort_after_activated_rejected() {
         "State should still be activated"
     );
 
-    // Step 6: Rollback should work (proving it's the correct mechanism)
-    eprintln!("Step 6: Rollback (correct mechanism)...");
+    // Step 6: Set up extended session + security for rollback
+    eprintln!("Step 6: Setting up extended session + security for rollback...");
+    harness
+        .setup_extended_and_security()
+        .await
+        .expect("setup_extended_and_security failed");
+
+    // Step 7: Rollback should work (proving it's the correct mechanism)
+    eprintln!("Step 7: Rollback (correct mechanism)...");
     let rollback_resp = flash_client
         .rollback_flash()
         .await
@@ -5585,6 +5727,12 @@ async fn test_abort_after_committed_rejected() {
         .await
         .expect("Verify failed");
 
+    // Set up programming session + security before flash
+    harness
+        .setup_programming_and_security()
+        .await
+        .expect("setup_programming_and_security failed");
+
     let flash_resp = flash_client
         .start_flash(file_id)
         .await
@@ -5620,7 +5768,14 @@ async fn test_abort_after_committed_rejected() {
     assert!(reset_resp.success);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    eprintln!("Step 4: Commit firmware...");
+    // Set up extended session + security for commit
+    eprintln!("Step 4: Setting up extended session + security for commit...");
+    harness
+        .setup_extended_and_security()
+        .await
+        .expect("setup_extended_and_security failed");
+
+    eprintln!("Step 5: Commit firmware...");
     let commit_resp = flash_client
         .commit_flash()
         .await
@@ -5633,8 +5788,8 @@ async fn test_abort_after_committed_rejected() {
         .expect("get_activation_state failed");
     assert_eq!(activation.state, "committed");
 
-    // Step 5: Attempt abort — should fail
-    eprintln!("Step 5: Attempting abort (should be rejected)...");
+    // Step 6: Attempt abort — should fail
+    eprintln!("Step 6: Attempting abort (should be rejected)...");
     let abort_result = flash_client.abort_flash(transfer_id).await;
     assert!(abort_result.is_err(), "Abort should fail after commit");
     eprintln!("  Got expected error: {}", abort_result.unwrap_err());
@@ -5686,6 +5841,12 @@ async fn test_abort_after_rolledback_rejected() {
         .await
         .expect("Verify failed");
 
+    // Set up programming session + security before flash
+    harness
+        .setup_programming_and_security()
+        .await
+        .expect("setup_programming_and_security failed");
+
     let flash_resp = flash_client
         .start_flash(file_id)
         .await
@@ -5721,7 +5882,14 @@ async fn test_abort_after_rolledback_rejected() {
     assert!(reset_resp.success);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    eprintln!("Step 4: Rollback firmware...");
+    // Set up extended session + security for rollback
+    eprintln!("Step 4: Setting up extended session + security for rollback...");
+    harness
+        .setup_extended_and_security()
+        .await
+        .expect("setup_extended_and_security failed");
+
+    eprintln!("Step 5: Rollback firmware...");
     let rollback_resp = flash_client
         .rollback_flash()
         .await
@@ -5734,8 +5902,8 @@ async fn test_abort_after_rolledback_rejected() {
         .expect("get_activation_state failed");
     assert_eq!(activation.state, "rolled_back");
 
-    // Step 5: Attempt abort — should fail
-    eprintln!("Step 5: Attempting abort (should be rejected)...");
+    // Step 6: Attempt abort — should fail
+    eprintln!("Step 6: Attempting abort (should be rejected)...");
     let abort_result = flash_client.abort_flash(transfer_id).await;
     assert!(abort_result.is_err(), "Abort should fail after rollback");
     eprintln!("  Got expected error: {}", abort_result.unwrap_err());
@@ -5787,6 +5955,12 @@ async fn test_abort_after_awaiting_reset_rejected() {
         .verify_file(file_id)
         .await
         .expect("Verify failed");
+
+    // Set up programming session + security before flash
+    harness
+        .setup_programming_and_security()
+        .await
+        .expect("setup_programming_and_security failed");
 
     let flash_resp = flash_client
         .start_flash(file_id)

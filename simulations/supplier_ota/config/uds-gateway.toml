@@ -40,9 +40,6 @@ interface = "vcan1"
 tx_id = "0x18DA00F1"
 rx_id = "0x18DAF100"
 
-[ecu.engine_ecu.security]
-secret = "ff"
-
 [ecu.engine_ecu.session]
 transfer_data_block_counter_start = 1
 transfer_data_block_counter_wrap = 1
@@ -188,9 +185,6 @@ interface = "vcan1"
 tx_id = "0x18DA01F1"
 rx_id = "0x18DAF101"
 
-[ecu.transmission_ecu.security]
-secret = "aa"
-
 [ecu.transmission_ecu.session]
 transfer_data_block_counter_start = 1
 transfer_data_block_counter_wrap = 1
@@ -280,9 +274,6 @@ interface = "vcan1"
 [ecu.body_ecu.transport.isotp]
 tx_id = "0x18DA02F1"
 rx_id = "0x18DAF102"
-
-[ecu.body_ecu.security]
-secret = "bb"
 
 [ecu.body_ecu.session]
 transfer_data_block_counter_start = 1

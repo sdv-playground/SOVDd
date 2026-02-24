@@ -1428,7 +1428,7 @@ impl SimulatedEcu {
             );
         }
 
-        if data.is_empty() || data.len() % 4 != 0 {
+        if data.is_empty() || !data.len().is_multiple_of(4) {
             return negative_response(
                 service_id::DYNAMICALLY_DEFINE_DATA_ID,
                 nrc::INCORRECT_MESSAGE_LENGTH,
@@ -2115,7 +2115,7 @@ impl SimulatedEcu {
                 let baud_rate =
                     ((request[2] as u32) << 16) | ((request[3] as u32) << 8) | (request[4] as u32);
 
-                if baud_rate < 10000 || baud_rate > 1000000 {
+                if !(10000..=1000000).contains(&baud_rate) {
                     debug!(baud_rate, "Baud rate out of range");
                     return negative_response(service_id::LINK_CONTROL, nrc::REQUEST_OUT_OF_RANGE);
                 }
@@ -2126,7 +2126,7 @@ impl SimulatedEcu {
                 positive_response(service_id::LINK_CONTROL, &[sub_function])
             }
             link_control_sub_function::TRANSITION_BAUD_RATE => {
-                let pending = self.pending_baud_rate.read().clone();
+                let pending = *self.pending_baud_rate.read();
                 match pending {
                     Some(baud_rate) => {
                         *self.current_baud_rate.write() = baud_rate;

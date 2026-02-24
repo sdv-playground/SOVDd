@@ -6,20 +6,15 @@ use serde::Serialize;
 use tabled::{Table, Tabled};
 
 /// Output format options
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
     /// ASCII table format (default)
+    #[default]
     Table,
     /// JSON format
     Json,
     /// CSV format
     Csv,
-}
-
-impl Default for OutputFormat {
-    fn default() -> Self {
-        Self::Table
-    }
 }
 
 /// Context for output rendering

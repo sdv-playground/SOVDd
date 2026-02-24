@@ -220,7 +220,7 @@ pub async fn put_security_mode(
     let key_bytes = request
         .key
         .as_ref()
-        .map(|k| hex::decode(k))
+        .map(hex::decode)
         .transpose()
         .map_err(|e| ApiError::BadRequest(format!("Invalid hex key: {}", e)))?;
 

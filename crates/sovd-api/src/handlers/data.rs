@@ -665,7 +665,7 @@ pub fn convert_value_to_bytes(request: &WriteDidRequest) -> Result<Vec<u8>, ApiE
                 })
                 .collect()
         }
-        "auto" | _ => match &request.value {
+        _ => match &request.value {
             serde_json::Value::String(s) => {
                 // Try hex first if it looks like hex
                 if s.len() % 2 == 0 && s.chars().all(|c| c.is_ascii_hexdigit()) && s.len() >= 2 {

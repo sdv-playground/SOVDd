@@ -412,8 +412,8 @@ async fn load_config_file(
                     };
 
                     // Parse default flash config for discovered ECUs from [gateway.scan.flash]
-                    let scan_flash_config = load_flash_commit_config(scan_config)
-                        .unwrap_or_default();
+                    let scan_flash_config =
+                        load_flash_commit_config(scan_config).unwrap_or_default();
 
                     for ecu in discovered {
                         // Skip if this ECU's CAN IDs are already explicitly configured
@@ -538,18 +538,15 @@ async fn create_ecu_backend(
 
     // Per-ECU [ecu.*.security] section (gateway config pattern) — merge into session config
     if let Some(sec) = ecu_config.get("security") {
-        let secret = sec
-            .get("secret")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        if let Some(secret_str) = secret {
-            let level = sessions.security.as_ref().map(|s| s.level).unwrap_or(1);
-            sessions.security = Some(sovd_uds::config::SecurityConfig {
-                enabled: true,
-                level,
-                secret: Some(secret_str),
-            });
-        }
+        let level = sec.get("level").and_then(|v| v.as_integer()).unwrap_or(
+            sessions
+                .security
+                .as_ref()
+                .map(|s| s.level as i64)
+                .unwrap_or(1),
+        ) as u8;
+        let enabled = sec.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+        sessions.security = Some(sovd_uds::config::SecurityConfig { enabled, level });
     }
 
     // Parse per-ECU service overrides (for OEM variants like Vortex Motors)
@@ -703,16 +700,8 @@ fn parse_session_config(config: &toml::Value) -> anyhow::Result<SessionConfig> {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         let level = sec.get("level").and_then(|v| v.as_integer()).unwrap_or(1) as u8;
-        let secret = sec
-            .get("secret")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        if enabled || secret.is_some() {
-            Some(sovd_uds::config::SecurityConfig {
-                enabled,
-                level,
-                secret,
-            })
+        if enabled {
+            Some(sovd_uds::config::SecurityConfig { enabled, level })
         } else {
             None
         }

@@ -500,7 +500,7 @@ impl DiagnosticBackend for UdsBackend {
 
         // Parse DTC response - returns (status_availability_mask, dtcs)
         let (status_availability_mask, dtcs) =
-            parse_dtc_by_status_mask_response(&response).map_err(|e| BackendError::Protocol(e))?;
+            parse_dtc_by_status_mask_response(&response).map_err(BackendError::Protocol)?;
 
         // Convert DTCs to Faults
         let mut faults: Vec<Fault> = dtcs.iter().map(|dtc| self.dtc_to_fault(dtc)).collect();
@@ -1074,7 +1074,7 @@ impl DiagnosticBackend for UdsBackend {
                     )
                 })?;
 
-                if rate < 10000 || rate > 1000000 {
+                if !(10000..=1000000).contains(&rate) {
                     return Err(BackendError::InvalidRequest(format!(
                         "Baud rate {} out of range (10000-1000000)",
                         rate
@@ -1295,52 +1295,7 @@ impl DiagnosticBackend for UdsBackend {
             }
         }
 
-        // Switch to programming session before flash
-        let current = self.session_manager.current_state();
-        if !matches!(current, crate::session::SessionState::Programming) {
-            self.session_manager
-                .change_session(self.config.sessions.programming_session)
-                .await
-                .map_err(|e| {
-                    BackendError::Protocol(format!("Failed to enter programming session: {}", e))
-                })?;
-        }
-
-        // Security access (UDS 0x27) — unlock ECU if a secret is configured
-        if let Some(ref security) = self.config.sessions.security {
-            if let Some(ref secret_hex) = security.secret {
-                let secret_bytes = hex::decode(secret_hex).map_err(|e| {
-                    BackendError::Protocol(format!("Invalid security secret hex: {}", e))
-                })?;
-                let level = security.level;
-
-                let seed = self
-                    .session_manager
-                    .request_security_seed(level)
-                    .await
-                    .map_err(|e| {
-                        BackendError::Protocol(format!("Security seed request failed: {}", e))
-                    })?;
-
-                if !seed.is_empty() {
-                    // Compute key: XOR seed with secret (cycling over secret bytes)
-                    let key: Vec<u8> = seed
-                        .iter()
-                        .enumerate()
-                        .map(|(i, b)| b ^ secret_bytes[i % secret_bytes.len()])
-                        .collect();
-
-                    self.session_manager
-                        .send_security_key(level, &key)
-                        .await
-                        .map_err(|e| {
-                            BackendError::Protocol(format!("Security access failed: {}", e))
-                        })?;
-
-                    info!("Security access unlocked for flash");
-                }
-            }
-        }
+        // Caller is responsible for session and security setup before starting flash.
 
         let transfer_id = Uuid::new_v4().to_string();
         let package_id = package_id.to_string();
@@ -1786,7 +1741,7 @@ impl UdsBackend {
             }
         };
 
-        // Session and security are already set up by start_flash before spawning.
+        // Caller is responsible for session and security setup before starting flash.
         // Step 1: Preparing - request download
         update_state(FlashState::Preparing);
 
@@ -1812,7 +1767,7 @@ impl UdsBackend {
             return;
         }
 
-        let total_blocks = ((data.len() + block_size - 1) / block_size) as u32;
+        let total_blocks = data.len().div_ceil(block_size) as u32;
 
         // Step 3: Transfer Data (UDS 0x36)
         update_state(FlashState::Transferring);

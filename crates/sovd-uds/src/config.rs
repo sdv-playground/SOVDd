@@ -430,10 +430,6 @@ fn engineering_session() -> u8 {
 pub struct SecurityConfig {
     pub enabled: bool,
     pub level: u8,
-    /// Pre-shared secret for seed-key computation (hex string, e.g. "ff").
-    /// When set, the backend can perform automatic security unlock during flash.
-    #[serde(default)]
-    pub secret: Option<String>,
 }
 
 /// Keepalive configuration
