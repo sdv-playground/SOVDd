@@ -57,7 +57,6 @@ SOVDd/
 │   ├── basic_uds/                # 3 ECUs + gateway simulation
 │   └── supplier_ota/             # 4-tier supplier proxy architecture simulation
 │
-├── docs/                         # Design docs, API reference, SOVD specs
 ├── scripts/
 │   └── setup-vcan.sh             # Virtual CAN interface setup
 ├── build-and-test.sh             # Build/test convenience script
@@ -210,7 +209,7 @@ The supplier container has NO direct CAN access. It reaches its ECU exclusively 
 
 | Module | Description |
 |--------|-------------|
-| `backend.rs` | `UdsBackend` struct implementing `DiagnosticBackend` (~1600 lines) |
+| `backend.rs` | `UdsBackend` struct implementing `DiagnosticBackend` (~1900 lines) |
 | `config.rs` | `UdsBackendConfig`, `TransportConfig`, `SessionConfig`, `ServiceOverrides`, `FlashCommitConfig` |
 | `uds/mod.rs` | `UdsService`, `ServiceIds`, `PeriodicRate`, NRC codes, service ID constants |
 | `uds/client.rs` | Protocol-level UDS operations: ReadDataById, WriteDataById, SecurityAccess, RoutineControl, RequestDownload, TransferData, ECUReset, IOControlById, LinkControl, ReadDTCInfo, ClearDiagnosticInfo |
@@ -291,8 +290,7 @@ The supplier container has NO direct CAN access. It reaches its ECU exclusively 
 - Caches `EntityInfo` and `Capabilities` from remote at initialization
 - Maps all `SovdClientError` to `BackendError` (404→EntityNotFound, 403→SecurityRequired, etc.)
 - Converts binary data to/from hex strings for HTTP transport
-- Supports: data read/write, raw DID, faults, operations, I/O control, logs, sessions, security, app entities
-- Does NOT support: subscriptions, software update (phase 2)
+- Supports: data read/write, raw DID, faults, operations, I/O control, logs, sessions, security, app entities, ECU reset, software info
 
 ### sovdd (Server Binary)
 **Purpose:** Entry point. Loads TOML config, creates backends, starts HTTP server.
@@ -596,7 +594,7 @@ sequenceDiagram
 
     M->>API: POST /flash/transfer { package_id: "pkg-001" }
     API->>UDS: start_flash("pkg-001")
-    Note over UDS,ECU: Async: session→security→erase→download blocks
+    Note over UDS,ECU: Async: erase→download blocks (caller sets session+security beforehand)
 
     M->>API: GET /flash/transfer/xfr-001 (poll)
     UDS-->>M: { state: "transferring", progress: { percent: 75 } }
@@ -925,7 +923,7 @@ Define first — everything depends on these:
 - Security helper (optional): External `SOVD-security-helper` project for key derivation
 
 ### 6. Testing
-- Unit tests: `cargo test --all --lib`
+- Unit tests: `cargo test --lib`
 - E2E tests require vcan0 + example-ecu processes: `cargo test -p sovd-tests --test e2e_test -- --test-threads=1`
 - Gateway E2E tests: `cargo test -p sovd-tests --test gateway_e2e_test -- --test-threads=1`
 - Simulations: `./simulations/basic_uds/start.sh` (3 ECUs + gateway) or `./simulations/supplier_ota/start.sh` (4-tier proxy)

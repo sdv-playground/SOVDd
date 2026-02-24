@@ -211,7 +211,15 @@ impl DiagnosticBackend for ManagedEcuBackend {
 
     async fn list_parameters(&self) -> BackendResult<Vec<ParameterInfo>> {
         if !self.parameter_definitions.is_empty() {
-            // Config is authoritative: return only declared parameters
+            // Whitelist mode: the supplier's config is authoritative. Only
+            // parameters explicitly declared in [[managed_ecu.parameters]]
+            // are exposed through the app's SOVD interface. Standard UDS
+            // DIDs (e.g. 0xF190 VIN, 0xF180 Boot SW ID) are intentionally
+            // omitted unless the supplier adds them to the config. This
+            // lets the tier-1 curate exactly which data the OEM sees.
+            //
+            // When no parameters are configured, we fall back to the proxy
+            // which returns whatever the upstream ECU advertises.
             Ok(self
                 .parameter_definitions
                 .iter()
@@ -709,6 +717,19 @@ impl DiagnosticBackend for ManagedEcuBackend {
     }
 
     async fn commit_flash(&self) -> BackendResult<()> {
+        // After ECU reset, the inner session reverts to default and security
+        // re-locks. The commit routine requires extended session + security,
+        // so we must set those up — same pattern as start_flash() for
+        // programming session.
+        tracing::info!("Setting ECU extended session for commit (inner session)");
+        self.proxy.set_session_mode("extended").await?;
+
+        if self.security_secret.is_some() {
+            self.unlock_ecu_security()
+                .await
+                .map_err(|e| BackendError::Protocol(format!("Security unlock failed: {}", e)))?;
+        }
+
         self.flash_client
             .commit_flash()
             .await
@@ -717,6 +738,19 @@ impl DiagnosticBackend for ManagedEcuBackend {
     }
 
     async fn rollback_flash(&self) -> BackendResult<()> {
+        // After ECU reset, the inner session reverts to default and security
+        // re-locks. The rollback routine requires extended session + security,
+        // so we must set those up — same pattern as start_flash() for
+        // programming session.
+        tracing::info!("Setting ECU extended session for rollback (inner session)");
+        self.proxy.set_session_mode("extended").await?;
+
+        if self.security_secret.is_some() {
+            self.unlock_ecu_security()
+                .await
+                .map_err(|e| BackendError::Protocol(format!("Security unlock failed: {}", e)))?;
+        }
+
         self.flash_client
             .rollback_flash()
             .await

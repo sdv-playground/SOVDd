@@ -133,12 +133,11 @@ impl Subscription {
     /// Internal cleanup - delete the subscription from the server
     async fn cleanup(&self) -> StreamResult<()> {
         // Determine the correct cleanup URL
-        let delete_url = if self.component_id.is_some() {
+        let delete_url = if let Some(comp_id) = &self.component_id {
             // Component-level subscription
             format!(
                 "/vehicle/v1/components/{}/subscriptions/{}",
-                self.component_id.as_ref().unwrap(),
-                self.subscription_id
+                comp_id, self.subscription_id
             )
         } else {
             // Global subscription
@@ -219,11 +218,10 @@ impl Drop for Subscription {
             let component_id = self.component_id.clone();
 
             tokio::spawn(async move {
-                let delete_url = if component_id.is_some() {
+                let delete_url = if let Some(comp_id) = &component_id {
                     format!(
                         "/vehicle/v1/components/{}/subscriptions/{}",
-                        component_id.as_ref().unwrap(),
-                        subscription_id
+                        comp_id, subscription_id
                     )
                 } else {
                     format!("/vehicle/v1/subscriptions/{}", subscription_id)

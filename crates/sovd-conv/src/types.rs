@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Primitive data type for raw byte interpretation
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DataType {
     /// Unsigned 8-bit integer (1 byte)
@@ -27,6 +27,7 @@ pub enum DataType {
     /// ASCII/UTF-8 string
     String,
     /// Raw bytes (hex encoded in JSON)
+    #[default]
     Bytes,
 }
 
@@ -72,12 +73,6 @@ impl DataType {
     }
 }
 
-impl Default for DataType {
-    fn default() -> Self {
-        DataType::Bytes
-    }
-}
-
 /// Byte order for multi-byte values
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -90,21 +85,16 @@ pub enum ByteOrder {
 }
 
 /// Shape of the data (scalar, array, or matrix)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Shape {
     /// Single value
+    #[default]
     Scalar,
     /// 1D array with length
     Array { length: usize },
     /// 2D matrix with dimensions [rows, cols]
     Matrix { rows: usize, cols: usize },
-}
-
-impl Default for Shape {
-    fn default() -> Self {
-        Shape::Scalar
-    }
 }
 
 impl Shape {

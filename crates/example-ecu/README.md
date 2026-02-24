@@ -1,252 +1,128 @@
 # Example ECU Simulator
 
-A simulated VTX ECM for testing the SOVD server without real hardware.
+A config-driven UDS ECU simulator for developing and testing the SOVD server without real hardware. Runs on Linux virtual CAN (vcan).
 
-## Features
+## UDS Services
 
-- **UDS Protocol Support**:
-  - 0x10 Diagnostic Session Control (Default, Extended, Engineering)
-  - 0x14 Clear Diagnostic Information (requires extended session)
-  - 0x19 Read DTC Information (sub-functions 0x01, 0x02, 0x04, 0x06)
-  - 0x22 Read Data By Identifier
-  - 0x27 Security Access (with simple XOR key)
-  - 0x2A Read Data By Periodic Identifier
-  - 0x2C Dynamically Define Data Identifier (sub-functions 0x01, 0x03)
-  - 0x2E Write Data By Identifier (writable DIDs only)
-  - 0x31 Routine Control (sub-functions 0x01, 0x02, 0x03)
-  - 0x3E Tester Present
-
-- **Simulated Parameters** (matching `vtx_ecm.toml`):
-  - Engine RPM (0xF40C)
-  - Coolant Temperature (0xF405)
-  - Oil Pressure (0xF48A)
-  - Fuel Rate (0xF40D)
-  - Vehicle Speed (0xF40E)
-  - Boost Pressure (0xF42F)
-  - Intake Temperature (0xF406)
-  - Exhaust Temperature (0xF478)
-  - Throttle Position (0xF411)
-  - Engine Load (0xF404)
-
-- **Realistic Simulation**:
-  - Values change randomly within bounds
-  - Periodic transmission at configured rates (1Hz, 5Hz, 10Hz)
-
-## Building
-
-```bash
-cd example-ecu
-cargo build --release
-```
+| Service | ID | Description |
+|---------|-----|-------------|
+| DiagnosticSessionControl | 0x10 | Default (0x01), Programming (0x02), Extended (0x03) |
+| ECUReset | 0x11 | Hard/soft reset, reverts to default session |
+| ClearDiagnosticInformation | 0x14 | Clear DTCs (requires extended session) |
+| ReadDTCInformation | 0x19 | Sub-functions 0x01, 0x02, 0x04, 0x06 |
+| ReadDataByIdentifier | 0x22 | Single and batch reads |
+| SecurityAccess | 0x27 | XOR-based seed/key |
+| ReadDataByPeriodicIdentifier | 0x2A | 1Hz, 5Hz, 10Hz rates |
+| DynamicallyDefineDataIdentifier | 0x2C | Define (0x01) and clear (0x03) |
+| WriteDataByIdentifier | 0x2E | Writable DIDs only |
+| IOControlByIdentifier | 0x2F | Return/reset/freeze/adjust |
+| RoutineControl | 0x31 | Start/stop/result |
+| RequestDownload | 0x34 | Flash download initiation |
+| RequestUpload | 0x35 | Memory upload initiation |
+| TransferData | 0x36 | Block transfer with sequence counter |
+| RequestTransferExit | 0x37 | Finalize transfer |
+| TesterPresent | 0x3E | With suppress response |
+| ResponseOnEvent | 0x86 | Event-triggered responses |
+| LinkControl | 0x87 | Baud rate transitions |
 
 ## Usage
 
-### 1. Set up Virtual CAN (vcan0)
-
 ```bash
-# Load the vcan kernel module
-sudo modprobe vcan
-
-# Create vcan0 interface
-sudo ip link add dev vcan0 type vcan
-sudo ip link set up vcan0
-
-# Verify
-ip link show vcan0
-```
-
-### 2. Run the Example ECU
-
-```bash
-# Default settings (vcan0)
+# Default (vcan0, standard CAN IDs)
 ./target/release/example-ecu
 
-# Custom interface and IDs
-./target/release/example-ecu --interface vcan0 \
-    --rx-id 0x18DA00F1 \
-    --tx-id 0x18DAF100
+# With TOML config
+./target/release/example-ecu --config config/example-ecu-standard.toml
+
+# Custom interface and CAN IDs
+./target/release/example-ecu --interface vcan1 --rx-id 0x18DA10F1 --tx-id 0x18DAF110
+
+# Custom security secret (hex)
+./target/release/example-ecu --security-secret aa
 
 # Verbose mode
 ./target/release/example-ecu -v
 ```
 
-### 3. Run the SOVD Server (in another terminal)
+### CLI Arguments
 
-Update `config/sovd.toml` to use SocketCAN:
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `-c, --config` | (none) | TOML config file path |
+| `-i, --interface` | `vcan0` | CAN interface name |
+| `--rx-id` | `0x18DA00F1` | ECU receive CAN ID (29-bit extended) |
+| `--tx-id` | `0x18DAF100` | ECU transmit CAN ID |
+| `--security-secret` | `ff` | Security access shared secret (hex) |
+| `-v, --verbose` | off | Enable verbose logging |
 
-```toml
-[transport]
-type = "socketcan"
+## Default Configuration
 
-[transport.socketcan]
-interface = "vcan0"
+When run without a config file, the ECU starts with a standard set of parameters, DTCs, routines, and I/O outputs defined in `src/config.rs`.
 
-[transport.socketcan.isotp]
-tx_id = "0x18DA00F1"  # Server sends to ECU
-rx_id = "0x18DAF100"  # Server receives from ECU
-```
+### Parameters (DIDs)
 
-Then run:
-```bash
-./target/release/sovd-server config/sovd.toml
-```
+Dynamic values update periodically with small random variations.
 
-### 4. Test with curl
+| DID | Name | Type | Session | Security |
+|-----|------|------|---------|----------|
+| 0xF190 | VIN | string | Default | None |
+| 0xF187 | Part Number | string | Default | None |
+| 0xF18C | Serial Number | string | Default | None |
+| 0xF40E | Vehicle Speed | uint8 | Default | None |
+| 0xF404 | Engine Load | uint8 | Default | None |
+| 0xF405 | Coolant Temperature | uint8 | Default | None |
+| 0xF40C | Engine RPM | uint16 | Extended | None |
+| 0xF48A | Oil Pressure | uint16 | Extended | None |
+| 0xF40D | Fuel Rate | uint16 | Extended | None |
+| 0xF42F | Boost Pressure | uint16 | Extended | Level 1 |
+| 0xF478 | Exhaust Temperature | uint16 | Extended | Level 1 |
+| 0xF411 | Throttle Position | uint8 | Extended | Level 1 |
 
-```bash
-# List components
-curl http://localhost:9080/vehicle/v1/components
+Standard ISO 14229-1 identification DIDs (0xF180-0xF19F) are also registered.
 
-# List parameters
-curl http://localhost:9080/vehicle/v1/components/vtx_ecm/data
-
-# Read a single parameter
-curl http://localhost:9080/vehicle/v1/components/vtx_ecm/data/engine_rpm
-
-# Create a streaming subscription
-curl -X POST http://localhost:9080/vehicle/v1/subscriptions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "component_id": "vtx_ecm",
-    "parameters": ["engine_rpm", "coolant_temp"],
-    "rate_hz": 10,
-    "mode": "periodic"
-  }'
-
-# Connect to the stream
-curl -N http://localhost:9080/vehicle/v1/streams/{subscription_id}
-```
-
-### 5. Test DTC/Fault Endpoints
-
-```bash
-# List all stored faults
-curl http://localhost:9080/vehicle/v1/components/vtx_ecm/faults
-
-# List active faults only (currently failing)
-curl http://localhost:9080/vehicle/v1/components/vtx_ecm/dtcs
-
-# Get detail for a specific DTC
-curl http://localhost:9080/vehicle/v1/components/vtx_ecm/faults/010100
-
-# Filter faults by category
-curl "http://localhost:9080/vehicle/v1/components/vtx_ecm/faults?category=powertrain"
-
-# Clear faults (requires extended session first)
-curl -X PUT http://localhost:9080/vehicle/v1/components/vtx_ecm/modes/session \
-  -H "Content-Type: application/json" \
-  -d '{"value": "extended"}'
-
-curl -X DELETE http://localhost:9080/vehicle/v1/components/vtx_ecm/faults
-```
-
-## CAN ID Configuration
-
-The default configuration uses ISO-TP addressing:
-
-| Direction | CAN ID | Description |
-|-----------|--------|-------------|
-| Tester → ECU | 0x18DA00F1 | Server sends requests |
-| ECU → Tester | 0x18DAF100 | ECU sends responses |
-
-These are 29-bit extended CAN IDs following J1939 conventions.
-
-## Monitoring CAN Traffic
-
-```bash
-# Install can-utils if needed
-sudo apt install can-utils
-
-# Monitor all CAN traffic
-candump vcan0
-
-# Monitor with decode
-candump -t A vcan0
-
-# Send a test message (read RPM)
-cansend vcan0 18DA00F1#03220CF4
-```
-
-## Architecture
-
-```
-┌─────────────────┐      vcan0        ┌─────────────────┐
-│   SOVD Server   │ ←───────────────→ │   Example ECU   │
-│                 │   ISO-TP/CAN      │                 │
-│ TX: 0x18DA00F1  │                   │ RX: 0x18DA00F1  │
-│ RX: 0x18DAF100  │                   │ TX: 0x18DAF100  │
-└─────────────────┘                   └─────────────────┘
-```
-
-## Simulated Behavior
-
-### Parameter Values
-
-| Parameter | Range | Initial | Update Rate |
-|-----------|-------|---------|-------------|
-| Engine RPM | 0-8000 | 1850 | Varies ±2% |
-| Coolant Temp | -40-215°C | 92°C | Varies ±2% |
-| Oil Pressure | 0-1000 kPa | 450 kPa | Varies ±2% |
-| Vehicle Speed | 0-255 km/h | 65 km/h | Varies ±2% |
-
-Values update every 500ms with small random variations to simulate realistic sensor behavior.
-
-### Simulated DTCs (Fault Codes)
-
-The example ECU includes 5 pre-configured DTCs with different status conditions:
+### DTCs
 
 | DTC Code | Bytes | Status | Description |
 |----------|-------|--------|-------------|
-| **P0101** | `01 01 00` | `0x09` (active) | Mass Air Flow Circuit - test_failed + confirmed |
-| **P0300** | `03 00 00` | `0x24` (pending) | Random Misfire - pending + test_failed_since_clear |
-| **C0420** | `44 20 00` | `0x28` (historical) | Steering Sensor - confirmed + test_failed_since_clear |
-| **B1234** | `92 34 00` | `0x89` (active+MIL) | Airbag Circuit - test_failed + confirmed + warning_indicator |
-| **U0100** | `C1 00 00` | `0x28` (historical) | Lost Communication - confirmed + test_failed_since_clear |
+| P0101 | `01 01 00` | 0x09 (active) | Mass Air Flow Circuit |
+| P0300 | `03 00 00` | 0x24 (pending) | Random Cylinder Misfire |
+| C0420 | `44 20 00` | 0x28 (historical) | Steering Angle Sensor |
+| B1234 | `92 34 00` | 0x89 (active+MIL) | Airbag Warning Circuit |
+| U0100 | `C1 00 00` | 0x28 (historical) | Lost Communication with ECM |
 
-**DTC Status Bits (ISO 14229-1):**
-- Bit 0 (0x01): testFailed - Currently failing
-- Bit 2 (0x04): pendingDTC - Failed but not yet confirmed
-- Bit 3 (0x08): confirmedDTC - Malfunction confirmed and stored
-- Bit 5 (0x20): testFailedSinceLastClear - Failed since last clear
-- Bit 7 (0x80): warningIndicatorRequested - MIL lamp requested
+### Routines
 
-**Snapshot Data:** P0101 includes freeze frame data (coolant temp, vehicle speed)
-**Extended Data:** P0101 and C0420 include occurrence counters and aging data
+| RID | Name | Session | Security | Description |
+|-----|------|---------|----------|-------------|
+| 0x0203 | Check Programming Preconditions | Extended | None | Returns 0x00 = success |
+| 0xFF00 | Erase Memory | Programming | Level 1 | Simulated erase |
+| 0xFF01 | Firmware Commit | Extended | Level 1 | Commit activated firmware (A/B bank) |
+| 0xFF02 | Firmware Rollback | Extended | Level 1 | Rollback to previous firmware |
 
-DTCs are static and do not change during runtime. They can be cleared via UDS service 0x14 (requires extended session 0x03), but will not reappear until the ECU is restarted.
+### I/O Outputs
 
-### Access Levels
+| IOID | Name | Size | Security | Default |
+|------|------|------|----------|---------|
+| 0xF000 | LED Status | 1 byte | None | 0x00 |
+| 0xF001 | Fan Speed | 2 bytes | None | 0x0000 |
+| 0xF002 | Relay 1 | 1 byte | None | 0x00 |
+| 0xF003 | Relay 2 | 1 byte | Level 1 | 0x00 |
+| 0xF004 | PWM Output | 1 byte | None | 0x80 |
 
-Parameters have different access requirements:
+### Flash Simulation
 
-| Level | Session | Security | Parameters |
-|-------|---------|----------|------------|
-| Public | Default (0x01) | None | VIN, part numbers, vehicle speed, coolant temp, engine load |
-| Extended | Extended (0x03) | None | Engine RPM, oil pressure, fuel rate, intake temp |
-| Protected | Extended (0x03) | Level 1 | Boost pressure, exhaust temp, throttle position |
+The ECU simulates A/B bank firmware with configurable block counter behavior. Flash transfers use UDS 0x34/0x36/0x37 with support for commit (0xFF01) and rollback (0xFF02) routines. After ECU reset, session reverts to default and security re-locks per ISO 14229.
 
-DTC clearing requires Extended session (0x03).
+### Security
 
-### Writable Parameters
+Default XOR algorithm: `key[i] = seed[i] ^ secret[i % secret.len()]`
 
-| DID | Name | Access Required |
-|-----|------|-----------------|
-| 0xF199 | Programming Date | Extended session |
-| 0xF19D | Installation Date | Extended + Security |
+Default secret: `0xFF` (single byte). Override with `--security-secret`.
 
-Writable parameters can be updated via UDS 0x2E WriteDataByIdentifier. The ECU enforces access control - read-only parameters return NRC 0x72 (GeneralProgrammingFailure).
+## TOML Configuration
 
-### Supported Routines (0x31)
+The ECU can be configured via TOML for custom transport settings and flash behavior. See `config/example-ecu-standard.toml` and `config/example-ecu-vortex.toml` for examples.
 
-| Routine ID | Name | Access Required | Description |
-|------------|------|-----------------|-------------|
-| 0x0203 | Check Programming Preconditions | None | Returns 0x00 = success |
-| 0xFF00 | Erase Memory | Security Level 1 | Simulated erase operation |
+## License
 
-### Dynamic Data Identifiers (0x2C)
-
-DDIDs in the range 0xF200-0xF3FF can be defined dynamically. Use:
-- Sub-function 0x01: Define by identifier (compose from source DIDs)
-- Sub-function 0x03: Clear DDID definition
-
-Defined DDIDs can be read via normal 0x22 ReadDataByIdentifier requests.
+Apache-2.0

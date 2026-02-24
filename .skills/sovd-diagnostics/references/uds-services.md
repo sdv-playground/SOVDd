@@ -31,8 +31,8 @@ Read one or more DIDs in a single request.
 |-----|-------------|
 | 0xF186 | Active diagnostic session |
 | 0xF187 | Spare part number |
-| 0xF188 | Software version |
-| 0xF189 | Hardware version |
+| 0xF188 | ECU software number identification |
+| 0xF189 | ECU software version number |
 | 0xF18A | Supplier ID |
 | 0xF18B | ECU manufacturing date |
 | 0xF18C | ECU serial number |
@@ -56,13 +56,13 @@ Control diagnostic routines.
 - `0x02` - Stop routine
 - `0x03` - Request routine results
 
-**Common Routines:**
+**Common Routines (example-ecu defaults):**
 | RID | Description |
 |-----|-------------|
-| 0x0202 | Check programming dependencies |
-| 0x0203 | Erase memory |
-| 0xFF00 | Check programming preconditions |
-| 0xFF01 | Finalize programming |
+| 0x0203 | Check programming preconditions |
+| 0xFF00 | Erase memory |
+| 0xFF01 | Firmware commit (A/B bank) |
+| 0xFF02 | Firmware rollback (A/B bank) |
 
 ## Read DTC Information (0x19)
 

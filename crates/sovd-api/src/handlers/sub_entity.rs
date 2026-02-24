@@ -447,7 +447,7 @@ pub async fn put_security_mode(
     let key_bytes = request
         .key
         .as_ref()
-        .map(|k| hex::decode(k))
+        .map(hex::decode)
         .transpose()
         .map_err(|e| ApiError::BadRequest(format!("Invalid hex key: {}", e)))?;
     let is_seed_request = request.value.to_lowercase().ends_with("_requestseed");
@@ -605,7 +605,7 @@ pub async fn read_sub_entity_parameter(
 
     // Fall back to backend.read_data() (proxy backends resolve params via upstream)
     let values = backend
-        .read_data(&[param_id.clone()])
+        .read_data(std::slice::from_ref(&param_id))
         .await
         .map_err(ApiError::from)?;
 

@@ -27,6 +27,11 @@ simulations/
 │   ├── start.sh            # Build + launch the simulation
 │   ├── stop.sh             # Kill processes from a previous run
 │   └── view-logs.sh        # Tail log files
+├── supplier_ota/           # 4-tier supplier OTA architecture
+│   ├── config/             # Vehicle gateway, UDS gateway, app, ECU configs
+│   ├── start.sh
+│   ├── stop.sh
+│   └── view-logs.sh
 └── README.md
 ```
 
@@ -35,6 +40,7 @@ simulations/
 | Name | ECUs | Port | Interface | Description |
 |------|------|------|-----------|-------------|
 | `basic_uds` | 3 (engine, transmission, body) | 4000 | vcan1 | Standard UDS vehicle network |
+| `supplier_ota` | 4 (3 OEM + 1 supplier) | 4000 | vcan1 | 4-tier architecture: ECU + supplier app + OEM gateway + UDS gateway |
 
 ## Creating a new variant
 

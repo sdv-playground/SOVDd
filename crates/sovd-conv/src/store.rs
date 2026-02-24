@@ -136,7 +136,7 @@ impl DidStore {
         }
 
         let mut defs = self.definitions.write().unwrap();
-        let entries = defs.entry(did).or_insert_with(Vec::new);
+        let entries = defs.entry(did).or_default();
 
         // Replace existing definition for same component, or add new one
         if let Some(ref comp_id) = def.component_id {

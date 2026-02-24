@@ -567,7 +567,7 @@ impl SecurityLevel {
     /// Get the level number (1-based) for the API
     pub fn as_level_number(&self) -> u8 {
         // Level 1 = 0x01, Level 2 = 0x03, etc.
-        (self.0 + 1) / 2
+        self.0.div_ceil(2)
     }
 }
 

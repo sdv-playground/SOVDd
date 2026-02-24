@@ -105,7 +105,7 @@ fn format_value(value: &serde_json::Value) -> String {
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(|v| format_value(v)).collect();
+            let items: Vec<String> = arr.iter().map(format_value).collect();
             items.join(", ")
         }
         serde_json::Value::Object(_) => serde_json::to_string(value).unwrap_or_default(),

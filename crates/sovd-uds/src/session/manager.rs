@@ -14,7 +14,7 @@ use crate::transport::TransportAdapter;
 use crate::uds::{ServiceIds, UdsService};
 
 /// Security access state for tracking two-step client-driven flow
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SecurityAccessState {
     /// Security level being accessed
     pub level: u8,
@@ -22,16 +22,6 @@ pub struct SecurityAccessState {
     pub pending_seed: Option<Vec<u8>>,
     /// Whether security is currently unlocked
     pub unlocked: bool,
-}
-
-impl Default for SecurityAccessState {
-    fn default() -> Self {
-        Self {
-            level: 0,
-            pending_seed: None,
-            unlocked: false,
-        }
-    }
 }
 
 /// Link control state for tracking baud rate transitions

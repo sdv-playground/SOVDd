@@ -244,7 +244,7 @@ pub async fn control_output(
 ) -> Result<Json<IoControlResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
 
-    let action = IoControlAction::from_str(&request.action).ok_or_else(|| {
+    let action = IoControlAction::parse(&request.action).ok_or_else(|| {
         ApiError::BadRequest(format!(
             "Invalid action: {}. Use 'return_to_ecu', 'reset_to_default', 'freeze', or 'short_term_adjust'",
             request.action

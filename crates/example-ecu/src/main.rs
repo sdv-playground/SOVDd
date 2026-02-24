@@ -174,7 +174,7 @@ fn parse_hex_string(s: &str) -> Result<Vec<u8>> {
         .or_else(|| s.strip_prefix("0X"))
         .unwrap_or(s);
 
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(anyhow::anyhow!(
             "Hex string must have even number of characters"
         ));

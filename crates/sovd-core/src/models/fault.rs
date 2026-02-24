@@ -37,7 +37,7 @@ pub struct Fault {
 }
 
 /// Fault severity levels
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FaultSeverity {
     /// Informational only
@@ -45,15 +45,10 @@ pub enum FaultSeverity {
     /// Warning condition
     Warning,
     /// Error condition
+    #[default]
     Error,
     /// Critical failure
     Critical,
-}
-
-impl Default for FaultSeverity {
-    fn default() -> Self {
-        Self::Error
-    }
 }
 
 /// Filter for querying faults

@@ -44,10 +44,11 @@ pub struct LogEntry {
 }
 
 /// Status of a log entry for message passing pattern
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogStatus {
     /// Log is available for retrieval
+    #[default]
     Pending,
     /// Log content has been downloaded at least once
     Retrieved,
@@ -55,14 +56,8 @@ pub enum LogStatus {
     Processed,
 }
 
-impl Default for LogStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
-}
-
 /// Log priority levels (aligned with syslog priorities)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogPriority {
     /// Emergency: system is unusable
@@ -78,15 +73,10 @@ pub enum LogPriority {
     /// Notice: normal but significant condition
     Notice = 5,
     /// Info: informational messages
+    #[default]
     Info = 6,
     /// Debug: debug-level messages
     Debug = 7,
-}
-
-impl Default for LogPriority {
-    fn default() -> Self {
-        Self::Info
-    }
 }
 
 impl LogPriority {

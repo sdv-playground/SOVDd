@@ -716,7 +716,7 @@ impl DiagnosticBackend for SovdProxyBackend {
             execution_id: resp.operation_id.clone(),
             operation_id: resp.operation_id,
             status,
-            result: resp.result_data.map(|s| serde_json::Value::String(s)),
+            result: resp.result_data.map(serde_json::Value::String),
             error: resp.error,
             started_at: now,
             completed_at,

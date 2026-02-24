@@ -39,10 +39,8 @@ pub fn encode(def: &DidDefinition, value: &Value) -> ConvResult<Vec<u8>> {
             }
 
             // Check if it's a map with "values" key
-            if let Some(values) = obj.get("values") {
-                if let Value::Array(arr) = values {
-                    return encode_map(def, arr);
-                }
+            if let Some(Value::Array(arr)) = obj.get("values") {
+                return encode_map(def, arr);
             }
 
             Err(ConvError::InvalidData(

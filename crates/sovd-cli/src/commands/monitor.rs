@@ -113,7 +113,7 @@ fn print_stream_event(event: &sovd_client::StreamEvent, params: &[String], ctx: 
                     event
                         .values
                         .get(p)
-                        .map(|v| format_json_value(v))
+                        .map(format_json_value)
                         .unwrap_or_default()
                 }))
                 .collect();

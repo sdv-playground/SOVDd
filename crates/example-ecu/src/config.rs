@@ -677,7 +677,7 @@ fn parse_hex_bytes(s: &str) -> Option<Vec<u8>> {
     let s = s.trim().strip_prefix("0x").unwrap_or(s);
     let s = s.strip_prefix("0X").unwrap_or(s);
 
-    if s.is_empty() || s.len() % 2 != 0 {
+    if s.is_empty() || !s.len().is_multiple_of(2) {
         return None;
     }
 
@@ -1229,7 +1229,7 @@ impl EcuConfig {
                 RoutineDef {
                     id: 0xFF01,
                     name: "Firmware Commit".to_string(),
-                    requires_security: false,
+                    requires_security: true,
                     required_session: 0x03,
                     result: vec![0x00],
                     instant: true,
@@ -1238,7 +1238,7 @@ impl EcuConfig {
                 RoutineDef {
                     id: 0xFF02,
                     name: "Firmware Rollback".to_string(),
-                    requires_security: false,
+                    requires_security: true,
                     required_session: 0x03,
                     result: vec![0x00],
                     instant: true,

@@ -90,6 +90,7 @@ pub enum FirmwareImageError {
     },
 
     #[error("Target ECU mismatch: image targets '{got}', expected '{expected}'")]
+    #[allow(dead_code)]
     TargetMismatch { expected: String, got: String },
 }
 
@@ -99,6 +100,7 @@ pub type FirmwareImageResult<T> = Result<T, FirmwareImageError>;
 
 /// A parsed (or constructed) firmware image.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FirmwareImage {
     /// Target ECU identifier.
     pub target_ecu: String,
@@ -108,6 +110,7 @@ pub struct FirmwareImage {
     pub data: Vec<u8>,
 }
 
+#[allow(dead_code)]
 impl FirmwareImage {
     /// Build a new image from parts.
     pub fn build(target_ecu: &str, version: &str, data: &[u8]) -> Self {
@@ -253,6 +256,7 @@ impl FirmwareImage {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 /// Null-pad (or truncate) `src` to exactly `len` bytes.
+#[allow(dead_code)]
 fn pad(src: &[u8], len: usize) -> Vec<u8> {
     let mut out = vec![0u8; len];
     let n = src.len().min(len);
