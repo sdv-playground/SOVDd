@@ -151,6 +151,49 @@ Options:
     })
 }
 
+/// Try to connect to the upstream SOVD server and build a ManagedEcuBackend.
+///
+/// This is extracted so it can be called both at startup and in the background
+/// retry loop.
+#[allow(clippy::too_many_arguments)]
+async fn try_connect_upstream(
+    upstream_component: &str,
+    upstream_url: &str,
+    upstream_gateway: Option<&str>,
+    ecu_id: &str,
+    ecu_name: &str,
+    app_id: &str,
+    ecu_secret_hex: Option<&str>,
+    output_defs: &[sovd_uds::config::OutputConfig],
+    param_defs: &[example_app::config::ParameterDef],
+    op_defs: &[sovd_uds::config::OperationConfig],
+) -> anyhow::Result<ManagedEcuBackend> {
+    let proxy = SovdProxyBackend::with_options(
+        upstream_component,
+        upstream_url,
+        upstream_component,
+        None,
+        upstream_gateway,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to connect to upstream: {}", e))?;
+
+    let ecu = ManagedEcuBackend::new(
+        ecu_id,
+        ecu_name,
+        app_id,
+        proxy,
+        upstream_url,
+        output_defs.to_vec(),
+        param_defs.to_vec(),
+        op_defs.to_vec(),
+        ecu_secret_hex,
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to create managed ECU backend: {}", e))?;
+
+    Ok(ecu)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
@@ -172,18 +215,7 @@ async fn main() -> anyhow::Result<()> {
         "Starting example-app"
     );
 
-    // 1. Create proxy backend pointing at the specific upstream component
-    let proxy = SovdProxyBackend::with_options(
-        &args.upstream_component,
-        &args.upstream_url,
-        &args.upstream_component,
-        None,
-        args.upstream_gateway.as_deref(),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to connect to upstream: {}", e))?;
-
-    // 2. Load optional config file and normalize for backward compatibility
+    // 1. Load optional config file and normalize for backward compatibility
     let mut config = if let Some(ref path) = args.config_path {
         tracing::info!(config = %path, "Loading supplier app config");
         ExampleAppConfig::load(path).map_err(|e| anyhow::anyhow!("{}", e))?
@@ -192,7 +224,7 @@ async fn main() -> anyhow::Result<()> {
     };
     config.normalize(&args.upstream_component);
 
-    // 3. Build ManagedEcuBackend from config (or defaults)
+    // 2. Resolve ECU identity and config-driven definitions
     let (ecu_id, ecu_name, ecu_secret, output_defs, param_defs, op_defs) =
         if let Some(ref ecu_config) = config.managed_ecu {
             (
@@ -233,29 +265,48 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let managed_ecu = Arc::new(
-        ManagedEcuBackend::new(
-            &ecu_id,
-            &ecu_name,
-            &args.id,
-            proxy,
-            &args.upstream_url,
-            output_defs,
-            param_defs,
-            op_defs,
-            ecu_secret.as_deref(),
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to create managed ECU backend: {}", e))?,
-    );
+    // 3. Try to connect to the upstream SOVD server once.
+    //    If it fails, start the HTTP server anyway and retry in the background.
+    let managed_ecu = match try_connect_upstream(
+        &args.upstream_component,
+        &args.upstream_url,
+        args.upstream_gateway.as_deref(),
+        &ecu_id,
+        &ecu_name,
+        &args.id,
+        ecu_secret.as_deref(),
+        &output_defs,
+        &param_defs,
+        &op_defs,
+    )
+    .await
+    {
+        Ok(ecu) => {
+            tracing::info!(
+                ecu_id = %ecu_id,
+                ecu_name = %ecu_name,
+                "Managed ECU sub-entity created"
+            );
+            Some(Arc::new(ecu))
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "Failed to connect to upstream — server will start without ECU, retrying in background"
+            );
+            None
+        }
+    };
 
-    tracing::info!(
-        ecu_id = %ecu_id,
-        ecu_name = %ecu_name,
-        "Managed ECU sub-entity created"
+    // 4. Build ExampleAppBackend wrapping the managed ECU (or None)
+    let backend = ExampleAppBackend::new(
+        &args.id,
+        &args.name,
+        &ecu_id,
+        &ecu_name,
+        managed_ecu.clone(),
     );
-
-    // 4. Build ExampleAppBackend wrapping the managed ECU
-    let backend = ExampleAppBackend::new(&args.id, &args.name, managed_ecu);
+    let ecu_slot = backend.managed_ecu_slot();
 
     // Build AppState with output configs for the enrichment pipeline
     let mut output_configs_map = HashMap::new();
@@ -279,6 +330,65 @@ async fn main() -> anyhow::Result<()> {
             .layer(axum::Extension(AuthToken(token)));
     }
 
+    // 5. If the upstream was not reachable, spawn a background retry task
+    if managed_ecu.is_none() {
+        let upstream_component = args.upstream_component.clone();
+        let upstream_url = args.upstream_url.clone();
+        let upstream_gateway = args.upstream_gateway.clone();
+        let app_id = args.id.clone();
+        let ecu_id_bg = ecu_id.clone();
+        let ecu_name_bg = ecu_name.clone();
+        let ecu_secret_bg = ecu_secret.clone();
+        let output_defs_bg = output_defs;
+        let param_defs_bg = param_defs;
+        let op_defs_bg = op_defs;
+
+        tokio::spawn(async move {
+            const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+            let mut attempt = 0u64;
+            loop {
+                attempt += 1;
+                tokio::time::sleep(RETRY_INTERVAL).await;
+
+                tracing::info!(attempt, "Retrying upstream connection");
+
+                match try_connect_upstream(
+                    &upstream_component,
+                    &upstream_url,
+                    upstream_gateway.as_deref(),
+                    &ecu_id_bg,
+                    &ecu_name_bg,
+                    &app_id,
+                    ecu_secret_bg.as_deref(),
+                    &output_defs_bg,
+                    &param_defs_bg,
+                    &op_defs_bg,
+                )
+                .await
+                {
+                    Ok(ecu) => {
+                        let mut slot = ecu_slot.write().await;
+                        *slot = Some(Arc::new(ecu));
+                        tracing::info!(
+                            attempt,
+                            ecu_id = %ecu_id_bg,
+                            "Upstream connection established — managed ECU is now available"
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            attempt,
+                            error = %e,
+                            "Upstream still unreachable, will retry"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    // 6. Start the HTTP server (always, regardless of upstream connectivity)
     let addr = SocketAddr::from(([0, 0, 0, 0], args.port));
     tracing::info!("Listening on http://{}", addr);
 

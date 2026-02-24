@@ -326,7 +326,9 @@ async fn setup(auth_token: Option<&str>) -> TestEnv {
     let backend = Arc::new(ExampleAppBackend::new(
         SUPPLIER_ID,
         "Vortex Motors Engine App",
-        managed_ecu.clone(),
+        ECU_ID,
+        "Vortex VX500 Engine ECU",
+        Some(managed_ecu.clone()),
     ));
 
     let state = AppState::single(

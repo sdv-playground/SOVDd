@@ -57,11 +57,12 @@ async fn resolve(
         if segment.is_empty() {
             continue;
         }
-        current = current.get_sub_entity(segment).await.map_err(|_| {
-            ApiError::NotFound(format!(
+        current = current.get_sub_entity(segment).await.map_err(|e| match e {
+            sovd_core::BackendError::EntityNotFound(_) => ApiError::NotFound(format!(
                 "Sub-entity '{}' not found on '{}'",
                 segment, component_id
-            ))
+            )),
+            other => ApiError::from(other),
         })?;
     }
     Ok(current)

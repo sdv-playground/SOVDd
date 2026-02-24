@@ -13,6 +13,7 @@ use sovd_core::{
     BackendError, BackendResult, Capabilities, DataValue, DiagnosticBackend, EntityInfo,
     FaultFilter, FaultsResult, OperationExecution, OperationInfo, ParameterInfo,
 };
+use tokio::sync::RwLock;
 
 use crate::managed_ecu::ManagedEcuBackend;
 
@@ -28,17 +29,31 @@ struct SyntheticParam {
 ///
 /// - Exposes synthetic computed parameters (engine_health_score, maintenance_hours)
 /// - Delegates ECU-level operations to ManagedEcuBackend sub-entity
+/// - Starts even when the upstream ECU is unreachable; returns 503 for ECU
+///   requests until the background retry task connects successfully
 pub struct ExampleAppBackend {
     entity_info: EntityInfo,
     capabilities: Capabilities,
-    managed_ecu: Arc<ManagedEcuBackend>,
+    managed_ecu: Arc<RwLock<Option<Arc<ManagedEcuBackend>>>>,
+    ecu_id: String,
+    ecu_name: String,
     synthetic_params: Vec<SyntheticParam>,
     start_time: Instant,
 }
 
 impl ExampleAppBackend {
     /// Create a new supplier app backend wrapping a managed ECU sub-entity.
-    pub fn new(id: &str, name: &str, managed_ecu: Arc<ManagedEcuBackend>) -> Self {
+    ///
+    /// `managed_ecu` may be `None` if the upstream is not yet reachable.
+    /// The background retry task can populate it later via the shared
+    /// `Arc<RwLock<Option<...>>>` returned by [`managed_ecu_slot`].
+    pub fn new(
+        id: &str,
+        name: &str,
+        ecu_id: &str,
+        ecu_name: &str,
+        managed_ecu: Option<Arc<ManagedEcuBackend>>,
+    ) -> Self {
         let entity_info = EntityInfo {
             id: id.to_string(),
             name: name.to_string(),
@@ -72,33 +87,51 @@ impl ExampleAppBackend {
         Self {
             entity_info,
             capabilities,
-            managed_ecu,
+            managed_ecu: Arc::new(RwLock::new(managed_ecu)),
+            ecu_id: ecu_id.to_string(),
+            ecu_name: ecu_name.to_string(),
             synthetic_params,
             start_time: Instant::now(),
         }
     }
 
+    /// Returns the shared slot for the managed ECU backend.
+    ///
+    /// The background retry task uses this to populate the ECU backend
+    /// once the upstream becomes reachable.
+    pub fn managed_ecu_slot(&self) -> Arc<RwLock<Option<Arc<ManagedEcuBackend>>>> {
+        self.managed_ecu.clone()
+    }
+
     /// Compute engine health score from proxied RPM and coolant temp.
     /// Simple weighted formula: health = 100 - (rpm_penalty + temp_penalty)
     async fn compute_engine_health(&self) -> f64 {
-        // Try to read RPM and coolant temp from the managed ECU's proxy
-        let rpm_val = self
-            .managed_ecu
-            .read_data(&["engine_rpm".to_string()])
-            .await
-            .ok()
-            .and_then(|v| v.into_iter().next())
-            .and_then(|dv| dv.value.as_f64())
-            .unwrap_or(800.0);
+        // Try to read RPM and coolant temp from the managed ECU's proxy.
+        // If the managed ECU is not connected yet, use default values.
+        let (rpm_val, temp_val) = {
+            let guard = self.managed_ecu.read().await;
+            if let Some(ref ecu) = *guard {
+                let rpm = ecu
+                    .read_data(&["engine_rpm".to_string()])
+                    .await
+                    .ok()
+                    .and_then(|v| v.into_iter().next())
+                    .and_then(|dv| dv.value.as_f64())
+                    .unwrap_or(800.0);
 
-        let temp_val = self
-            .managed_ecu
-            .read_data(&["coolant_temperature".to_string()])
-            .await
-            .ok()
-            .and_then(|v| v.into_iter().next())
-            .and_then(|dv| dv.value.as_f64())
-            .unwrap_or(90.0);
+                let temp = ecu
+                    .read_data(&["coolant_temperature".to_string()])
+                    .await
+                    .ok()
+                    .and_then(|v| v.into_iter().next())
+                    .and_then(|dv| dv.value.as_f64())
+                    .unwrap_or(90.0);
+
+                (rpm, temp)
+            } else {
+                (800.0, 90.0)
+            }
+        };
 
         // RPM penalty: high RPM reduces health (above 4000 RPM)
         let rpm_penalty = if rpm_val > 4000.0 {
@@ -181,14 +214,40 @@ impl DiagnosticBackend for ExampleAppBackend {
     // =========================================================================
 
     async fn list_sub_entities(&self) -> BackendResult<Vec<EntityInfo>> {
-        Ok(vec![self.managed_ecu.entity_info().clone()])
+        let guard = self.managed_ecu.read().await;
+        match *guard {
+            Some(ref ecu) => Ok(vec![ecu.entity_info().clone()]),
+            None => {
+                // Upstream not connected yet — return a placeholder so clients
+                // can discover the sub-entity exists but is not yet reachable.
+                Ok(vec![EntityInfo {
+                    id: self.ecu_id.clone(),
+                    name: self.ecu_name.clone(),
+                    entity_type: "ecu".to_string(),
+                    description: Some(
+                        "Managed ECU sub-entity (upstream not connected)".to_string(),
+                    ),
+                    href: format!(
+                        "/vehicle/v1/components/{}/apps/{}",
+                        self.entity_info.id, self.ecu_id
+                    ),
+                    status: Some("not_available".to_string()),
+                }])
+            }
+        }
     }
 
     async fn get_sub_entity(&self, id: &str) -> BackendResult<Arc<dyn DiagnosticBackend>> {
-        if id == self.managed_ecu.entity_info().id {
-            Ok(self.managed_ecu.clone() as Arc<dyn DiagnosticBackend>)
-        } else {
-            Err(BackendError::EntityNotFound(id.to_string()))
+        let guard = self.managed_ecu.read().await;
+        match *guard {
+            Some(ref ecu) if id == ecu.entity_info().id => {
+                Ok(ecu.clone() as Arc<dyn DiagnosticBackend>)
+            }
+            Some(_) => Err(BackendError::EntityNotFound(id.to_string())),
+            None if id == self.ecu_id => Err(BackendError::Transport(
+                "Upstream ECU not connected yet — retrying in background".to_string(),
+            )),
+            None => Err(BackendError::EntityNotFound(id.to_string())),
         }
     }
 
