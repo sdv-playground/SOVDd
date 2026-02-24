@@ -211,7 +211,15 @@ impl DiagnosticBackend for ManagedEcuBackend {
 
     async fn list_parameters(&self) -> BackendResult<Vec<ParameterInfo>> {
         if !self.parameter_definitions.is_empty() {
-            // Config is authoritative: return only declared parameters
+            // Whitelist mode: the supplier's config is authoritative. Only
+            // parameters explicitly declared in [[managed_ecu.parameters]]
+            // are exposed through the app's SOVD interface. Standard UDS
+            // DIDs (e.g. 0xF190 VIN, 0xF180 Boot SW ID) are intentionally
+            // omitted unless the supplier adds them to the config. This
+            // lets the tier-1 curate exactly which data the OEM sees.
+            //
+            // When no parameters are configured, we fall back to the proxy
+            // which returns whatever the upstream ECU advertises.
             Ok(self
                 .parameter_definitions
                 .iter()
