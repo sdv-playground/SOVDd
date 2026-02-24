@@ -28,7 +28,7 @@ cargo test --lib
 cargo test --workspace -- --test-threads=1
 
 # Single test by name
-cargo test test_name -- --test-threads=1
+cargo test -p sovd-tests test_name -- --test-threads=1
 
 # E2E tests (sets up vcan0, requires built binaries)
 ./run-e2e-tests.sh
@@ -39,6 +39,9 @@ cargo test test_name -- --test-threads=1
 
 # Multi-ECU simulation (3 ECUs + gateway on vcan1)
 ./simulations/basic_uds/start.sh
+
+# Server debug logging
+RUST_LOG=debug cargo run --bin sovdd -- config/sovd.toml
 ```
 
 ## Architecture
@@ -81,19 +84,28 @@ Three implementations: `UdsBackend` (sovd-uds), `GatewayBackend` (sovd-gateway),
 
 ### API Layer (sovd-api)
 
-`crates/sovd-api/src/lib.rs` builds the axum router. `AppState` holds: backends map, `DidStore`, `SubscriptionManager`. Handlers are in `crates/sovd-api/src/handlers/` — one file per domain (data.rs, faults.rs, flash.rs, modes.rs, operations.rs, outputs.rs, streams.rs, subscriptions.rs, sub_entity.rs, etc.). The largest handlers are `sub_entity.rs` (~910 lines, nested resource routing) and `data.rs` (~709 lines, read/write with gateway child routing).
+`crates/sovd-api/src/lib.rs` builds the axum router. `AppState` holds: backends map, `DidStore`, `SubscriptionManager`. Handlers are in `crates/sovd-api/src/handlers/` — one file per domain (data.rs, faults.rs, flash.rs, modes.rs, operations.rs, outputs.rs, streams.rs, subscriptions.rs, sub_entity.rs, etc.).
 
 ### UDS Backend (sovd-uds)
 
 `crates/sovd-uds/src/backend.rs` (~1,900 lines) is the main implementation. Key internals:
 - **Transport abstraction:** `TransportAdapter` trait in `transport/mod.rs` with three impls: `socketcan/` (ISO-TP framing), `doip/` (TCP/TLS, ISO 13400), `mock.rs`
-- **Session management:** `session.rs` — auto-sends tester-present (0x3E) every 2s in non-default sessions
+- **Session management:** `session.rs` — auto-sends tester-present (0x3E) every 2s in non-default sessions; `notify_ecu_reset()` tracks that ECU reverts to default session after reset (0x11)
 - **Subscriptions:** `subscription.rs` — `StreamManager` polls DIDs periodically to emulate UDS 0x2A
 - **UDS services:** Each UDS SID (0x10, 0x11, 0x19, 0x22, 0x27, 0x2A, 0x2E, 0x2F, 0x31, 0x34, 0x36, 0x37, 0x3E, 0x87) is implemented in the backend
 
 ### Gateway Composition (sovd-gateway)
 
 `GatewayBackend` wraps N child backends and itself implements `DiagnosticBackend`. Parameters are addressed as `child_id/param_id`. Capabilities are the OR of all children. Supports unlimited nesting for multi-tier architectures (tested up to 4-tier in `simulations/supplier_ota/`).
+
+### App Entity Model (example-app)
+
+`ManagedEcuBackend` in `crates/example-app/src/managed_ecu.rs` demonstrates the supplier app pattern. Key design:
+
+- **Two-level session management:** outer app session (local `RwLock<String>`) gates flash operations; inner ECU session is managed via `SovdProxyBackend` calls to the upstream server
+- **Internal security:** the app holds the supplier's security secret and performs seed-key authentication internally — external clients never see it (`set_security_mode` returns `NotSupported`)
+- **Parameter whitelist:** when `parameter_definitions` are configured, only those are exposed via `list_parameters()`. Standard UDS DIDs are intentionally omitted unless the supplier adds them. This lets the tier-1 curate what the OEM sees.
+- **Flash lifecycle:** `start_flash()` sets inner ECU to programming session + unlocks security. After ECU reset, `commit_flash()`/`rollback_flash()` must re-establish extended session + security because reset reverts both.
 
 ### Flash State Machine
 
@@ -104,6 +116,13 @@ Queued → Preparing → Transferring → AwaitingExit → AwaitingReset → Act
 - Abort only valid during Queued through AwaitingExit
 - AwaitingReset enforces ECU reboot before commit/rollback
 - State held in `parking_lot::RwLock`; lock ordering: `activation_state` before `flash_state` to prevent deadlocks
+
+### Security Model
+
+The SOVD server does NOT hold security secrets. Session and security setup is the caller's responsibility:
+- **Direct UDS access:** the external tester (or test harness) sets session and performs security access before calling `start_flash()`, `commit_flash()`, etc.
+- **App entity access:** the supplier app (`ManagedEcuBackend`) holds its own secret internally and manages inner ECU session/security itself — transparent to OEM clients.
+- **Simulation security:** the `SOVD-security-helper` service (separate project) holds secrets for simulation environments.
 
 ### DID Conversion Pipeline (sovd-conv)
 
@@ -123,4 +142,6 @@ Server config is TOML (`config/*.toml`). DID definitions are YAML (`config/did-d
 - Error types: `BackendError` (sovd-core) wraps into `ApiError` (sovd-api) which produces HTTP responses
 - Concurrency: `parking_lot::RwLock` for flash/activation state, `DashMap` for DID lookups, tokio broadcast channels for subscriptions/SSE
 - E2E tests require Linux with `vcan` kernel module loaded; tests use `serial_test` crate on shared vcan0
-- Server debug logging: `RUST_LOG=debug cargo run --bin sovdd -- config/sovd.toml`
+- E2E `TestHarness` spawns example-ecu + sovdd on port 18080; flash tests need `setup_programming_and_security()` before `start_flash()` and `setup_extended_and_security()` before `commit_flash()`/`rollback_flash()`
+- After ECU reset (0x11), session reverts to default (0x01) and security re-locks — this is per ISO 14229 and tracked by `notify_ecu_reset()` in session manager
+- Example-ecu security uses XOR algorithm with default secret `0xFF`
