@@ -259,8 +259,10 @@ impl FlashClient {
         loop {
             let status = self.get_upload_status(upload_id).await?;
 
-            if status.state.is_success() {
-                info!("Upload {} completed", upload_id);
+            // Upload is done when state is Pending (stored, awaiting verify),
+            // Verified, or any other success state.
+            if status.state.is_upload_complete() {
+                info!("Upload {} completed (state: {:?})", upload_id, status.state);
                 return Ok(status);
             }
 

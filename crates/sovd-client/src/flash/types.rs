@@ -442,6 +442,15 @@ impl TransferState {
         )
     }
 
+    /// Check if an upload is complete (ready for verify or already verified).
+    /// Pending = package stored, awaiting verification.
+    pub fn is_upload_complete(&self) -> bool {
+        matches!(
+            self,
+            Self::Pending | Self::Verified | Self::Finished | Self::Complete
+        )
+    }
+
     /// Check if the transfer succeeded
     pub fn is_success(&self) -> bool {
         matches!(
