@@ -39,10 +39,10 @@ example-ecu = { path = "crates/example-ecu" }
 tokio = { version = "1", features = ["full", "sync", "time", "signal"] }
 
 # Web framework
-axum = { version = "0.7", features = ["macros"] }
-axum-extra = { version = "0.9", features = ["typed-header"] }
-tower = { version = "0.4", features = ["util", "timeout"] }
-tower-http = { version = "0.5", features = ["cors", "trace", "timeout"] }
+axum = { version = "0.8", features = ["macros"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = { version = "0.5", features = ["util", "timeout"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "timeout"] }
 
 # SSE streaming
 tokio-stream = { version = "0.1", features = ["sync"] }
@@ -90,6 +90,6 @@ futures-util = "0.3"
 rstest = "0.18"
 pretty_assertions = "1.4"
 tempfile = "3"
-axum-test = "14"
+axum-test = "16"
 serial_test = "3"
 
