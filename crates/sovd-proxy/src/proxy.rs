@@ -11,7 +11,8 @@ use sovd_core::{
     ActivationState, BackendError, BackendResult, Capabilities, ClearFaultsResult, DataValue,
     DiagnosticBackend, EntityInfo, Fault, FaultFilter, FaultsResult, FlashStatus, IoControlAction,
     IoControlResult, LogEntry, LogFilter, OperationExecution, OperationInfo, OutputDetail,
-    OutputInfo, PackageInfo, ParameterInfo, SecurityMode, SecurityState, SessionMode, VerifyResult,
+    OutputInfo, PackageInfo, PackageStream, ParameterInfo, SecurityMode, SecurityState, SessionMode,
+    VerifyResult,
 };
 
 /// Convert client-side capabilities to core Capabilities.
@@ -1114,6 +1115,47 @@ impl DiagnosticBackend for SovdProxyBackend {
             .http_client()
             .post(&url)
             .body(data.to_vec())
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(Self::map_response_error(response).await);
+        }
+
+        let resp: UploadFileResp = response.json().await.map_err(|e| {
+            BackendError::Protocol(format!("Failed to parse upload response: {}", e))
+        })?;
+
+        Ok(resp.file_id)
+    }
+
+    async fn receive_package_stream(
+        &self,
+        stream: PackageStream,
+        content_length: Option<u64>,
+    ) -> BackendResult<String> {
+        let url = self.flash_url("/files")?;
+        tracing::info!(url = %url, content_length = ?content_length, "Proxy: streaming package upload");
+
+        // Convert PackageStream to reqwest Body for stream-forwarding
+        let body = reqwest::Body::wrap_stream(stream);
+
+        let mut req = self
+            .client
+            .http_client()
+            .post(&url)
+            .header("Content-Type", "application/octet-stream");
+
+        if let Some(len) = content_length {
+            req = req.header("Content-Length", len);
+        }
+
+        // Use a generous timeout for streaming uploads — the backend processes
+        // the stream inline (decrypt, decompress, hash, write).
+        let response = req
+            .timeout(std::time::Duration::from_secs(600))
+            .body(body)
             .send()
             .await
             .map_err(|e| BackendError::Transport(e.to_string()))?;

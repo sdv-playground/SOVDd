@@ -1,13 +1,15 @@
 //! File (package) management handlers for async flash flow
 //!
 //! Provides endpoints for uploading, listing, verifying, and deleting software packages.
+//! Supports streaming uploads via HTTP/1.1 chunked transfer encoding per ASAM SOVD.
 
-use axum::body::Bytes;
+use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
+use futures::StreamExt;
 use serde::Serialize;
-use sovd_core::{PackageInfo, VerifyResult};
+use sovd_core::{PackageInfo, PackageStream, VerifyResult};
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -45,20 +47,44 @@ pub struct FileInfo {
 }
 
 /// POST /vehicle/v1/components/:component_id/files
-/// Upload a software package
+/// Upload a software package (supports streaming via chunked transfer encoding)
 pub async fn upload_file(
     State(state): State<AppState>,
     Path(component_id): Path<String>,
-    body: Bytes,
+    headers: HeaderMap,
+    body: Body,
 ) -> Result<(StatusCode, Json<UploadFileResponse>), ApiError> {
     let backend = state.get_backend(&component_id)?;
 
-    let file_id = backend
-        .receive_package(&body)
-        .await
-        .map_err(ApiError::from)?;
+    let content_length = headers
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
 
-    let size = body.len();
+    tracing::info!(
+        component_id = %component_id,
+        content_length = ?content_length,
+        "File upload started"
+    );
+
+    // Convert axum Body to PackageStream for streaming to backend.
+    // Backends that support streaming process the stream directly.
+    // Backends that don't will collect to bytes via the default trait impl.
+    let stream = body.into_data_stream();
+    let pkg_stream: PackageStream = Box::pin(
+        stream.map(|r| r.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)),
+    );
+
+    let (file_id, size) = match backend
+        .receive_package_stream(pkg_stream, content_length)
+        .await
+    {
+        Ok(id) => {
+            let size = content_length.unwrap_or(0) as usize;
+            (id, size)
+        }
+        Err(e) => return Err(ApiError::from(e)),
+    };
 
     tracing::info!(
         component_id = %component_id,

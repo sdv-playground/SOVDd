@@ -10,7 +10,7 @@ pub mod routing;
 
 pub use backend::{
     ActivationState, DiagnosticBackend, FlashProgress, FlashState, FlashStatus, PackageInfo,
-    PackageStatus, SoftwareInfo, VerifyResult,
+    PackageStatus, PackageStream, SoftwareInfo, VerifyResult,
 };
 pub use error::{BackendError, BackendResult};
 pub use models::*;

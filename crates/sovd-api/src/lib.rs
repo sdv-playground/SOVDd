@@ -24,6 +24,7 @@ pub use state::AppState;
 // Re-export DidStore from sovd-conv for convenience
 pub use sovd_conv::{DataType, DidDefinition, DidStore};
 
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
@@ -140,7 +141,8 @@ pub fn create_router(state: AppState) -> Router {
         // Sub-entity file routes (SOVD spec: sub-entities inherit all resources)
         .route(
             "/vehicle/v1/components/{component_id}/apps/{app_id}/files",
-            post(handlers::sub_entity::upload_file).get(handlers::sub_entity::list_files),
+            post(handlers::sub_entity::upload_file)
+                .get(handlers::sub_entity::list_files),
         )
         .route(
             "/vehicle/v1/components/{component_id}/apps/{app_id}/files/{file_id}",
@@ -270,7 +272,8 @@ pub fn create_router(state: AppState) -> Router {
         // File (package) management routes - async flash flow
         .route(
             "/vehicle/v1/components/{component_id}/files",
-            post(handlers::files::upload_file).get(handlers::files::list_files),
+            post(handlers::files::upload_file)
+                .get(handlers::files::list_files),
         )
         .route(
             "/vehicle/v1/components/{component_id}/files/{file_id}",
@@ -320,6 +323,7 @@ pub fn create_router(state: AppState) -> Router {
                 .delete(handlers::definitions::delete_definition),
         )
         // Middleware
+        .layer(DefaultBodyLimit::disable()) // SOVD streaming uploads (ASAM SOVD chunked transfer)
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)

@@ -213,7 +213,13 @@ impl FlashClient {
 
         request = self.add_auth_header(request);
 
-        let response = request.body(data.to_vec()).send().await?;
+        // Use upload timeout (default 5 min) instead of the general request timeout (30s),
+        // since streaming uploads include server-side processing (decrypt, decompress, write).
+        let response = request
+            .timeout(Duration::from_millis(self.config.timeouts.upload_ms))
+            .body(data.to_vec())
+            .send()
+            .await?;
         self.handle_response(response).await
     }
 

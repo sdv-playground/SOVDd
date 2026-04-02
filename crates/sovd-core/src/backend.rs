@@ -1,9 +1,12 @@
 //! DiagnosticBackend trait - the core abstraction for SOVD backends
 
+use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -14,6 +17,14 @@ use crate::models::{
     LogFilter, OperationExecution, OperationInfo, OutputDetail, OutputInfo, ParameterInfo,
     SecurityMode, SessionMode,
 };
+
+/// Byte stream for streaming package upload (HTTP/1.1 chunked transfer).
+///
+/// Used by `receive_package_stream` to avoid buffering the full firmware
+/// payload in memory. Each `Bytes` chunk is forwarded or processed inline.
+pub type PackageStream = Pin<
+    Box<dyn Stream<Item = Result<Bytes, Box<dyn std::error::Error + Send + Sync>>> + Send>,
+>;
 
 // =============================================================================
 // Package Management Types
@@ -476,6 +487,34 @@ pub trait DiagnosticBackend: Send + Sync {
         Err(crate::error::BackendError::NotSupported(
             "receive_package".to_string(),
         ))
+    }
+
+    /// Receive a software package from a streaming upload.
+    ///
+    /// Per ASAM SOVD, large uploads use HTTP/1.1 chunked transfer encoding.
+    /// The stream delivers the payload in chunks without buffering the full
+    /// body in memory. Backends that support streaming should override this;
+    /// the default collects the stream to bytes and delegates to `receive_package`.
+    async fn receive_package_stream(
+        &self,
+        mut stream: PackageStream,
+        _content_length: Option<u64>,
+    ) -> BackendResult<String> {
+        // Default: collect stream to bytes, delegate to buffered receive_package
+        let mut data = Vec::new();
+        loop {
+            let chunk = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
+            match chunk {
+                Some(Ok(bytes)) => data.extend_from_slice(&bytes),
+                Some(Err(e)) => {
+                    return Err(crate::error::BackendError::Internal(format!(
+                        "stream read error: {e}"
+                    )));
+                }
+                None => break,
+            }
+        }
+        self.receive_package(&data).await
     }
 
     /// List all stored packages

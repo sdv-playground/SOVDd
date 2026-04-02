@@ -14,12 +14,13 @@
 
 use std::sync::Arc;
 
-use axum::body::Bytes;
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use chrono::Utc;
-use sovd_core::DiagnosticBackend;
+use futures::StreamExt;
+use sovd_core::{DiagnosticBackend, PackageStream};
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -73,17 +74,41 @@ async fn resolve(
 // =========================================================================
 
 /// POST /vehicle/v1/components/:component_id/apps/:app_id/files
+/// Supports streaming via HTTP/1.1 chunked transfer encoding per ASAM SOVD.
 pub async fn upload_file(
     State(state): State<AppState>,
     Path((component_id, app_id)): Path<(String, String)>,
-    body: Bytes,
+    headers: HeaderMap,
+    body: Body,
 ) -> Result<(StatusCode, Json<UploadFileResponse>), ApiError> {
     let backend = resolve(&state, &component_id, &app_id).await?;
-    let file_id = backend
-        .receive_package(&body)
+
+    let content_length = headers
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+
+    tracing::info!(
+        app_id = %app_id,
+        content_length = ?content_length,
+        "File upload started on sub-entity"
+    );
+
+    let stream = body.into_data_stream();
+    let pkg_stream: PackageStream = Box::pin(
+        stream.map(|r| r.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)),
+    );
+
+    let (file_id, size) = match backend
+        .receive_package_stream(pkg_stream, content_length)
         .await
-        .map_err(ApiError::from)?;
-    let size = body.len();
+    {
+        Ok(id) => {
+            let size = content_length.unwrap_or(0) as usize;
+            (id, size)
+        }
+        Err(e) => return Err(ApiError::from(e)),
+    };
 
     tracing::info!(app_id = %app_id, file_id = %file_id, size, "File uploaded to sub-entity");
 
