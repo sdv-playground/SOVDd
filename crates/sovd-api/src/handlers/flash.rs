@@ -11,11 +11,15 @@ use sovd_core::FlashStatus;
 use crate::error::ApiError;
 use crate::state::AppState;
 
-/// Request to start a flash transfer
+/// Request to start a flash transfer.
 #[derive(Debug, Deserialize)]
 pub struct StartFlashRequest {
-    /// ID of the file/package to flash
-    pub file_id: String,
+    /// ID of the pre-uploaded manifest.
+    pub manifest_id: String,
+
+    /// Map of URI → payload_id.
+    /// e.g., { "#kernel": "3", "#firmware": "4" }
+    pub payload_ids: std::collections::HashMap<String, String>,
 }
 
 /// Response for starting a flash transfer
@@ -56,13 +60,14 @@ pub async fn start_flash(
     let backend = state.get_backend(&component_id)?;
 
     let transfer_id = backend
-        .start_flash(&request.file_id)
+        .start_flash(&request.manifest_id, &request.payload_ids)
         .await
         .map_err(ApiError::from)?;
 
     tracing::info!(
         component_id = %component_id,
-        file_id = %request.file_id,
+        manifest_id = %request.manifest_id,
+        payloads = ?request.payload_ids.keys().collect::<Vec<_>>(),
         transfer_id = %transfer_id,
         "Flash transfer started"
     );

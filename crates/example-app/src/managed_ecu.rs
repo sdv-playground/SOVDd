@@ -594,13 +594,13 @@ impl DiagnosticBackend for ManagedEcuBackend {
     // Flash Transfer — proxy to upstream ECU via FlashClient
     // =========================================================================
 
-    async fn start_flash(&self, package_id: &str) -> BackendResult<String> {
+    async fn start_flash(&self, manifest_id: &str, payload_ids: &std::collections::HashMap<String, String>) -> BackendResult<String> {
         self.require_programming_session().await?;
 
         let packages = self.packages.read().await;
         let pkg = packages
-            .get(package_id)
-            .ok_or_else(|| BackendError::EntityNotFound(package_id.to_string()))?;
+            .get(manifest_id)
+            .ok_or_else(|| BackendError::EntityNotFound(manifest_id.to_string()))?;
 
         if pkg.info.status != PackageStatus::Verified {
             return Err(BackendError::InvalidRequest(
@@ -620,7 +620,7 @@ impl DiagnosticBackend for ManagedEcuBackend {
         }
 
         tracing::info!(
-            package_id = %package_id,
+            manifest_id = %manifest_id,
             size = pkg.data.len(),
             "Uploading verified package to upstream ECU"
         );
@@ -646,7 +646,7 @@ impl DiagnosticBackend for ManagedEcuBackend {
 
         let flash_resp = self
             .flash_client
-            .start_flash(&upload_resp.upload_id)
+            .start_flash(&upload_resp.upload_id, &std::collections::HashMap::new())
             .await
             .map_err(|e| BackendError::Transport(format!("Upstream flash start failed: {}", e)))?;
 

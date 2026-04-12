@@ -552,11 +552,18 @@ pub trait DiagnosticBackend: Send + Sync {
     // Async Flash Transfer
     // =========================================================================
 
-    /// Start a flash transfer operation
-    /// Returns the transfer ID for monitoring progress
-    /// The backend handles session/security/erase/transfer internally
-    async fn start_flash(&self, package_id: &str) -> BackendResult<String> {
-        let _ = package_id;
+    /// Start a flash transfer operation.
+    ///
+    /// `manifest_id`: the pre-uploaded manifest.
+    /// `payload_ids`: map of URI → payload file ID (e.g., "#kernel" → "3").
+    ///
+    /// Returns the transfer ID for monitoring progress.
+    async fn start_flash(
+        &self,
+        manifest_id: &str,
+        payload_ids: &std::collections::HashMap<String, String>,
+    ) -> BackendResult<String> {
+        let _ = (manifest_id, payload_ids);
         Err(crate::error::BackendError::NotSupported(
             "start_flash".to_string(),
         ))

@@ -212,7 +212,7 @@ pub async fn start_flash(
 ) -> Result<(StatusCode, Json<StartFlashResponse>), ApiError> {
     let backend = resolve(&state, &component_id, &app_id).await?;
     let transfer_id = backend
-        .start_flash(&request.file_id)
+        .start_flash(&request.manifest_id, &request.payload_ids)
         .await
         .map_err(ApiError::from)?;
 

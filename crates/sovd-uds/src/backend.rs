@@ -1240,7 +1240,7 @@ impl DiagnosticBackend for UdsBackend {
     // Async Flash Transfer
     // =========================================================================
 
-    async fn start_flash(&self, package_id: &str) -> BackendResult<String> {
+    async fn start_flash(&self, manifest_id: &str, payload_ids: &std::collections::HashMap<String, String>) -> BackendResult<String> {
         // Check if there's already an active transfer.
         // Allow restart from terminal states and post-transfer states
         // (AwaitingReset/Activated — user may have power-cycled the ECU).
@@ -1265,8 +1265,8 @@ impl DiagnosticBackend for UdsBackend {
         // Get the package data
         let package_data = {
             let packages = self.packages.read();
-            let package = packages.get(package_id).ok_or_else(|| {
-                BackendError::EntityNotFound(format!("Package not found: {}", package_id))
+            let package = packages.get(manifest_id).ok_or_else(|| {
+                BackendError::EntityNotFound(format!("Package not found: {}", manifest_id))
             })?;
 
             if package.status != PackageStatus::Verified {
@@ -1298,13 +1298,13 @@ impl DiagnosticBackend for UdsBackend {
         // Caller is responsible for session and security setup before starting flash.
 
         let transfer_id = Uuid::new_v4().to_string();
-        let package_id = package_id.to_string();
+        let manifest_id = manifest_id.to_string();
         let data_len = package_data.len() as u64;
 
         // Create initial transfer state
         let transfer = FlashTransfer {
             id: transfer_id.clone(),
-            package_id: package_id.clone(),
+            package_id: manifest_id.clone(),
             state: FlashState::Queued,
             progress: FlashProgress {
                 bytes_transferred: 0,
@@ -1343,7 +1343,7 @@ impl DiagnosticBackend for UdsBackend {
 
         info!(
             transfer_id = %transfer_id,
-            package_id = %package_id,
+            manifest_id = %manifest_id,
             size = data_len,
             "Flash transfer started"
         );
