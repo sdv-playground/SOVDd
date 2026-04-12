@@ -65,7 +65,7 @@ pub async fn flash(client: &FlashClient, file_path: &Path, ctx: &OutputContext) 
     // Phase 3: Flash
     pb.set_message("Flashing...");
     let transfer = client
-        .start_flash(file_id, &std::collections::HashMap::new())
+        .start_flash()
         .await
         .context("Failed to start flash transfer")?;
 

@@ -1254,11 +1254,11 @@ impl DiagnosticBackend for SovdProxyBackend {
     // Flash Transfer (proxied to upstream)
     // =========================================================================
 
-    async fn start_flash(&self, manifest_id: &str, payload_ids: &std::collections::HashMap<String, String>) -> BackendResult<String> {
+    async fn start_flash(&self) -> BackendResult<String> {
         let url = self.flash_url("/flash/transfer")?;
-        let body = serde_json::json!({ "file_id": manifest_id });
+        let body = serde_json::json!({});
 
-        tracing::info!(url = %url, manifest_id = %manifest_id, "Proxy: starting flash transfer");
+        tracing::info!(url = %url, "Proxy: starting flash transfer");
 
         let response = self
             .client

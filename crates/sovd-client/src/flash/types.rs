@@ -157,15 +157,9 @@ pub struct VerifyResponse {
 // Flash Transfer Types (Phase 2: ECU Flash)
 // =============================================================================
 
-/// Request to start a flash transfer.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StartFlashRequest {
-    /// ID of the pre-uploaded manifest.
-    pub manifest_id: String,
-
-    /// Map of URI → payload file ID.
-    pub payload_ids: std::collections::HashMap<String, String>,
-}
+/// Request to start a flash transfer session.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StartFlashRequest {}
 
 /// Response from starting a flash transfer
 #[derive(Debug, Clone, Serialize, Deserialize)]

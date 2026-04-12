@@ -11,16 +11,15 @@ use sovd_core::FlashStatus;
 use crate::error::ApiError;
 use crate::state::AppState;
 
-/// Request to start a flash transfer.
-#[derive(Debug, Deserialize)]
-pub struct StartFlashRequest {
-    /// ID of the pre-uploaded manifest.
-    pub manifest_id: String,
-
-    /// Map of URI → payload_id.
-    /// e.g., { "#kernel": "3", "#firmware": "4" }
-    pub payload_ids: std::collections::HashMap<String, String>,
-}
+/// Request to start a flash transfer session.
+///
+/// Initiates a session. After this, upload files in order:
+/// 1. First upload = SUIT manifest (parsed, validated)
+/// 2. Subsequent uploads = payloads in manifest component order
+///    (each streamed through decrypt → decompress → write to bank)
+/// 3. PUT /flash/transferexit to finalize (bank flip)
+#[derive(Debug, Deserialize, Default)]
+pub struct StartFlashRequest {}
 
 /// Response for starting a flash transfer
 #[derive(Debug, Serialize)]
@@ -60,16 +59,14 @@ pub async fn start_flash(
     let backend = state.get_backend(&component_id)?;
 
     let transfer_id = backend
-        .start_flash(&request.manifest_id, &request.payload_ids)
+        .start_flash()
         .await
         .map_err(ApiError::from)?;
 
     tracing::info!(
         component_id = %component_id,
-        manifest_id = %request.manifest_id,
-        payloads = ?request.payload_ids.keys().collect::<Vec<_>>(),
         transfer_id = %transfer_id,
-        "Flash transfer started"
+        "Flash session started (awaiting manifest + payloads)"
     );
 
     let response = StartFlashResponse {

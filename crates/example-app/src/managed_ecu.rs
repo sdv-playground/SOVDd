@@ -594,19 +594,19 @@ impl DiagnosticBackend for ManagedEcuBackend {
     // Flash Transfer — proxy to upstream ECU via FlashClient
     // =========================================================================
 
-    async fn start_flash(&self, manifest_id: &str, payload_ids: &std::collections::HashMap<String, String>) -> BackendResult<String> {
+    async fn start_flash(&self) -> BackendResult<String> {
         self.require_programming_session().await?;
 
+        // Find the verified package (no args — use the single verified package)
         let packages = self.packages.read().await;
-        let pkg = packages
-            .get(manifest_id)
-            .ok_or_else(|| BackendError::EntityNotFound(manifest_id.to_string()))?;
-
-        if pkg.info.status != PackageStatus::Verified {
-            return Err(BackendError::InvalidRequest(
-                "Package must be verified before flashing".to_string(),
-            ));
-        }
+        let (manifest_id, pkg) = packages
+            .iter()
+            .find(|(_, p)| p.info.status == PackageStatus::Verified)
+            .ok_or_else(|| {
+                BackendError::InvalidRequest(
+                    "No verified package available for flashing".to_string(),
+                )
+            })?;
 
         // Inner session: set ECU to programming mode before uploading
         tracing::info!("Setting ECU programming session (inner session)");
@@ -646,7 +646,7 @@ impl DiagnosticBackend for ManagedEcuBackend {
 
         let flash_resp = self
             .flash_client
-            .start_flash(&upload_resp.upload_id, &std::collections::HashMap::new())
+            .start_flash()
             .await
             .map_err(|e| BackendError::Transport(format!("Upstream flash start failed: {}", e)))?;
 

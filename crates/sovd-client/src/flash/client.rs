@@ -349,22 +349,15 @@ impl FlashClient {
     ///
     /// The flash happens in the background. Poll with `get_flash_status()`
     /// or use `poll_flash_complete()` to wait for completion.
-    /// Start a flash transfer with manifest + payloads.
+    /// Start a flash transfer session.
+    ///
+    /// After this, upload files in order: manifest first, then payloads.
     #[instrument(skip(self))]
-    pub async fn start_flash(
-        &self,
-        manifest_id: &str,
-        payload_ids: &std::collections::HashMap<String, String>,
-    ) -> Result<StartFlashResponse> {
+    pub async fn start_flash(&self) -> Result<StartFlashResponse> {
         let url = self.build_url(&self.config.flash_transfer_path())?;
-        info!("Starting flash for manifest {} at {}", manifest_id, url);
+        info!("Starting flash session at {}", url);
 
-        let request_body = StartFlashRequest {
-            manifest_id: manifest_id.to_string(),
-            payload_ids: payload_ids.clone(),
-        };
-
-        let mut request = self.client.post(url).json(&request_body);
+        let mut request = self.client.post(url).json(&StartFlashRequest::default());
         request = self.add_auth_header(request);
 
         let response = request.send().await?;
@@ -603,8 +596,7 @@ impl FlashClient {
             cb(FlashUpdatePhase::Flashing, Some(0.0));
         }
 
-        // Legacy single-envelope: manifest_id = file_id, no separate payloads
-        let flash = self.start_flash(&file_id, &std::collections::HashMap::new()).await?;
+        let flash = self.start_flash().await?;
 
         // Poll with progress updates
         let flash_progress_cb = progress_callback.as_mut().map(|cb| {

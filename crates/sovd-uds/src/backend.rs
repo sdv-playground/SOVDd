@@ -1240,7 +1240,7 @@ impl DiagnosticBackend for UdsBackend {
     // Async Flash Transfer
     // =========================================================================
 
-    async fn start_flash(&self, manifest_id: &str, payload_ids: &std::collections::HashMap<String, String>) -> BackendResult<String> {
+    async fn start_flash(&self) -> BackendResult<String> {
         // Check if there's already an active transfer.
         // Allow restart from terminal states and post-transfer states
         // (AwaitingReset/Activated — user may have power-cycled the ECU).
@@ -1262,20 +1262,18 @@ impl DiagnosticBackend for UdsBackend {
             }
         }
 
-        // Get the package data
-        let package_data = {
+        // Find the verified package to flash (no args — use the single verified package)
+        let (manifest_id, package_data) = {
             let packages = self.packages.read();
-            let package = packages.get(manifest_id).ok_or_else(|| {
-                BackendError::EntityNotFound(format!("Package not found: {}", manifest_id))
-            })?;
-
-            if package.status != PackageStatus::Verified {
-                return Err(BackendError::InvalidRequest(
-                    "Package must be verified before flashing".to_string(),
-                ));
-            }
-
-            package.data.clone()
+            let (id, pkg) = packages
+                .iter()
+                .find(|(_, p)| p.status == PackageStatus::Verified)
+                .ok_or_else(|| {
+                    BackendError::InvalidRequest(
+                        "No verified package available for flashing".to_string(),
+                    )
+                })?;
+            (id.clone(), pkg.data.clone())
         };
 
         // Capture current SW version before flashing (for rollback support)
@@ -1298,7 +1296,6 @@ impl DiagnosticBackend for UdsBackend {
         // Caller is responsible for session and security setup before starting flash.
 
         let transfer_id = Uuid::new_v4().to_string();
-        let manifest_id = manifest_id.to_string();
         let data_len = package_data.len() as u64;
 
         // Create initial transfer state

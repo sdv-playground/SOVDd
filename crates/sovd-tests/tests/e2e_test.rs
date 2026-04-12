@@ -2962,7 +2962,7 @@ async fn test_start_flash_transfer() {
 
     // Start flash transfer
     let flash_resp = flash_client
-        .start_flash(file_id)
+        .start_flash()
         .await
         .expect("Start flash failed");
 
@@ -3009,7 +3009,7 @@ async fn test_flash_transfer_status() {
 
     // Start flash
     let flash_resp = flash_client
-        .start_flash(file_id)
+        .start_flash()
         .await
         .expect("Start flash failed");
 
@@ -3078,7 +3078,7 @@ async fn test_finalize_flash_transfer() {
 
     // Start flash
     let flash_resp = flash_client
-        .start_flash(file_id)
+        .start_flash()
         .await
         .expect("Start flash failed");
 
@@ -3300,7 +3300,7 @@ async fn test_abort_flash_transfer() {
 
     // Start flash
     let flash_resp = flash_client
-        .start_flash(file_id)
+        .start_flash()
         .await
         .expect("start_flash failed");
 
@@ -3381,7 +3381,7 @@ async fn test_complete_flash_workflow() {
     // Step 4: Start flash transfer
     eprintln!("Step 4: Starting flash transfer...");
     let flash_resp = flash_client
-        .start_flash(file_id)
+        .start_flash()
         .await
         .expect("Start flash failed");
     let transfer_id = &flash_resp.transfer_id;
@@ -3525,7 +3525,7 @@ async fn test_flash_workflow_block_counter_1() {
     // Step 4: Start flash transfer
     eprintln!("Step 4: Starting flash transfer (block_counter_start=1)...");
     let flash_resp = flash_client
-        .start_flash(file_id)
+        .start_flash()
         .await
         .expect("Start flash failed");
     let transfer_id = &flash_resp.transfer_id;
@@ -4268,7 +4268,7 @@ async fn test_software_update_full_cycle_with_version_check() {
     // Step 6: Start flash transfer
     eprintln!("\n--- Step 6: Start flash transfer ---");
     let flash_resp = flash_client
-        .start_flash(&file_id)
+        .start_flash()
         .await
         .expect("start_flash failed");
     let transfer_id = flash_resp.transfer_id;
@@ -4397,7 +4397,7 @@ async fn test_software_update_detects_corrupted_firmware() {
 
     // Attempt to flash - should fail due to corrupted internal checksum
     eprintln!("\n--- Attempting to flash corrupted firmware ---");
-    let flash_result = flash_client.start_flash(&file_id).await;
+    let flash_result = flash_client.start_flash().await;
 
     let flash_failed = match flash_result {
         Err(e) => {
@@ -4518,7 +4518,7 @@ async fn test_software_update_rejects_invalid_header() {
 
     // Attempt to flash - should fail due to invalid header
     eprintln!("\n--- Attempting to flash firmware with invalid header ---");
-    let flash_result = flash_client.start_flash(&file_id).await;
+    let flash_result = flash_client.start_flash().await;
 
     let flash_failed = match flash_result {
         Err(e) => {
@@ -5115,7 +5115,7 @@ async fn test_flash_commit_workflow() {
     // Step 4: Start flash transfer
     eprintln!("Step 4: Starting flash transfer...");
     let flash_resp = flash_client
-        .start_flash(file_id)
+        .start_flash()
         .await
         .expect("Start flash failed");
     let transfer_id = &flash_resp.transfer_id;
@@ -5278,7 +5278,7 @@ async fn test_flash_rollback_workflow() {
         .expect("setup_programming_and_security failed");
 
     let flash_resp = flash_client
-        .start_flash(file_id)
+        .start_flash()
         .await
         .expect("Start flash failed");
     let transfer_id = &flash_resp.transfer_id;
@@ -5511,7 +5511,7 @@ async fn test_abort_during_awaiting_exit() {
     // Start flash and poll until complete (AwaitingExit)
     eprintln!("Step 3: Flash and poll to AwaitingExit...");
     let flash_resp = flash_client
-        .start_flash(file_id)
+        .start_flash()
         .await
         .expect("Start flash failed");
     let transfer_id = &flash_resp.transfer_id;
@@ -5611,7 +5611,7 @@ async fn test_abort_after_activated_rejected() {
         .expect("setup_programming_and_security failed");
 
     let flash_resp = flash_client
-        .start_flash(file_id)
+        .start_flash()
         .await
         .expect("Start flash failed");
     let transfer_id = &flash_resp.transfer_id;
@@ -5734,7 +5734,7 @@ async fn test_abort_after_committed_rejected() {
         .expect("setup_programming_and_security failed");
 
     let flash_resp = flash_client
-        .start_flash(file_id)
+        .start_flash()
         .await
         .expect("Start flash failed");
     let transfer_id = &flash_resp.transfer_id;
@@ -5848,7 +5848,7 @@ async fn test_abort_after_rolledback_rejected() {
         .expect("setup_programming_and_security failed");
 
     let flash_resp = flash_client
-        .start_flash(file_id)
+        .start_flash()
         .await
         .expect("Start flash failed");
     let transfer_id = &flash_resp.transfer_id;
@@ -5963,7 +5963,7 @@ async fn test_abort_after_awaiting_reset_rejected() {
         .expect("setup_programming_and_security failed");
 
     let flash_resp = flash_client
-        .start_flash(file_id)
+        .start_flash()
         .await
         .expect("Start flash failed");
     let transfer_id = &flash_resp.transfer_id;
