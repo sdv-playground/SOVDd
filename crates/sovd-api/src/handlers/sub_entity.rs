@@ -208,7 +208,7 @@ pub async fn delete_file(
 pub async fn start_flash(
     State(state): State<AppState>,
     Path((component_id, app_id)): Path<(String, String)>,
-    Json(request): Json<StartFlashRequest>,
+    Json(_request): Json<StartFlashRequest>,
 ) -> Result<(StatusCode, Json<StartFlashResponse>), ApiError> {
     let backend = resolve(&state, &component_id, &app_id).await?;
     let transfer_id = backend

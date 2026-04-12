@@ -54,7 +54,7 @@ pub struct TransferInfo {
 pub async fn start_flash(
     State(state): State<AppState>,
     Path(component_id): Path<String>,
-    Json(request): Json<StartFlashRequest>,
+    Json(_request): Json<StartFlashRequest>,
 ) -> Result<(StatusCode, Json<StartFlashResponse>), ApiError> {
     let backend = state.get_backend(&component_id)?;
 
