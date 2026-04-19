@@ -464,7 +464,7 @@ impl DiagnosticBackend for UdsBackend {
         // If firmware is awaiting reset, transition to Activated now that the ECU has rebooted
         let needs_transition = {
             let activation = self.activation_state.read();
-            activation.state == FlashState::AwaitingReset
+            activation.state == FlashState::AwaitingReboot
         };
 
         if needs_transition {
@@ -478,7 +478,7 @@ impl DiagnosticBackend for UdsBackend {
                     transfer.state = FlashState::Activated;
                 }
             }
-            info!("ECU reset detected AwaitingReset state, transitioned to Activated");
+            info!("ECU reset detected AwaitingReboot state, transitioned to Activated");
         }
 
         Ok(result)
@@ -1243,7 +1243,7 @@ impl DiagnosticBackend for UdsBackend {
     async fn start_flash(&self) -> BackendResult<String> {
         // Check if there's already an active transfer.
         // Allow restart from terminal states and post-transfer states
-        // (AwaitingReset/Activated — user may have power-cycled the ECU).
+        // (AwaitingReboot/Activated — user may have power-cycled the ECU).
         {
             let flash_state = self.flash_state.read();
             if let Some(ref transfer) = *flash_state {
@@ -1252,7 +1252,7 @@ impl DiagnosticBackend for UdsBackend {
                     FlashState::Queued
                         | FlashState::Preparing
                         | FlashState::Transferring
-                        | FlashState::AwaitingExit
+                        | FlashState::AwaitingActivation
                 ) {
                     return Err(BackendError::InvalidRequest(format!(
                         "Flash transfer already in progress: {}",
@@ -1400,20 +1400,20 @@ impl DiagnosticBackend for UdsBackend {
             }
 
             // Only allow abort during active transfer phases.
-            // Post-finalize states (AwaitingReset, Activated, Committed, RolledBack, Complete)
+            // Post-finalize states (AwaitingReboot, Activated, Committed, RolledBack, Complete)
             // cannot be aborted — use ecu_reset() then rollback_flash() for post-finalize states.
             if !matches!(
                 transfer.state,
                 FlashState::Queued
                     | FlashState::Preparing
                     | FlashState::Transferring
-                    | FlashState::AwaitingExit
+                    | FlashState::AwaitingActivation
             ) {
                 return Err(BackendError::InvalidRequest(format!(
                     "Cannot abort transfer in state {:?}. {}",
                     transfer.state,
                     match transfer.state {
-                        FlashState::AwaitingReset => "Firmware is written and awaiting ECU reset. Call ecu_reset() to activate, then rollback_flash() to revert.",
+                        FlashState::AwaitingReboot => "Firmware is written and awaiting ECU reset. Call ecu_reset() to activate, then rollback_flash() to revert.",
                         FlashState::Activated => "Use rollback_flash() to revert activated firmware.",
                         _ => "Transfer is already in a terminal state.",
                     }
@@ -1462,7 +1462,7 @@ impl DiagnosticBackend for UdsBackend {
                 BackendError::EntityNotFound("No flash transfer in progress".to_string())
             })?;
 
-            if transfer.state != FlashState::AwaitingExit {
+            if transfer.state != FlashState::AwaitingActivation {
                 return Err(BackendError::InvalidRequest(format!(
                     "Cannot finalize transfer in state: {:?}",
                     transfer.state
@@ -1477,9 +1477,9 @@ impl DiagnosticBackend for UdsBackend {
             .map(|_| ())
             .map_err(crate::error::convert_uds_error)?;
 
-        // Update state: AwaitingReset if rollback supported (ECU must reboot), otherwise Complete
+        // Update state: AwaitingReboot if rollback supported (ECU must reboot), otherwise Complete
         let new_state = if self.flash_commit_config.supports_rollback {
-            FlashState::AwaitingReset
+            FlashState::AwaitingReboot
         } else {
             FlashState::Complete
         };
@@ -1494,7 +1494,7 @@ impl DiagnosticBackend for UdsBackend {
         // Update activation state
         if self.flash_commit_config.supports_rollback {
             let mut activation = self.activation_state.write();
-            activation.state = FlashState::AwaitingReset;
+            activation.state = FlashState::AwaitingReboot;
             info!("Flash transfer finalized, awaiting ECU reset to activate firmware");
         } else {
             info!("Flash transfer finalized");
@@ -1510,7 +1510,7 @@ impl DiagnosticBackend for UdsBackend {
             ));
         }
 
-        // Auto-detect reset if still in AwaitingReset (handles external power cycles)
+        // Auto-detect reset if still in AwaitingReboot (handles external power cycles)
         self.check_activation_transition().await;
 
         // Validate activation state
@@ -1569,7 +1569,7 @@ impl DiagnosticBackend for UdsBackend {
             ));
         }
 
-        // Auto-detect reset if still in AwaitingReset (handles external power cycles)
+        // Auto-detect reset if still in AwaitingReboot (handles external power cycles)
         self.check_activation_transition().await;
 
         // Validate activation state
@@ -1640,7 +1640,7 @@ impl DiagnosticBackend for UdsBackend {
 }
 
 impl UdsBackend {
-    /// Read the ECU's current SW version and, if in AwaitingReset state,
+    /// Read the ECU's current SW version and, if in AwaitingReboot state,
     /// auto-detect whether the ECU has rebooted with new firmware.
     ///
     /// This handles both SOVD-triggered resets (ecu_reset already transitions)
@@ -1656,11 +1656,11 @@ impl UdsBackend {
             _ => None,
         };
 
-        // If in AwaitingReset and version differs from previous, the ECU has
+        // If in AwaitingReboot and version differs from previous, the ECU has
         // rebooted with new firmware — transition to Activated
         let needs_transition = {
             let activation = self.activation_state.read();
-            if activation.state == FlashState::AwaitingReset {
+            if activation.state == FlashState::AwaitingReboot {
                 if let (Some(ref active), Some(ref previous)) =
                     (&active_version, &activation.previous_version)
                 {
@@ -1795,7 +1795,7 @@ impl UdsBackend {
         }
 
         // Step 4: Ready for RequestTransferExit
-        update_state(FlashState::AwaitingExit);
+        update_state(FlashState::AwaitingActivation);
         info!(
             transfer_id = %transfer_id,
             bytes_sent,

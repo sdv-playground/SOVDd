@@ -3085,7 +3085,7 @@ async fn test_finalize_flash_transfer() {
     let transfer_id = &flash_resp.transfer_id;
     eprintln!("Transfer ID: {}", transfer_id);
 
-    // Poll until awaiting_exit or complete using the client
+    // Poll until awaiting_activation or complete using the client
     let status = flash_client
         .poll_flash_complete_simple(transfer_id)
         .await
@@ -3114,8 +3114,8 @@ async fn test_finalize_flash_transfer() {
         .expect("Get final status failed");
     assert!(
         final_status.state == TransferState::Complete
-            || final_status.state == TransferState::AwaitingReset,
-        "Expected Complete or AwaitingReset state, got {:?}",
+            || final_status.state == TransferState::AwaitingReboot,
+        "Expected Complete or AwaitingReboot state, got {:?}",
         final_status.state
     );
 
@@ -3424,8 +3424,8 @@ async fn test_complete_flash_workflow() {
         .expect("Get final status failed");
     assert!(
         final_status.state == TransferState::Complete
-            || final_status.state == TransferState::AwaitingReset,
-        "Expected Complete or AwaitingReset state, got {:?}",
+            || final_status.state == TransferState::AwaitingReboot,
+        "Expected Complete or AwaitingReboot state, got {:?}",
         final_status.state
     );
 
@@ -3563,8 +3563,8 @@ async fn test_flash_workflow_block_counter_1() {
         .expect("Get final status failed");
     assert!(
         final_status.state == TransferState::Complete
-            || final_status.state == TransferState::AwaitingReset,
-        "Expected Complete or AwaitingReset state, got {:?}",
+            || final_status.state == TransferState::AwaitingReboot,
+        "Expected Complete or AwaitingReboot state, got {:?}",
         final_status.state
     );
 
@@ -5144,8 +5144,8 @@ async fn test_flash_commit_workflow() {
         .expect("Transfer exit failed");
     assert!(exit_resp.success, "Transfer exit failed");
 
-    // Step 6b: Verify flash state is AwaitingReset (use get_flash_status to avoid auto-detect)
-    eprintln!("Step 6b: Verifying AwaitingReset state...");
+    // Step 6b: Verify flash state is AwaitingReboot (use get_flash_status to avoid auto-detect)
+    eprintln!("Step 6b: Verifying AwaitingReboot state...");
     let flash_status = flash_client
         .get_flash_status(transfer_id)
         .await
@@ -5153,8 +5153,8 @@ async fn test_flash_commit_workflow() {
     eprintln!("  Flash state: {:?}", flash_status.state);
     assert_eq!(
         flash_status.state,
-        sovd_client::flash::TransferState::AwaitingReset,
-        "Expected AwaitingReset after transfer_exit, got {:?}",
+        sovd_client::flash::TransferState::AwaitingReboot,
+        "Expected AwaitingReboot after transfer_exit, got {:?}",
         flash_status.state
     );
 
@@ -5294,16 +5294,16 @@ async fn test_flash_rollback_workflow() {
         .expect("Transfer exit failed");
     assert!(exit_resp.success);
 
-    // Verify flash state is AwaitingReset (use get_flash_status to avoid auto-detect)
-    eprintln!("Step 1b: Verifying AwaitingReset state...");
+    // Verify flash state is AwaitingReboot (use get_flash_status to avoid auto-detect)
+    eprintln!("Step 1b: Verifying AwaitingReboot state...");
     let flash_status = flash_client
         .get_flash_status(transfer_id)
         .await
         .expect("get_flash_status failed");
     assert_eq!(
         flash_status.state,
-        sovd_client::flash::TransferState::AwaitingReset,
-        "Expected AwaitingReset after transfer_exit, got {:?}",
+        sovd_client::flash::TransferState::AwaitingReboot,
+        "Expected AwaitingReboot after transfer_exit, got {:?}",
         flash_status.state
     );
 
@@ -5468,16 +5468,16 @@ async fn test_flash_commit_wrong_state() {
     eprintln!("=== Test PASSED: Flash commit wrong state ===");
 }
 
-/// Test aborting a flash transfer at the AwaitingExit boundary
+/// Test aborting a flash transfer at the AwaitingActivation boundary
 ///
 /// This is the last abortable state before finalize. Flash firmware, poll until
-/// AwaitingExit, then abort — should succeed and set state to Failed.
+/// AwaitingActivation, then abort — should succeed and set state to Failed.
 #[tokio::test]
 #[serial_test::serial]
-async fn test_abort_during_awaiting_exit() {
+async fn test_abort_during_awaiting_activation() {
     use sovd_client::flash::{FlashProgress, TransferState};
 
-    eprintln!("\n=== Testing Abort During AwaitingExit ===");
+    eprintln!("\n=== Testing Abort During AwaitingActivation ===");
 
     let harness = TestHarness::new()
         .await
@@ -5508,8 +5508,8 @@ async fn test_abort_during_awaiting_exit() {
         .await
         .expect("setup_programming_and_security failed");
 
-    // Start flash and poll until complete (AwaitingExit)
-    eprintln!("Step 3: Flash and poll to AwaitingExit...");
+    // Start flash and poll until complete (AwaitingActivation)
+    eprintln!("Step 3: Flash and poll to AwaitingActivation...");
     let flash_resp = flash_client
         .start_flash()
         .await
@@ -5530,11 +5530,11 @@ async fn test_abort_during_awaiting_exit() {
         .await
         .expect("Flash polling failed");
 
-    // poll_flash_complete returns on is_success(), which includes AwaitingExit
+    // poll_flash_complete returns on is_success(), which includes AwaitingActivation
     eprintln!("  Transfer state: {:?}", status.state);
     assert!(
-        status.state == TransferState::AwaitingExit || status.state == TransferState::Complete,
-        "Expected AwaitingExit or Complete, got {:?}",
+        status.state == TransferState::AwaitingActivation || status.state == TransferState::Complete,
+        "Expected AwaitingActivation or Complete, got {:?}",
         status.state
     );
 
@@ -5543,7 +5543,7 @@ async fn test_abort_during_awaiting_exit() {
     flash_client
         .abort_flash(transfer_id)
         .await
-        .expect("abort_flash should succeed at AwaitingExit");
+        .expect("abort_flash should succeed at AwaitingActivation");
 
     // Step 4: Verify state is Failed
     eprintln!("Step 4: Verifying transfer state is Failed...");
@@ -5566,7 +5566,7 @@ async fn test_abort_during_awaiting_exit() {
         status.error
     );
 
-    eprintln!("=== Test PASSED: Abort during AwaitingExit ===");
+    eprintln!("=== Test PASSED: Abort during AwaitingActivation ===");
 }
 
 /// Test that abort is rejected after firmware is activated
@@ -5923,14 +5923,14 @@ async fn test_abort_after_rolledback_rejected() {
 
 /// Test that abort is rejected after firmware is awaiting reset
 ///
-/// After flash + transfer_exit, state is AwaitingReset. Abort should fail.
+/// After flash + transfer_exit, state is AwaitingReboot. Abort should fail.
 /// The correct path is ecu_reset() to activate, then rollback_flash() to revert.
 #[tokio::test]
 #[serial_test::serial]
-async fn test_abort_after_awaiting_reset_rejected() {
+async fn test_abort_after_awaiting_reboot_rejected() {
     use sovd_client::flash::{FlashProgress, TransferState};
 
-    eprintln!("\n=== Testing Abort After AwaitingReset (Rejected) ===");
+    eprintln!("\n=== Testing Abort After AwaitingReboot (Rejected) ===");
 
     let harness = TestHarness::new()
         .await
@@ -5938,7 +5938,7 @@ async fn test_abort_after_awaiting_reset_rejected() {
 
     let flash_client = harness.flash_client();
 
-    // Flash firmware through to AwaitingReset state
+    // Flash firmware through to AwaitingReboot state
     let payload_size = 1024;
     let firmware_data = TestHarness::create_firmware_package_with_version(
         payload_size,
@@ -5989,16 +5989,16 @@ async fn test_abort_after_awaiting_reset_rejected() {
         .expect("Transfer exit failed");
     assert!(exit_resp.success);
 
-    // Verify state is AwaitingReset (use get_flash_status to avoid auto-detect side effects)
-    eprintln!("Step 3: Verify AwaitingReset state...");
+    // Verify state is AwaitingReboot (use get_flash_status to avoid auto-detect side effects)
+    eprintln!("Step 3: Verify AwaitingReboot state...");
     let flash_status = flash_client
         .get_flash_status(transfer_id)
         .await
         .expect("get_flash_status failed");
     assert_eq!(
         flash_status.state,
-        TransferState::AwaitingReset,
-        "Expected AwaitingReset after transfer_exit, got {:?}",
+        TransferState::AwaitingReboot,
+        "Expected AwaitingReboot after transfer_exit, got {:?}",
         flash_status.state
     );
 
@@ -6007,7 +6007,7 @@ async fn test_abort_after_awaiting_reset_rejected() {
     let abort_result = flash_client.abort_flash(transfer_id).await;
     assert!(
         abort_result.is_err(),
-        "Abort should fail after AwaitingReset"
+        "Abort should fail after AwaitingReboot"
     );
     let error_msg = abort_result.unwrap_err().to_string();
     eprintln!("  Got expected error: {}", error_msg);
@@ -6019,8 +6019,8 @@ async fn test_abort_after_awaiting_reset_rejected() {
         .expect("get_flash_status failed");
     assert_eq!(
         flash_status.state,
-        TransferState::AwaitingReset,
-        "State should still be AwaitingReset after failed abort"
+        TransferState::AwaitingReboot,
+        "State should still be AwaitingReboot after failed abort"
     );
 
     eprintln!("=== Test PASSED: Abort after awaiting reset rejected ===");

@@ -189,7 +189,7 @@ The supplier container has NO direct CAN access. It reaches its ECU exclusively 
 | Export | Description |
 |--------|-------------|
 | `DiagnosticBackend` | Core async trait (~35 methods) for data, faults, operations, outputs, flash, modes, logs, app entities |
-| `FlashState` | 10-variant enum: Queued, Preparing, Transferring, AwaitingExit, AwaitingReset, Complete, Failed, Activated, Committed, RolledBack |
+| `FlashState` | 10-variant enum: Queued, Preparing, Transferring, AwaitingActivation, AwaitingReboot, Complete, Failed, Activated, Committed, RolledBack |
 | `BackendError` | 14-variant error enum with HTTP status code mapping |
 | `EntityInfo`, `Capabilities` | Component identity and feature flags (12 boolean capabilities) |
 | `DataValue`, `DataPoint` | Parameter values with metadata and streaming data points |
@@ -439,8 +439,8 @@ classDiagram
         Queued
         Preparing
         Transferring
-        AwaitingExit
-        AwaitingReset
+        AwaitingActivation
+        AwaitingReboot
         Complete
         Failed
         Activated
@@ -602,7 +602,7 @@ sequenceDiagram
     M->>API: PUT /flash/transferexit
     API->>UDS: finalize_flash()
     UDS->>ECU: RequestTransferExit (0x37)
-    UDS-->>M: { state: "awaiting_reset" }
+    UDS-->>M: { state: "awaiting_reboot" }
 
     M->>API: POST /reset { type: "hard" }
     API->>UDS: ecu_reset(0x01)
@@ -824,11 +824,11 @@ Supported types: scalar (uint8/16/32, int8/16/32, float32/64), string, bytes, en
 ### Flash State Machine
 Firmware updates follow a strict state machine enforced server-side:
 ```
-Queued → Preparing → Transferring → AwaitingExit → AwaitingReset → Activated → Committed/RolledBack
+Queued → Preparing → Transferring → AwaitingActivation → AwaitingReboot → Activated → Committed/RolledBack
 ```
-- Abort is only valid during active transfer phases (Queued through AwaitingExit)
+- Abort is only valid during active transfer phases (Queued through AwaitingActivation)
 - After finalization, only commit or rollback is valid (from Activated state)
-- `AwaitingReset` enforces that the ECU must reboot before commit/rollback
+- `AwaitingReboot` enforces that the ECU must reboot before commit/rollback
 - Auto-detection reads DID 0xF189 to detect external ECU reboots
 
 ### Transport Abstraction
@@ -881,7 +881,7 @@ Define first — everything depends on these:
 5. `sovd-uds` — `UdsBackend` implementing `DiagnosticBackend` (data access, faults, operations, I/O control)
 6. `sovd-uds` — Session management, keepalive
 7. `sovd-uds` — Flash transfer (async task, state machine, progress tracking)
-8. `sovd-uds` — Flash commit/rollback with AwaitingReset state
+8. `sovd-uds` — Flash commit/rollback with AwaitingReboot state
 
 **Phase 3: API**
 9. `sovd-api` — `AppState`, router setup, CORS/tracing middleware

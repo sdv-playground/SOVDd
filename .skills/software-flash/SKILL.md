@@ -19,7 +19,7 @@ Upload package → Verify → Start flash transfer → Transfer blocks →
 Finalize (transfer exit) → ECU reset → Activated → Commit or Rollback
 ```
 
-State machine: `Queued → Preparing → Transferring → AwaitingExit → AwaitingReset → Activated → Committed|RolledBack`
+State machine: `Queued → Preparing → Transferring → AwaitingActivation → AwaitingReboot → Activated → Committed|RolledBack`
 
 ## API Endpoints
 
@@ -110,7 +110,7 @@ curl "$BASE/flash/transfer/$TRANSFER"
 
 # Finalize (UDS RequestTransferExit 0x37)
 curl -X PUT "$BASE/flash/transferexit"
-# → state becomes "awaiting_reset"
+# → state becomes "awaiting_reboot"
 ```
 
 ### Activate & Commit
@@ -135,7 +135,7 @@ curl -X POST "$BASE/flash/rollback"
 ### Abort
 
 ```bash
-# Abort is only valid during Queued through AwaitingExit
+# Abort is only valid during Queued through AwaitingActivation
 curl -X DELETE "$BASE/flash/transfer/$TRANSFER"
 ```
 
@@ -145,9 +145,9 @@ curl -X DELETE "$BASE/flash/transfer/$TRANSFER"
 |-------|-------------------|-------------|
 | Queued | Preparing, Failed (abort) | Transfer created, not started |
 | Preparing | Transferring, Failed | Session/erase in progress |
-| Transferring | AwaitingExit, Failed (abort) | Block transfer in progress |
-| AwaitingExit | AwaitingReset, Complete, Failed (abort) | Transfer done, awaiting exit |
-| AwaitingReset | Activated | ECU must reboot before commit/rollback |
+| Transferring | AwaitingActivation, Failed (abort) | Block transfer in progress |
+| AwaitingActivation | AwaitingReboot, Complete, Failed (abort) | Transfer done, awaiting exit |
+| AwaitingReboot | Activated | ECU must reboot before commit/rollback |
 | Activated | Committed, RolledBack | New firmware running, awaiting decision |
 | Committed | (terminal) | Firmware accepted |
 | RolledBack | (terminal) | Reverted to previous firmware |

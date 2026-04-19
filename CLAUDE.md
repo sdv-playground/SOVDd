@@ -111,10 +111,10 @@ Three implementations: `UdsBackend` (sovd-uds), `GatewayBackend` (sovd-gateway),
 
 Strict 10-state lifecycle enforced in `sovd-uds`:
 ```
-Queued → Preparing → Transferring → AwaitingExit → AwaitingReset → Activated → Committed|RolledBack
+Queued → Preparing → Transferring → AwaitingActivation → AwaitingReboot → Activated → Committed|RolledBack
 ```
-- Abort only valid during Queued through AwaitingExit
-- AwaitingReset enforces ECU reboot before commit/rollback
+- Abort only valid during Queued through AwaitingActivation
+- AwaitingReboot enforces ECU reboot before commit/rollback
 - State held in `parking_lot::RwLock`; lock ordering: `activation_state` before `flash_state` to prevent deadlocks
 
 ### Security Model

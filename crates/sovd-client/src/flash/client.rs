@@ -408,7 +408,7 @@ impl FlashClient {
 
     /// Poll until flash completes (or fails)
     ///
-    /// Returns when state becomes `Finished`, `AwaitingExit`, or an error state.
+    /// Returns when state becomes `Finished`, `AwaitingActivation`, or an error state.
     #[instrument(skip(self, progress_callback))]
     pub async fn poll_flash_complete<F>(
         &self,

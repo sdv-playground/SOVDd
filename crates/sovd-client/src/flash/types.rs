@@ -369,10 +369,10 @@ pub enum TransferState {
     Complete,
 
     /// Waiting for explicit exit (flash only)
-    AwaitingExit,
+    AwaitingActivation,
 
     /// Firmware written, awaiting ECU reset to activate
-    AwaitingReset,
+    AwaitingReboot,
 
     /// Aborted by user or error
     Aborted,
@@ -446,8 +446,8 @@ impl TransferState {
             self,
             Self::Finished
                 | Self::Complete
-                | Self::AwaitingExit
-                | Self::AwaitingReset
+                | Self::AwaitingActivation
+                | Self::AwaitingReboot
                 | Self::Verified
                 | Self::Activated
                 | Self::Committed
@@ -671,7 +671,7 @@ mod tests {
         assert!(!TransferState::Finished.is_active());
 
         assert!(TransferState::Finished.is_success());
-        assert!(TransferState::AwaitingExit.is_success());
+        assert!(TransferState::AwaitingActivation.is_success());
         assert!(!TransferState::Error.is_success());
     }
 

@@ -104,7 +104,7 @@ pub struct FlashStatus {
 /// # Lifecycle
 ///
 /// ```text
-/// Queued → Preparing → Transferring → AwaitingExit
+/// Queued → Preparing → Transferring → AwaitingActivation
 ///                                         │
 ///                          finalize_flash()│
 ///                     ┌───────────────────┤
@@ -112,7 +112,7 @@ pub struct FlashStatus {
 ///             (no rollback)        (supports_rollback)
 ///                     │                    │
 ///                     ▼                    ▼
-///                  Complete          AwaitingReset
+///                  Complete          AwaitingReboot
 ///                                         │
 ///                           ecu_reset() or│auto-detect
 ///                                         ▼
@@ -125,9 +125,9 @@ pub struct FlashStatus {
 ///
 /// # Abort rules
 ///
-/// - **Abortable** (via `abort_flash`): `Queued`, `Preparing`, `Transferring`, `AwaitingExit`
-/// - **Not abortable**: `Complete`, `Failed`, `AwaitingReset`, `Activated`, `Committed`, `RolledBack`
-/// - After `AwaitingReset`, call `ecu_reset()` to activate, then `rollback_flash()` to revert.
+/// - **Abortable** (via `abort_flash`): `Queued`, `Preparing`, `Transferring`, `AwaitingActivation`
+/// - **Not abortable**: `Complete`, `Failed`, `AwaitingReboot`, `Activated`, `Committed`, `RolledBack`
+/// - After `AwaitingReboot`, call `ecu_reset()` to activate, then `rollback_flash()` to revert.
 /// - Use `rollback_flash()` to revert firmware in the `Activated` state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -139,9 +139,9 @@ pub enum FlashState {
     /// Actively transferring data blocks (UDS 0x36). **Abortable.**
     Transferring,
     /// Transfer complete, waiting for `finalize_flash()`. **Abortable.**
-    AwaitingExit,
+    AwaitingActivation,
     /// Firmware written, awaiting ECU reset to activate. **Not abortable.**
-    AwaitingReset,
+    AwaitingReboot,
     /// Transfer completed successfully (no rollback support). Terminal.
     Complete,
     /// Transfer failed or was aborted. Terminal.
@@ -160,8 +160,8 @@ impl std::fmt::Display for FlashState {
             FlashState::Queued => "queued",
             FlashState::Preparing => "preparing",
             FlashState::Transferring => "transferring",
-            FlashState::AwaitingExit => "awaiting_exit",
-            FlashState::AwaitingReset => "awaiting_reset",
+            FlashState::AwaitingActivation => "awaiting_activation",
+            FlashState::AwaitingReboot => "awaiting_reboot",
             FlashState::Complete => "complete",
             FlashState::Failed => "failed",
             FlashState::Activated => "activated",
@@ -180,8 +180,8 @@ impl std::str::FromStr for FlashState {
             "queued" => Ok(FlashState::Queued),
             "preparing" => Ok(FlashState::Preparing),
             "transferring" => Ok(FlashState::Transferring),
-            "awaiting_exit" => Ok(FlashState::AwaitingExit),
-            "awaiting_reset" => Ok(FlashState::AwaitingReset),
+            "awaiting_activation" => Ok(FlashState::AwaitingActivation),
+            "awaiting_reboot" => Ok(FlashState::AwaitingReboot),
             "complete" => Ok(FlashState::Complete),
             "failed" => Ok(FlashState::Failed),
             "activated" => Ok(FlashState::Activated),
@@ -583,8 +583,8 @@ pub trait DiagnosticBackend: Send + Sync {
     /// Abort an in-progress flash transfer.
     ///
     /// Only valid during active transfer phases: `Queued`, `Preparing`,
-    /// `Transferring`, or `AwaitingExit`. Returns `InvalidRequest` for
-    /// post-finalize states (`AwaitingReset`, `Activated`, `Committed`,
+    /// `Transferring`, or `AwaitingActivation`. Returns `InvalidRequest` for
+    /// post-finalize states (`AwaitingReboot`, `Activated`, `Committed`,
     /// `RolledBack`, `Complete`). Use `ecu_reset()` then `rollback_flash()`
     /// to revert firmware after finalization.
     ///
@@ -599,11 +599,11 @@ pub trait DiagnosticBackend: Send + Sync {
 
     /// Finalize a flash transfer (UDS 0x37 RequestTransferExit).
     ///
-    /// Only valid when transfer state is `AwaitingExit`. This is a
+    /// Only valid when transfer state is `AwaitingActivation`. This is a
     /// point-of-no-return on the ECU side — once 0x37 is sent and
     /// acknowledged, the firmware is written to the ECU's flash.
     ///
-    /// If `supports_rollback` is enabled, state transitions to `AwaitingReset`
+    /// If `supports_rollback` is enabled, state transitions to `AwaitingReboot`
     /// (ECU must reboot before commit/rollback). Otherwise, transitions to `Complete`.
     async fn finalize_flash(&self) -> BackendResult<()> {
         Err(crate::error::BackendError::NotSupported(
