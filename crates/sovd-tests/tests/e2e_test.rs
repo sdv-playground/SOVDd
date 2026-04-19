@@ -3242,13 +3242,16 @@ async fn test_flash_unverified_file() {
 #[tokio::test]
 #[serial_test::serial]
 async fn test_flash_invalid_file_id() {
-    eprintln!("\n=== Testing flash with invalid file ID (should fail) ===");
+    // Post-redesign: start_flash() no longer takes a file_id. Payload
+    // uploads are sequential, so the server errors with "bad_request:
+    // no verified package available" when nothing has been uploaded +
+    // verified yet, regardless of what the client passes.
+    eprintln!("\n=== Testing flash transfer without verified package (should fail) ===");
 
     let harness = TestHarness::new()
         .await
         .expect("Failed to create test harness");
 
-    // Try to flash with non-existent file ID
     let (status, json) = harness
         .post(
             "/vehicle/v1/components/vtx_ecm/flash/transfer",
@@ -3259,9 +3262,11 @@ async fn test_flash_invalid_file_id() {
 
     eprintln!("Response: status={}, body={}", status, json);
 
-    assert_eq!(status, 404, "Expected 404 Not Found for invalid file ID");
+    assert_eq!(status, 400, "Expected 400 Bad Request when no package is verified");
+    let err = json.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert_eq!(err, "bad_request", "expected error=bad_request, got {err}");
 
-    eprintln!("=== Test PASSED: Invalid file ID correctly rejected ===");
+    eprintln!("=== Test PASSED: flash/transfer rejected without verified package ===");
 }
 
 /// Test aborting a flash transfer
