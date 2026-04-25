@@ -104,13 +104,18 @@ pub struct FlashStatus {
 /// # Lifecycle
 ///
 /// ```text
-/// Queued → Preparing → Transferring → AwaitingActivation
-///                                         │
-///                          finalize_flash()│
-///                     ┌───────────────────┤
+/// Queued → Preparing → Transferring → AwaitingActivation ◀── invalidate() ──┐
+///                                         │                                  │
+///                          finalize_flash()│                                 │
+///                     ┌───────────────────┤                                 │
+///                     │                    │                                 │
+///             (no rollback)        (supports_rollback)                       │
+///                     │                    │                                 │
+///                     │       optional: validate()                           │
+///                     │                    ▼                                 │
+///                     │                Validated ────────────────────────────┘
 ///                     │                    │
-///             (no rollback)        (supports_rollback)
-///                     │                    │
+///                     │              activate()
 ///                     ▼                    ▼
 ///                  Complete          AwaitingReboot
 ///                                         │
@@ -123,12 +128,20 @@ pub struct FlashStatus {
 ///                             Committed      RolledBack
 /// ```
 ///
+/// `validate()` and `Validated` are opt-in. The classic flow
+/// (`finalize_flash()` → `AwaitingReboot` or `Complete`) still works for
+/// callers that don't need the explicit validation step. New orchestrators
+/// can use `validate()` for re-runnable crypto checks (e.g. multi-cycle
+/// fleet campaigns) and `invalidate()` to demote `Validated` back to
+/// `AwaitingActivation` when re-validation is required after a power cycle.
+///
 /// # Abort rules
 ///
-/// - **Abortable** (via `abort_flash`): `Queued`, `Preparing`, `Transferring`, `AwaitingActivation`
+/// - **Abortable** (via `abort_flash`): `Queued`, `Preparing`, `Transferring`, `AwaitingActivation`, `Validated`
 /// - **Not abortable**: `Complete`, `Failed`, `AwaitingReboot`, `Activated`, `Committed`, `RolledBack`
 /// - After `AwaitingReboot`, call `ecu_reset()` to activate, then `rollback_flash()` to revert.
 /// - Use `rollback_flash()` to revert firmware in the `Activated` state.
+/// - Use `invalidate()` to demote `Validated` back to `AwaitingActivation`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlashState {
@@ -140,6 +153,11 @@ pub enum FlashState {
     Transferring,
     /// Transfer complete, waiting for `finalize_flash()`. **Abortable.**
     AwaitingActivation,
+    /// Firmware cryptographically validated, awaiting `activate()`.
+    /// **Abortable** via `invalidate()` (back to `AwaitingActivation`) or
+    /// `abort_flash()`. Reachable only via the opt-in `validate()` flow;
+    /// classic `finalize_flash()` skips this state.
+    Validated,
     /// Firmware written, awaiting ECU reset to activate. **Not abortable.**
     AwaitingReboot,
     /// Transfer completed successfully (no rollback support). Terminal.
@@ -161,6 +179,7 @@ impl std::fmt::Display for FlashState {
             FlashState::Preparing => "preparing",
             FlashState::Transferring => "transferring",
             FlashState::AwaitingActivation => "awaiting_activation",
+            FlashState::Validated => "validated",
             FlashState::AwaitingReboot => "awaiting_reboot",
             FlashState::Complete => "complete",
             FlashState::Failed => "failed",
@@ -181,6 +200,7 @@ impl std::str::FromStr for FlashState {
             "preparing" => Ok(FlashState::Preparing),
             "transferring" => Ok(FlashState::Transferring),
             "awaiting_activation" => Ok(FlashState::AwaitingActivation),
+            "validated" => Ok(FlashState::Validated),
             "awaiting_reboot" => Ok(FlashState::AwaitingReboot),
             "complete" => Ok(FlashState::Complete),
             "failed" => Ok(FlashState::Failed),
@@ -583,10 +603,10 @@ pub trait DiagnosticBackend: Send + Sync {
     /// Abort an in-progress flash transfer.
     ///
     /// Only valid during active transfer phases: `Queued`, `Preparing`,
-    /// `Transferring`, or `AwaitingActivation`. Returns `InvalidRequest` for
-    /// post-finalize states (`AwaitingReboot`, `Activated`, `Committed`,
-    /// `RolledBack`, `Complete`). Use `ecu_reset()` then `rollback_flash()`
-    /// to revert firmware after finalization.
+    /// `Transferring`, `AwaitingActivation`, or `Validated`. Returns
+    /// `InvalidRequest` for post-finalize states (`AwaitingReboot`,
+    /// `Activated`, `Committed`, `RolledBack`, `Complete`). Use `ecu_reset()`
+    /// then `rollback_flash()` to revert firmware after finalization.
     ///
     /// Cleanup: aborts the async transfer task, sends UDS 0x37 to the ECU
     /// to clear its download state (errors ignored), sets state to `Failed`.
@@ -608,6 +628,56 @@ pub trait DiagnosticBackend: Send + Sync {
     async fn finalize_flash(&self) -> BackendResult<()> {
         Err(crate::error::BackendError::NotSupported(
             "finalize_flash".to_string(),
+        ))
+    }
+
+    /// Validate a staged firmware artifact (crypto + signature checks).
+    ///
+    /// Idempotent and re-runnable — useful for multi-cycle fleet campaigns
+    /// where an inactive bank may need re-validation across power cycles
+    /// before activation. Implementations should re-read the inactive bank
+    /// (or the staged artifact) and re-verify the SUIT signature, image
+    /// digest, and any platform-specific seal.
+    ///
+    /// Only valid in `AwaitingActivation`. Transitions to `Validated` on
+    /// success. On failure, the implementation may transition to `Failed`
+    /// or remain in `AwaitingActivation` (caller should re-finalize and
+    /// retry, or abort).
+    async fn validate(&self) -> BackendResult<()> {
+        Err(crate::error::BackendError::NotSupported(
+            "validate".to_string(),
+        ))
+    }
+
+    /// Demote a previously-validated artifact back to `AwaitingActivation`.
+    ///
+    /// Required when hardware sealing isn't available and a power cycle
+    /// could have tampered with the staged bank — the orchestrator forces
+    /// re-validation after Clamp-15 cycles by calling `invalidate()` then
+    /// `validate()` before activation can resume.
+    ///
+    /// Only valid in `Validated`. Transitions to `AwaitingActivation`.
+    async fn invalidate(&self) -> BackendResult<()> {
+        Err(crate::error::BackendError::NotSupported(
+            "invalidate".to_string(),
+        ))
+    }
+
+    /// Activate a validated firmware artifact.
+    ///
+    /// For dual-bank components (`supports_rollback = true`), schedules
+    /// the bank pointer swap and transitions to `AwaitingReboot` — the
+    /// caller must then issue `ecu_reset()` to complete activation.
+    ///
+    /// For single-bank components (`supports_rollback = false`), the
+    /// activation event is the artifact write itself — transitions
+    /// directly to `Activated`. The caller should then `commit_flash()`
+    /// to reach `Complete`.
+    ///
+    /// Only valid in `Validated`.
+    async fn activate(&self) -> BackendResult<()> {
+        Err(crate::error::BackendError::NotSupported(
+            "activate".to_string(),
         ))
     }
 

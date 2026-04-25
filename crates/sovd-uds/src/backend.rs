@@ -1253,6 +1253,7 @@ impl DiagnosticBackend for UdsBackend {
                         | FlashState::Preparing
                         | FlashState::Transferring
                         | FlashState::AwaitingActivation
+                        | FlashState::Validated
                 ) {
                     return Err(BackendError::InvalidRequest(format!(
                         "Flash transfer already in progress: {}",
@@ -1408,6 +1409,7 @@ impl DiagnosticBackend for UdsBackend {
                     | FlashState::Preparing
                     | FlashState::Transferring
                     | FlashState::AwaitingActivation
+                    | FlashState::Validated
             ) {
                 return Err(BackendError::InvalidRequest(format!(
                     "Cannot abort transfer in state {:?}. {}",

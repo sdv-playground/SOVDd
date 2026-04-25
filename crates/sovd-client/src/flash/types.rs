@@ -371,6 +371,9 @@ pub enum TransferState {
     /// Waiting for explicit exit (flash only)
     AwaitingActivation,
 
+    /// Firmware cryptographically validated, awaiting activation
+    Validated,
+
     /// Firmware written, awaiting ECU reset to activate
     AwaitingReboot,
 
