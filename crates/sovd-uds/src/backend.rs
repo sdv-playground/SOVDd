@@ -1505,6 +1505,73 @@ impl DiagnosticBackend for UdsBackend {
         Ok(())
     }
 
+    async fn validate(&self) -> BackendResult<()> {
+        // Idempotent re-validation. Today this is a state-only transition;
+        // a future commit will issue a UDS RoutineControl (0x31) with the
+        // configured "verify image" routine ID so the orchestrator can
+        // force a re-check across power cycles in long-running campaigns.
+        let mut flash_state = self.flash_state.write();
+        let transfer = flash_state
+            .as_mut()
+            .ok_or_else(|| BackendError::EntityNotFound("No flash transfer in progress".into()))?;
+        match transfer.state {
+            FlashState::AwaitingActivation | FlashState::Validated => {
+                transfer.state = FlashState::Validated;
+                Ok(())
+            }
+            other => Err(BackendError::InvalidRequest(format!(
+                "validate() requires AwaitingActivation or Validated, got {:?}",
+                other
+            ))),
+        }
+    }
+
+    async fn invalidate(&self) -> BackendResult<()> {
+        // Demote a previously-validated transfer back to AwaitingActivation.
+        // Used when seal-across-power-cycle isn't available and the orchestrator
+        // wants to force a re-validate after Clamp-15.
+        let mut flash_state = self.flash_state.write();
+        let transfer = flash_state
+            .as_mut()
+            .ok_or_else(|| BackendError::EntityNotFound("No flash transfer in progress".into()))?;
+        if transfer.state == FlashState::Validated {
+            transfer.state = FlashState::AwaitingActivation;
+            Ok(())
+        } else {
+            Err(BackendError::InvalidRequest(format!(
+                "invalidate() requires Validated, got {:?}",
+                transfer.state
+            )))
+        }
+    }
+
+    async fn activate(&self) -> BackendResult<()> {
+        // Schedule activation. Mirrors finalize_flash's branch on
+        // supports_rollback: dual-bank ECUs need a reboot to swap banks
+        // (→ AwaitingReboot); single-bank UDS targets have no Activated
+        // semantic, so they go straight to Complete.
+        let mut flash_state = self.flash_state.write();
+        let transfer = flash_state
+            .as_mut()
+            .ok_or_else(|| BackendError::EntityNotFound("No flash transfer in progress".into()))?;
+        if transfer.state != FlashState::Validated {
+            return Err(BackendError::InvalidRequest(format!(
+                "activate() requires Validated, got {:?}",
+                transfer.state
+            )));
+        }
+        transfer.state = if self.flash_commit_config.supports_rollback {
+            FlashState::AwaitingReboot
+        } else {
+            FlashState::Complete
+        };
+        if self.flash_commit_config.supports_rollback {
+            let mut activation = self.activation_state.write();
+            activation.state = FlashState::AwaitingReboot;
+        }
+        Ok(())
+    }
+
     async fn commit_flash(&self) -> BackendResult<()> {
         if !self.flash_commit_config.supports_rollback {
             return Err(BackendError::NotSupported(
