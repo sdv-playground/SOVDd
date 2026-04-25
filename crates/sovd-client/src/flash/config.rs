@@ -312,6 +312,21 @@ impl FlashConfig {
         format!("{}{}/rollback", self.base_prefix(), self.endpoints.flash)
     }
 
+    /// Get the resolved endpoint path for flash validate (re-run crypto check)
+    pub fn flash_validate_path(&self) -> String {
+        format!("{}{}/validate", self.base_prefix(), self.endpoints.flash)
+    }
+
+    /// Get the resolved endpoint path for flash invalidate (demote Validated → AwaitingActivation)
+    pub fn flash_invalidate_path(&self) -> String {
+        format!("{}{}/invalidate", self.base_prefix(), self.endpoints.flash)
+    }
+
+    /// Get the resolved endpoint path for flash activate (Validated → AwaitingReboot/Activated)
+    pub fn flash_activate_path(&self) -> String {
+        format!("{}{}/activate", self.base_prefix(), self.endpoints.flash)
+    }
+
     /// Get the resolved endpoint path for flash activation state
     pub fn flash_activation_path(&self) -> String {
         format!("{}{}/activation", self.base_prefix(), self.endpoints.flash)

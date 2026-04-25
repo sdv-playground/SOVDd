@@ -536,6 +536,49 @@ impl FlashClient {
         self.handle_response(response).await
     }
 
+    /// Re-run cryptographic validation on a staged firmware artifact.
+    ///
+    /// Idempotent — useful in multi-cycle fleet campaigns where an
+    /// inactive bank may need re-validation across power cycles. Accepts
+    /// `AwaitingActivation`, `Validated`, or `AwaitingReboot` and
+    /// transitions to `Validated`.
+    #[instrument(skip(self))]
+    pub async fn validate_flash(&self) -> Result<CommitRollbackResponse> {
+        let url = self.build_url(&self.config.flash_validate_path())?;
+        info!("Validating staged firmware at {}", url);
+        let mut request = self.client.post(url);
+        request = self.add_auth_header(request);
+        let response = request.send().await?;
+        self.handle_response(response).await
+    }
+
+    /// Demote a previously-validated artifact back to AwaitingActivation,
+    /// forcing the orchestrator to re-validate before activation can proceed.
+    #[instrument(skip(self))]
+    pub async fn invalidate_flash(&self) -> Result<CommitRollbackResponse> {
+        let url = self.build_url(&self.config.flash_invalidate_path())?;
+        info!("Invalidating staged firmware at {}", url);
+        let mut request = self.client.post(url);
+        request = self.add_auth_header(request);
+        let response = request.send().await?;
+        self.handle_response(response).await
+    }
+
+    /// Schedule activation of a validated firmware artifact.
+    ///
+    /// For dual-bank components: transitions `Validated → AwaitingReboot`.
+    /// For single-bank components: transitions to `Activated` (or `Complete`
+    /// for UDS targets without a commit step).
+    #[instrument(skip(self))]
+    pub async fn activate_flash(&self) -> Result<CommitRollbackResponse> {
+        let url = self.build_url(&self.config.flash_activate_path())?;
+        info!("Activating firmware at {}", url);
+        let mut request = self.client.post(url);
+        request = self.add_auth_header(request);
+        let response = request.send().await?;
+        self.handle_response(response).await
+    }
+
     /// Get firmware activation state
     #[instrument(skip(self))]
     pub async fn get_activation_state(&self) -> Result<ActivationStateResponse> {
