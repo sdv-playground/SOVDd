@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn test_to_json_array() {
-        let values = vec![1.0, 1.1, 1.2, 1.3];
+        let values = [1.0, 1.1, 1.2, 1.3];
         let actual: Vec<f64> = values.iter().map(|&v| v * 100.0 * 0.01).collect();
         let json = to_json_array(&actual, 0.01);
         // Note: 1.0 comes out as integer 1, not 1.0
