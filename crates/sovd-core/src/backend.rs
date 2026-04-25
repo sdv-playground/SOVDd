@@ -119,15 +119,18 @@ pub struct FlashStatus {
 ///
 /// Branch on `supports_rollback`:
 ///
-/// **Dual-bank** (`supports_rollback = true`): activation requires a reboot;
-/// the new firmware runs in trial mode (`Activated`) until the orchestrator
-/// commits or rolls back.
+/// **Dual-bank** (`supports_rollback = true`): activation requires a reboot,
+/// then the component runs its own post-reset health check before declaring
+/// the new firmware ready for the commit/rollback decision.
 ///
 /// ```text
 ///                                         │  activate()
 ///                                         ▼
 ///                                  AwaitingReboot
 ///                                         │  ecu_reset() (or auto-detect)
+///                                         ▼
+///                                    Verifying  (post-reset health check)
+///                                         │  component-driven
 ///                                         ▼
 ///                                     Activated  (trial mode)
 ///                                    /         \
@@ -137,9 +140,10 @@ pub struct FlashStatus {
 /// ```
 ///
 /// **Single-bank** (`supports_rollback = false`): the activation event is
-/// the artifact write itself — no reboot, no trial. The lifecycle still
-/// passes through `Activated` so the orchestrator and viewer observe the
-/// "new artifact in effect" moment, then `Complete` after `commit_flash()`.
+/// the artifact write itself — no reboot, no trial, no Verifying step. The
+/// lifecycle still passes through `Activated` so the orchestrator and viewer
+/// observe the "new artifact in effect" moment, then `Complete` after
+/// `commit_flash()`.
 ///
 /// ```text
 ///                                         │  activate()
@@ -160,7 +164,7 @@ pub struct FlashStatus {
 /// # Abort rules
 ///
 /// - **Abortable** (via `abort_flash`): `Queued`, `Preparing`, `Transferring`, `AwaitingActivation`, `Validated`
-/// - **Not abortable**: `Complete`, `Failed`, `AwaitingReboot`, `Activated`, `Committed`, `RolledBack`
+/// - **Not abortable**: `Complete`, `Failed`, `AwaitingReboot`, `Verifying`, `Activated`, `Committed`, `RolledBack`
 /// - After `AwaitingReboot`, call `ecu_reset()` to activate, then `rollback_flash()` to revert.
 /// - Use `rollback_flash()` to revert firmware in the `Activated` state.
 /// - Use `invalidate()` to demote `Validated` back to `AwaitingActivation`.
@@ -182,6 +186,14 @@ pub enum FlashState {
     Validated,
     /// Firmware written, awaiting ECU reset to activate. **Not abortable.**
     AwaitingReboot,
+    /// Post-reset health check in progress. The new firmware has been
+    /// reached but the component is still verifying it (e.g. waiting
+    /// for the guest VM to boot and report healthy). The component
+    /// itself transitions out of this state into `Activated` when the
+    /// check passes — orchestrators just poll.
+    /// **Not abortable** — call `rollback_flash()` once `Activated` if
+    /// the trial firmware doesn't pan out.
+    Verifying,
     /// Transfer completed successfully (no rollback support). Terminal.
     Complete,
     /// Transfer failed or was aborted. Terminal.
@@ -203,6 +215,7 @@ impl std::fmt::Display for FlashState {
             FlashState::AwaitingActivation => "awaiting_activation",
             FlashState::Validated => "validated",
             FlashState::AwaitingReboot => "awaiting_reboot",
+            FlashState::Verifying => "verifying",
             FlashState::Complete => "complete",
             FlashState::Failed => "failed",
             FlashState::Activated => "activated",
@@ -224,6 +237,7 @@ impl std::str::FromStr for FlashState {
             "awaiting_activation" => Ok(FlashState::AwaitingActivation),
             "validated" => Ok(FlashState::Validated),
             "awaiting_reboot" => Ok(FlashState::AwaitingReboot),
+            "verifying" => Ok(FlashState::Verifying),
             "complete" => Ok(FlashState::Complete),
             "failed" => Ok(FlashState::Failed),
             "activated" => Ok(FlashState::Activated),

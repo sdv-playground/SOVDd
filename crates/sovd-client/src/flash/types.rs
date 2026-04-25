@@ -377,6 +377,9 @@ pub enum TransferState {
     /// Firmware written, awaiting ECU reset to activate
     AwaitingReboot,
 
+    /// Post-reset health check in progress (component-driven)
+    Verifying,
+
     /// Aborted by user or error
     Aborted,
 

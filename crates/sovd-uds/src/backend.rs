@@ -1254,6 +1254,7 @@ impl DiagnosticBackend for UdsBackend {
                         | FlashState::Transferring
                         | FlashState::AwaitingActivation
                         | FlashState::Validated
+                        | FlashState::Verifying
                 ) {
                     return Err(BackendError::InvalidRequest(format!(
                         "Flash transfer already in progress: {}",

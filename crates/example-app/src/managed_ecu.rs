@@ -793,6 +793,7 @@ fn convert_transfer_state(s: TransferState) -> FlashState {
         TransferState::AwaitingActivation => FlashState::AwaitingActivation,
         TransferState::Validated => FlashState::Validated,
         TransferState::AwaitingReboot => FlashState::AwaitingReboot,
+        TransferState::Verifying => FlashState::Verifying,
         TransferState::Complete | TransferState::Finished | TransferState::Verified => {
             FlashState::Complete
         }
