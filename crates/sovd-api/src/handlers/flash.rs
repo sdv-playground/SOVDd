@@ -251,6 +251,61 @@ pub async fn rollback_flash(
     }))
 }
 
+/// POST /vehicle/v1/components/:component_id/flash/validate
+/// Re-run cryptographic validation on a staged firmware artifact.
+///
+/// Idempotent — useful in multi-cycle fleet campaigns where an inactive
+/// bank may need re-validation across power cycles before activation.
+/// Transitions `AwaitingActivation` → `Validated`.
+pub async fn validate_flash(
+    State(state): State<AppState>,
+    Path(component_id): Path<String>,
+) -> Result<Json<CommitRollbackResponse>, ApiError> {
+    let backend = state.get_backend(&component_id)?;
+    backend.validate().await.map_err(ApiError::from)?;
+    tracing::info!(component_id = %component_id, "Flash artifact validated");
+    Ok(Json(CommitRollbackResponse {
+        success: true,
+        message: "Validation succeeded".to_string(),
+    }))
+}
+
+/// POST /vehicle/v1/components/:component_id/flash/invalidate
+/// Demote a previously-validated artifact back to AwaitingActivation,
+/// forcing the orchestrator to re-validate before activation can proceed.
+pub async fn invalidate_flash(
+    State(state): State<AppState>,
+    Path(component_id): Path<String>,
+) -> Result<Json<CommitRollbackResponse>, ApiError> {
+    let backend = state.get_backend(&component_id)?;
+    backend.invalidate().await.map_err(ApiError::from)?;
+    tracing::info!(component_id = %component_id, "Flash artifact invalidated");
+    Ok(Json(CommitRollbackResponse {
+        success: true,
+        message: "Validation demoted; re-validate before activation".to_string(),
+    }))
+}
+
+/// POST /vehicle/v1/components/:component_id/flash/activate
+/// Schedule activation of a validated firmware artifact.
+///
+/// For dual-bank components: transitions `Validated → AwaitingReboot`;
+/// the caller must then reset the ECU to complete activation.
+/// For single-bank components: transitions `Validated → Activated`
+/// (or `Complete` for UDS targets without a commit step).
+pub async fn activate_flash(
+    State(state): State<AppState>,
+    Path(component_id): Path<String>,
+) -> Result<Json<CommitRollbackResponse>, ApiError> {
+    let backend = state.get_backend(&component_id)?;
+    backend.activate().await.map_err(ApiError::from)?;
+    tracing::info!(component_id = %component_id, "Flash artifact activation scheduled");
+    Ok(Json(CommitRollbackResponse {
+        success: true,
+        message: "Activation scheduled".to_string(),
+    }))
+}
+
 /// GET /vehicle/v1/components/:component_id/flash/activation
 /// Get firmware activation state
 pub async fn get_activation_state(

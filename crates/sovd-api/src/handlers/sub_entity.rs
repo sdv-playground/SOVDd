@@ -333,6 +333,48 @@ pub async fn rollback_flash(
     }))
 }
 
+/// POST .../apps/:app_id/flash/validate
+pub async fn validate_flash(
+    State(state): State<AppState>,
+    Path((component_id, app_id)): Path<(String, String)>,
+) -> Result<Json<CommitRollbackResponse>, ApiError> {
+    let backend = resolve(&state, &component_id, &app_id).await?;
+    backend.validate().await.map_err(ApiError::from)?;
+    tracing::info!(app_id = %app_id, "Sub-entity flash validated");
+    Ok(Json(CommitRollbackResponse {
+        success: true,
+        message: "Validation succeeded".to_string(),
+    }))
+}
+
+/// POST .../apps/:app_id/flash/invalidate
+pub async fn invalidate_flash(
+    State(state): State<AppState>,
+    Path((component_id, app_id)): Path<(String, String)>,
+) -> Result<Json<CommitRollbackResponse>, ApiError> {
+    let backend = resolve(&state, &component_id, &app_id).await?;
+    backend.invalidate().await.map_err(ApiError::from)?;
+    tracing::info!(app_id = %app_id, "Sub-entity flash invalidated");
+    Ok(Json(CommitRollbackResponse {
+        success: true,
+        message: "Validation demoted; re-validate before activation".to_string(),
+    }))
+}
+
+/// POST .../apps/:app_id/flash/activate
+pub async fn activate_flash(
+    State(state): State<AppState>,
+    Path((component_id, app_id)): Path<(String, String)>,
+) -> Result<Json<CommitRollbackResponse>, ApiError> {
+    let backend = resolve(&state, &component_id, &app_id).await?;
+    backend.activate().await.map_err(ApiError::from)?;
+    tracing::info!(app_id = %app_id, "Sub-entity flash activation scheduled");
+    Ok(Json(CommitRollbackResponse {
+        success: true,
+        message: "Activation scheduled".to_string(),
+    }))
+}
+
 /// GET .../apps/:app_id/flash/activation
 pub async fn get_activation_state(
     State(state): State<AppState>,

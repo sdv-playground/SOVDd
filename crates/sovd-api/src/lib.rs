@@ -166,6 +166,18 @@ pub fn create_router(state: AppState) -> Router {
             put(handlers::sub_entity::transfer_exit),
         )
         .route(
+            "/vehicle/v1/components/{component_id}/apps/{app_id}/flash/validate",
+            post(handlers::sub_entity::validate_flash),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/apps/{app_id}/flash/invalidate",
+            post(handlers::sub_entity::invalidate_flash),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/apps/{app_id}/flash/activate",
+            post(handlers::sub_entity::activate_flash),
+        )
+        .route(
             "/vehicle/v1/components/{component_id}/apps/{app_id}/flash/commit",
             post(handlers::sub_entity::commit_flash),
         )
@@ -295,6 +307,19 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/vehicle/v1/components/{component_id}/flash/transferexit",
             put(handlers::flash::transfer_exit),
+        )
+        // Flash validate/activate routes (orchestrator-driven multi-cycle flow)
+        .route(
+            "/vehicle/v1/components/{component_id}/flash/validate",
+            post(handlers::flash::validate_flash),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/flash/invalidate",
+            post(handlers::flash::invalidate_flash),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/flash/activate",
+            post(handlers::flash::activate_flash),
         )
         // Flash commit/rollback routes
         .route(
