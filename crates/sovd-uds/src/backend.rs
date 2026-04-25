@@ -1506,21 +1506,31 @@ impl DiagnosticBackend for UdsBackend {
     }
 
     async fn validate(&self) -> BackendResult<()> {
-        // Idempotent re-validation. Today this is a state-only transition;
-        // a future commit will issue a UDS RoutineControl (0x31) with the
-        // configured "verify image" routine ID so the orchestrator can
-        // force a re-check across power cycles in long-running campaigns.
+        // Idempotent re-validation. Accepts either pre-finalize
+        // (AwaitingActivation) or post-finalize (AwaitingReboot, dual-bank)
+        // — the latter lets the orchestrator down-shift to Validated for
+        // re-verification across power cycles before committing to reset.
+        // Already in Validated is a no-op.
+        //
+        // Today this is a state-only transition; a follow-up will issue a
+        // UDS RoutineControl (0x31) with the configured "verify image"
+        // routine ID so the orchestrator can force a real re-check.
         let mut flash_state = self.flash_state.write();
         let transfer = flash_state
             .as_mut()
             .ok_or_else(|| BackendError::EntityNotFound("No flash transfer in progress".into()))?;
         match transfer.state {
-            FlashState::AwaitingActivation | FlashState::Validated => {
+            FlashState::AwaitingActivation
+            | FlashState::Validated
+            | FlashState::AwaitingReboot => {
                 transfer.state = FlashState::Validated;
+                drop(flash_state);
+                let mut activation = self.activation_state.write();
+                activation.state = FlashState::Validated;
                 Ok(())
             }
             other => Err(BackendError::InvalidRequest(format!(
-                "validate() requires AwaitingActivation or Validated, got {:?}",
+                "validate() requires AwaitingActivation, Validated, or AwaitingReboot, got {:?}",
                 other
             ))),
         }
@@ -1536,6 +1546,9 @@ impl DiagnosticBackend for UdsBackend {
             .ok_or_else(|| BackendError::EntityNotFound("No flash transfer in progress".into()))?;
         if transfer.state == FlashState::Validated {
             transfer.state = FlashState::AwaitingActivation;
+            drop(flash_state);
+            let mut activation = self.activation_state.write();
+            activation.state = FlashState::AwaitingActivation;
             Ok(())
         } else {
             Err(BackendError::InvalidRequest(format!(
@@ -1560,15 +1573,15 @@ impl DiagnosticBackend for UdsBackend {
                 transfer.state
             )));
         }
-        transfer.state = if self.flash_commit_config.supports_rollback {
+        let target = if self.flash_commit_config.supports_rollback {
             FlashState::AwaitingReboot
         } else {
             FlashState::Complete
         };
-        if self.flash_commit_config.supports_rollback {
-            let mut activation = self.activation_state.write();
-            activation.state = FlashState::AwaitingReboot;
-        }
+        transfer.state = target;
+        drop(flash_state);
+        let mut activation = self.activation_state.write();
+        activation.state = target;
         Ok(())
     }
 
