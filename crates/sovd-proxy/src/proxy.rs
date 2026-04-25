@@ -1355,6 +1355,57 @@ impl DiagnosticBackend for SovdProxyBackend {
         Ok(())
     }
 
+    async fn validate(&self) -> BackendResult<()> {
+        let url = self.flash_url("/flash/validate")?;
+        let response = self
+            .client
+            .http_client()
+            .post(&url)
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(Self::map_response_error(response).await);
+        }
+
+        Ok(())
+    }
+
+    async fn invalidate(&self) -> BackendResult<()> {
+        let url = self.flash_url("/flash/invalidate")?;
+        let response = self
+            .client
+            .http_client()
+            .post(&url)
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(Self::map_response_error(response).await);
+        }
+
+        Ok(())
+    }
+
+    async fn activate(&self) -> BackendResult<()> {
+        let url = self.flash_url("/flash/activate")?;
+        let response = self
+            .client
+            .http_client()
+            .post(&url)
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(Self::map_response_error(response).await);
+        }
+
+        Ok(())
+    }
+
     async fn commit_flash(&self) -> BackendResult<()> {
         let url = self.flash_url("/flash/commit")?;
         let response = self
