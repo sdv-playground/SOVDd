@@ -103,33 +103,55 @@ pub struct FlashStatus {
 ///
 /// # Lifecycle
 ///
+/// Common transfer prefix:
+///
 /// ```text
 /// Queued → Preparing → Transferring → AwaitingActivation ◀── invalidate() ──┐
 ///                                         │                                  │
 ///                          finalize_flash()│                                 │
-///                     ┌───────────────────┤                                 │
-///                     │                    │                                 │
-///             (no rollback)        (supports_rollback)                       │
-///                     │                    │                                 │
-///                     │       optional: validate()                           │
-///                     │                    ▼                                 │
-///                     │                Validated ────────────────────────────┘
-///                     │                    │
-///                     │              activate()
-///                     ▼                    ▼
-///                  Complete          AwaitingReboot
+///                                         │                                  │
+///                              optional: validate()                          │
+///                                         ▼                                  │
+///                                     Validated ─────────────────────────────┘
 ///                                         │
-///                           ecu_reset() or│auto-detect
+///                                   activate()
+/// ```
+///
+/// Branch on `supports_rollback`:
+///
+/// **Dual-bank** (`supports_rollback = true`): activation requires a reboot;
+/// the new firmware runs in trial mode (`Activated`) until the orchestrator
+/// commits or rolls back.
+///
+/// ```text
+///                                         │  activate()
 ///                                         ▼
-///                                     Activated
+///                                  AwaitingReboot
+///                                         │  ecu_reset() (or auto-detect)
+///                                         ▼
+///                                     Activated  (trial mode)
 ///                                    /         \
 ///                          commit() /           \ rollback()
 ///                                  ▼             ▼
-///                             Committed      RolledBack
+///                              Committed      RolledBack
+/// ```
+///
+/// **Single-bank** (`supports_rollback = false`): the activation event is
+/// the artifact write itself — no reboot, no trial. The lifecycle still
+/// passes through `Activated` so the orchestrator and viewer observe the
+/// "new artifact in effect" moment, then `Complete` after `commit_flash()`.
+///
+/// ```text
+///                                         │  activate()
+///                                         ▼
+///                                     Activated
+///                                         │  commit_flash()
+///                                         ▼
+///                                     Complete
 /// ```
 ///
 /// `validate()` and `Validated` are opt-in. The classic flow
-/// (`finalize_flash()` → `AwaitingReboot` or `Complete`) still works for
+/// (`finalize_flash()` → `AwaitingReboot` or `Activated`) still works for
 /// callers that don't need the explicit validation step. New orchestrators
 /// can use `validate()` for re-runnable crypto checks (e.g. multi-cycle
 /// fleet campaigns) and `invalidate()` to demote `Validated` back to
