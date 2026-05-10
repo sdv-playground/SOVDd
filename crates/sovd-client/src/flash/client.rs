@@ -199,13 +199,14 @@ impl FlashClient {
         filename: Option<&str>,
     ) -> Result<UploadResponse> {
         let url = self.build_url(&self.config.files_upload_path())?;
-        info!("Uploading {} bytes to {}", data.len(), url);
+        let bytes = data.len();
+        info!("Uploading {} bytes to {}", bytes, url);
 
         let mut request = self
             .client
             .post(url)
             .header("Content-Type", "application/octet-stream")
-            .header("Content-Length", data.len());
+            .header("Content-Length", bytes);
 
         if let Some(name) = filename {
             request = request.header("X-Filename", name);
@@ -215,12 +216,25 @@ impl FlashClient {
 
         // Use upload timeout (default 5 min) instead of the general request timeout (30s),
         // since streaming uploads include server-side processing (decrypt, decompress, write).
+        // The elapsed window therefore covers wire transfer + server-side work.
+        let started = std::time::Instant::now();
         let response = request
             .timeout(Duration::from_millis(self.config.timeouts.upload_ms))
             .body(data.to_vec())
             .send()
             .await?;
-        self.handle_response(response).await
+        let elapsed = started.elapsed();
+        let result = self.handle_response(response).await;
+        let mb = bytes as f64 / 1_048_576.0;
+        let secs = elapsed.as_secs_f64();
+        let mb_per_sec = if secs > 0.0 { mb / secs } else { 0.0 };
+        info!(
+            bytes,
+            elapsed_ms = elapsed.as_millis() as u64,
+            "upload complete: {:.2} MB at {:.2} MB/s",
+            mb, mb_per_sec
+        );
+        result
     }
 
     /// Get the status of an upload
