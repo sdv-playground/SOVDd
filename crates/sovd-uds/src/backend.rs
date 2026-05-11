@@ -63,6 +63,7 @@ struct StoredPackage {
     data: Vec<u8>,
     status: PackageStatus,
     created_at: chrono::DateTime<Utc>,
+    verified_at: Option<chrono::DateTime<Utc>>,
 }
 
 /// State of an active flash transfer
@@ -1140,6 +1141,7 @@ impl DiagnosticBackend for UdsBackend {
             data: data.to_vec(),
             status: PackageStatus::Pending,
             created_at: Utc::now(),
+            verified_at: None,
         };
 
         {
@@ -1201,9 +1203,12 @@ impl DiagnosticBackend for UdsBackend {
         // Basic validation: ensure non-empty
         let valid = !package.data.is_empty();
 
+        let now = Utc::now();
         package.status = if valid {
+            package.verified_at = Some(now);
             PackageStatus::Verified
         } else {
+            package.verified_at = None;
             PackageStatus::Invalid
         };
 
@@ -1264,12 +1269,16 @@ impl DiagnosticBackend for UdsBackend {
             }
         }
 
-        // Find the verified package to flash (no args — use the single verified package)
+        // Find the most recently verified package to flash.
+        // Multiple verified uploads can coexist in the package store across
+        // flash cycles, so picking the first HashMap entry is nondeterministic
+        // and can reuse a stale package from an earlier transfer.
         let (manifest_id, package_data) = {
             let packages = self.packages.read();
             let (id, pkg) = packages
                 .iter()
-                .find(|(_, p)| p.status == PackageStatus::Verified)
+                .filter(|(_, p)| p.status == PackageStatus::Verified)
+                .max_by_key(|(_, p)| p.verified_at.as_ref().cloned())
                 .ok_or_else(|| {
                     BackendError::InvalidRequest(
                         "No verified package available for flashing".to_string(),
