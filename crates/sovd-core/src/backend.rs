@@ -171,6 +171,11 @@ pub struct FlashStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlashState {
+    /// Component has never been flashed via OTA — factory-fresh / pristine.
+    /// Distinguishes the initial post-deploy state from `Complete` (which
+    /// implies a transfer ran). Not a state reachable from the flash flow;
+    /// `start_flash()` may move directly from `Initial` to `Queued`.
+    Initial,
     /// Transfer is queued, waiting to start. **Abortable.**
     Queued,
     /// Preparing for transfer (session, security, erase). **Abortable.**
@@ -209,6 +214,7 @@ pub enum FlashState {
 impl std::fmt::Display for FlashState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
+            FlashState::Initial => "initial",
             FlashState::Queued => "queued",
             FlashState::Preparing => "preparing",
             FlashState::Transferring => "transferring",
@@ -231,6 +237,7 @@ impl std::str::FromStr for FlashState {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "initial" => Ok(FlashState::Initial),
             "queued" => Ok(FlashState::Queued),
             "preparing" => Ok(FlashState::Preparing),
             "transferring" => Ok(FlashState::Transferring),
