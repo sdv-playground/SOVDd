@@ -268,6 +268,36 @@ pub struct ActivationState {
     /// Previous firmware version (available for rollback)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_version: Option<String>,
+    /// Which kind of reset is needed to activate a newly-staged image.
+    /// Orchestrator reads this to decide between per-component
+    /// `PUT components/{id}/status/restart` (Local) and a coalesced
+    /// `PUT {ecu-path}/status/restart` (RequiresEcuReset). `#[serde(default)]`
+    /// keeps older SOVD payloads deserialising — they get `Local` which
+    /// matches their actual behaviour before the field existed.
+    /// Spec: ISO 17978-3 §7.19 + CDA §8.7.
+    #[serde(default)]
+    pub reset_kind: ResetKind,
+}
+
+/// Reset class declared per-component to let the orchestrator coalesce.
+///
+/// - `None`: activation needs no reset (HSM keystore swap, container
+///   hot-reload).
+/// - `Local`: activation cycles the component itself (qvm restart,
+///   container restart, daemon SIGHUP). Orchestrator PUTs the component's
+///   own `status/restart`. **Default** — most components fall here.
+/// - `RequiresEcuReset`: activation requires rebooting the parent ECU
+///   because the newly-staged image only runs after a host boot (M7
+///   firmware via m7loader, host-OS IFS via Dev/Partition activators).
+///   Orchestrator coalesces all `RequiresEcuReset` components into one
+///   `PUT {ecu-path}/status/restart`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResetKind {
+    None,
+    #[default]
+    Local,
+    RequiresEcuReset,
 }
 
 /// Progress information for an active flash transfer

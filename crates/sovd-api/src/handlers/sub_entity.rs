@@ -390,6 +390,7 @@ pub async fn get_activation_state(
         state: activation.state.to_string(),
         active_version: activation.active_version,
         previous_version: activation.previous_version,
+        reset_kind: activation.reset_kind,
     }))
 }
 

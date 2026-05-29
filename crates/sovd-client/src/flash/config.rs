@@ -333,13 +333,22 @@ impl FlashConfig {
     }
 
     /// Get the resolved endpoint path for ECU reset
-    /// Note: SOVD reset is at /vehicle/v1/components/:id/reset, not under /flash/
+    /// Note: SOVD reset is at /vehicle/v1/components/:id/reset, not under /flash/.
+    /// **DEPRECATED** — prefer [`flash_status_restart_path`] (PUT
+    /// `status/restart`) per ISO 17978-3 §7.19.
     pub fn flash_reset_path(&self) -> String {
         self.endpoints
             .detail
             .as_ref()
             .and_then(|d| d.flash_reset.clone())
             .unwrap_or_else(|| format!("{}/reset", self.base_prefix()))
+    }
+
+    /// Get the resolved endpoint path for spec-conforming PUT
+    /// `status/restart` (ISO 17978-3 §7.19). Lives at
+    /// `/vehicle/v1/components/:id/status/restart`.
+    pub fn flash_status_restart_path(&self) -> String {
+        format!("{}/status/restart", self.base_prefix())
     }
 }
 

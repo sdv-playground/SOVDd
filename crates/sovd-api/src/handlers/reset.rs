@@ -59,11 +59,40 @@ fn parse_reset_type(s: &str) -> Result<(u8, &'static str), ApiError> {
 }
 
 /// POST /vehicle/v1/components/:component_id/reset
-/// Request ECU reset
+/// Request ECU reset.
+///
+/// **DEPRECATED**: use `PUT /components/{id}/status/restart` instead per
+/// ISO 17978-3 §7.19 (CDA §8.7 maps UDS ECUReset 0x11 to this path).
+/// This handler is kept as an alias forwarding to the same backend
+/// operation so in-flight orchestrators keep working through the
+/// migration cycle. Slated for removal after Phase 4.
 pub async fn ecu_reset(
     State(state): State<AppState>,
     Path(component_id): Path<String>,
     Json(request): Json<EcuResetRequest>,
+) -> Result<Json<EcuResetResponse>, ApiError> {
+    ecu_reset_inner(state, component_id, request).await
+}
+
+/// PUT /vehicle/v1/components/:component_id/status/restart
+/// Spec-conforming entry per ISO 17978-3 §7.19.
+///
+/// Body is the same `EcuResetRequest` (carries the UDS `ResetType` enum).
+/// 202 on success — async reset, caller polls `activation_state` to verify.
+/// 409 if a flash session is in progress (the backend currently surfaces
+/// this as an `ApiError`; orchestrator retries after the conflict clears).
+pub async fn status_restart(
+    State(state): State<AppState>,
+    Path(component_id): Path<String>,
+    Json(request): Json<EcuResetRequest>,
+) -> Result<Json<EcuResetResponse>, ApiError> {
+    ecu_reset_inner(state, component_id, request).await
+}
+
+async fn ecu_reset_inner(
+    state: AppState,
+    component_id: String,
+    request: EcuResetRequest,
 ) -> Result<Json<EcuResetResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
 

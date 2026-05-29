@@ -207,6 +207,11 @@ pub struct ActivationStateResponse {
     /// Previous firmware version (available for rollback)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_version: Option<String>,
+    /// Reset kind needed to activate the staged image. Orchestrator reads
+    /// this to decide between per-component `PUT status/restart` (Local)
+    /// and a coalesced ECU-level reboot (RequiresEcuReset). Default `Local`.
+    #[serde(default)]
+    pub reset_kind: sovd_core::ResetKind,
 }
 
 /// POST /vehicle/v1/components/:component_id/flash/commit
@@ -324,5 +329,6 @@ pub async fn get_activation_state(
         state: activation.state.to_string(),
         active_version: activation.active_version,
         previous_version: activation.previous_version,
+        reset_kind: activation.reset_kind,
     }))
 }

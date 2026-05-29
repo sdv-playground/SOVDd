@@ -258,7 +258,13 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/streams/{subscription_id}",
             get(handlers::streams::stream_subscription),
         )
-        // ECU Reset route
+        // ECU Reset routes — ISO 17978-3 §7.19. PUT status/restart is the
+        // spec-conforming entry; POST /reset is kept as a deprecated alias
+        // for one release cycle so in-flight orchestrators don't break.
+        .route(
+            "/vehicle/v1/components/{component_id}/status/restart",
+            put(handlers::reset::status_restart),
+        )
         .route(
             "/vehicle/v1/components/{component_id}/reset",
             post(handlers::reset::ecu_reset),

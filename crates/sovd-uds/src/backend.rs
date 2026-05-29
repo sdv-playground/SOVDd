@@ -150,6 +150,9 @@ impl UdsBackend {
             state: FlashState::Complete,
             active_version: None,
             previous_version: None,
+            // UDS backend has no finer-grained reset signal; peer reset
+            // semantics are encoded at the UDS layer. Default Local.
+            reset_kind: sovd_core::ResetKind::Local,
         };
 
         Ok(Self {
@@ -1727,6 +1730,7 @@ impl DiagnosticBackend for UdsBackend {
             state: activation.state,
             active_version,
             previous_version: activation.previous_version.clone(),
+            reset_kind: sovd_core::ResetKind::Local,
         })
     }
 }

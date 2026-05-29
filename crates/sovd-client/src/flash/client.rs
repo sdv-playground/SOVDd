@@ -497,27 +497,43 @@ impl FlashClient {
         self.handle_response(response).await
     }
 
-    /// Reset the ECU (UDS 0x11)
+    /// Reset the ECU (UDS 0x11) via PUT `status/restart`.
+    ///
+    /// Spec: ISO 17978-3 §7.19, CDA §8.7. Defaults to hard reset.
     #[instrument(skip(self))]
     pub async fn ecu_reset(&self) -> Result<ResetResponse> {
         self.ecu_reset_with_type("hard").await
     }
 
-    /// Reset the ECU with specific reset type
+    /// Reset the ECU with a specific UDS `ResetType` via PUT
+    /// `status/restart` (ISO 17978-3 §7.19).
+    ///
+    /// Migrated 2026-05-29 from POST `/reset` to spec-conforming PUT
+    /// `status/restart`. Server keeps POST `/reset` as a deprecated alias
+    /// for one release cycle, so existing servers without the new route
+    /// still accept calls — but any new server should serve both paths.
     #[instrument(skip(self))]
     pub async fn ecu_reset_with_type(&self, reset_type: &str) -> Result<ResetResponse> {
-        let url = self.build_url(&self.config.flash_reset_path())?;
-        info!("Resetting ECU ({}) via {}", reset_type, url);
+        let url = self.build_url(&self.config.flash_status_restart_path())?;
+        info!("Restarting ECU ({}) via PUT {}", reset_type, url);
 
         let request_body = ResetRequest {
             reset_type: reset_type.to_string(),
         };
 
-        let mut request = self.client.post(url).json(&request_body);
+        let mut request = self.client.put(url).json(&request_body);
         request = self.add_auth_header(request);
 
         let response = request.send().await?;
         self.handle_response(response).await
+    }
+
+    /// Explicit alias for [`ecu_reset_with_type`] using the spec-aligned
+    /// name. Prefer this in new callers — `ecu_reset` / `ecu_reset_with_type`
+    /// remain available for compatibility with existing call sites.
+    #[instrument(skip(self))]
+    pub async fn status_restart(&self, reset_type: &str) -> Result<ResetResponse> {
+        self.ecu_reset_with_type(reset_type).await
     }
 
     // =========================================================================

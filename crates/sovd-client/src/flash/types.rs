@@ -312,6 +312,12 @@ pub struct ActivationStateResponse {
     /// Previous firmware version (available for rollback)
     #[serde(default)]
     pub previous_version: Option<String>,
+
+    /// Reset kind needed to activate the staged image. `#[serde(default)]`
+    /// for backward compat with servers that haven't migrated yet — they
+    /// omit the field and clients fall back to `Local`.
+    #[serde(default)]
+    pub reset_kind: sovd_core::ResetKind,
 }
 
 /// ECU reset request

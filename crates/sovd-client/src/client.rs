@@ -1346,15 +1346,19 @@ impl SovdClient {
         component_id: &str,
         reset_type: &str,
     ) -> Result<EcuResetResponse> {
-        let url = self
-            .base_url
-            .join(&format!("/vehicle/v1/components/{}/reset", component_id))?;
+        // ISO 17978-3 §7.19: PUT `{entity-path}/status/restart`. CDA §8.7
+        // maps UDS ECUReset(0x11) to this path. Server keeps the older
+        // POST `/reset` as a deprecated alias for one release cycle.
+        let url = self.base_url.join(&format!(
+            "/vehicle/v1/components/{}/status/restart",
+            component_id
+        ))?;
 
         let body = serde_json::json!({
             "reset_type": reset_type
         });
 
-        let response = self.client.post(url).json(&body).send().await?;
+        let response = self.client.put(url).json(&body).send().await?;
         self.handle_response(response).await
     }
 

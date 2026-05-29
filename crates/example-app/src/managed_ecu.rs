@@ -780,6 +780,8 @@ impl DiagnosticBackend for ManagedEcuBackend {
             state,
             active_version: resp.active_version,
             previous_version: resp.previous_version,
+            // Forward the upstream ECU's reset_kind as-is.
+            reset_kind: resp.reset_kind,
         })
     }
 }
