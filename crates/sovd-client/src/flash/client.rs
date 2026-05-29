@@ -780,6 +780,59 @@ impl std::fmt::Display for FlashUpdatePhase {
     }
 }
 
+/// Issue an **ECU-level reset** at the SOVD entity root (ISO 17978-3
+/// §7.19). Used by orchestrators to coalesce per-component restarts
+/// into a single host reboot when at least one staged component
+/// declared `reset_kind: requires_ecu_reset` (e.g. RT firmware via
+/// m7loader, host-OS IFS write).
+///
+/// `server_url` is the SOVD server base (e.g. `http://192.168.1.20:4000`).
+/// `gateway_id` selects which ECU to reset in a multi-tier topology:
+///   - `None` → single-ECU deployment, target is `/vehicle/v1`
+///   - `Some("cvc1")` → multi-CVC vehicle, target is
+///     `/vehicle/v1/components/cvc1`
+///
+/// `reset_type` mirrors UDS `ResetType` ("hard" / "soft" /
+/// "key_off_on"). Spec: the body field maps to UDS §8.7 directly.
+///
+/// Returns `Ok(())` on 202; surfaces any other status as `Server`.
+/// The reset itself is async — the caller polls `activation_state` on
+/// each affected component to verify the new firmware actually came up.
+///
+/// **Authorization**: the caller is expected to present a JWT scope
+/// that permits the reboot. The server's handler trusts that auth
+/// gate (see §5.4.4); this client does NOT inject credentials beyond
+/// what `reqwest::Client`'s default cookie / `Authorization` header
+/// chain already does.
+pub async fn system_restart(
+    server_url: &str,
+    gateway_id: Option<&str>,
+    reset_type: &str,
+) -> Result<()> {
+    let base = Url::parse(server_url)?;
+    let path = match gateway_id {
+        Some(gw) => format!("/vehicle/v1/components/{gw}/status/restart"),
+        None => "/vehicle/v1/status/restart".to_string(),
+    };
+    let url = base.join(&path)?;
+    info!("ECU restart at {url} (reset_type={reset_type})");
+
+    let body = ResetRequest {
+        reset_type: reset_type.to_string(),
+    };
+    let response = Client::new().put(url).json(&body).send().await?;
+    let status = response.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        let message = response.text().await.unwrap_or_default();
+        Err(FlashError::Server {
+            status: status.as_u16(),
+            message,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
