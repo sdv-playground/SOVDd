@@ -128,9 +128,9 @@ pub struct DataResponse {
     /// Whether conversion was applied
     #[serde(default)]
     pub converted: Option<bool>,
-    /// Timestamp (milliseconds)
+    /// Server-side read time, RFC 3339 (ISO 17978-3 C-050).
     #[serde(default)]
-    pub timestamp: Option<i64>,
+    pub timestamp: Option<String>,
 }
 
 impl DataResponse {
@@ -302,7 +302,8 @@ pub struct OperationResponse {
     pub result_data: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
-    pub timestamp: i64,
+    /// Operation start time, RFC 3339 (ISO 17978-3 C-050).
+    pub timestamp: String,
 }
 
 // =============================================================================

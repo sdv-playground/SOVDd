@@ -33,7 +33,8 @@ pub struct OperationResultResponse {
     pub result_data: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    pub timestamp: i64,
+    /// Operation start time, RFC 3339 (ISO 17978-3 C-050).
+    pub timestamp: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -132,6 +133,6 @@ pub async fn execute_operation(
         status: execution.status,
         result_data,
         error: execution.error,
-        timestamp: execution.started_at.timestamp_millis(),
+        timestamp: execution.started_at.to_rfc3339(),
     }))
 }

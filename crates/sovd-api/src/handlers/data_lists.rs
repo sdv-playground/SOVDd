@@ -80,7 +80,8 @@ pub struct DataListReadResponse {
     pub ddid: String,
     pub raw: String,
     pub length: usize,
-    pub timestamp: i64,
+    /// RFC 3339 read time (ISO 17978-3 C-050).
+    pub timestamp: String,
 }
 
 fn parse_did(s: &str) -> Result<u16, ApiError> {
@@ -174,7 +175,7 @@ pub async fn read_data_list(
         ddid: format_did(ddid),
         raw: hex::encode(&raw_bytes),
         length: raw_bytes.len(),
-        timestamp: Utc::now().timestamp_millis(),
+        timestamp: Utc::now().to_rfc3339(),
     }))
 }
 

@@ -646,7 +646,7 @@ pub async fn read_sub_entity_parameter(
                     raw: hex::encode(&raw_bytes),
                     length: raw_bytes.len(),
                     converted: false,
-                    timestamp: Utc::now().timestamp_millis(),
+                    timestamp: Utc::now().to_rfc3339(),
                 }));
             }
 
@@ -667,7 +667,7 @@ pub async fn read_sub_entity_parameter(
                 raw: hex::encode(&raw_bytes),
                 length: raw_bytes.len(),
                 converted,
-                timestamp: Utc::now().timestamp_millis(),
+                timestamp: Utc::now().to_rfc3339(),
             }));
         }
     }
@@ -699,7 +699,7 @@ pub async fn read_sub_entity_parameter(
         raw,
         length,
         converted: !query.raw && has_raw,
-        timestamp: Utc::now().timestamp_millis(),
+        timestamp: Utc::now().to_rfc3339(),
     }))
 }
 
@@ -751,7 +751,7 @@ pub async fn write_sub_entity_parameter(
                 raw: hex::encode(&data),
                 length: data.len(),
                 converted,
-                timestamp: Utc::now().timestamp_millis(),
+                timestamp: Utc::now().to_rfc3339(),
             }));
         }
     }
@@ -768,7 +768,7 @@ pub async fn write_sub_entity_parameter(
         raw: hex::encode(&data),
         length: data.len(),
         converted: false,
-        timestamp: Utc::now().timestamp_millis(),
+        timestamp: Utc::now().to_rfc3339(),
     }))
 }
 
@@ -924,7 +924,7 @@ pub async fn execute_sub_entity_operation(
                         .map(|s| s.to_string())
                 }),
                 error: execution.error,
-                timestamp: execution.started_at.timestamp_millis(),
+                timestamp: execution.started_at.to_rfc3339(),
             }))
         }
         "result" | "status" => {
@@ -943,7 +943,7 @@ pub async fn execute_sub_entity_operation(
                         .map(|s| s.to_string())
                 }),
                 error: execution.error,
-                timestamp: execution.started_at.timestamp_millis(),
+                timestamp: execution.started_at.to_rfc3339(),
             }))
         }
         "stop" => {
@@ -958,7 +958,7 @@ pub async fn execute_sub_entity_operation(
                 status: OperationStatus::Cancelled,
                 result_data: None,
                 error: None,
-                timestamp: Utc::now().timestamp_millis(),
+                timestamp: Utc::now().to_rfc3339(),
             }))
         }
         _ => Err(ApiError::BadRequest(format!(

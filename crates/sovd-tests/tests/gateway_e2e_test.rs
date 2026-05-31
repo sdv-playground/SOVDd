@@ -1087,7 +1087,7 @@ async fn test_streaming_via_sse() {
         // Verify data point structure
         let first_event = &events[0];
         assert!(
-            first_event.has("coolant_temp") && first_event.timestamp > 0,
+            first_event.has("coolant_temp") && !first_event.timestamp.is_empty(),
             "Data point should have coolant_temp and timestamp, got: {:?}",
             first_event
         );

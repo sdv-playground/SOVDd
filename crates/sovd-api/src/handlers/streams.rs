@@ -61,8 +61,8 @@ pub struct StreamQuery {
 /// Contains seq, ts, and flattened parameter values
 #[derive(Debug, Serialize)]
 struct StreamEvent {
-    /// Unix timestamp in milliseconds
-    ts: i64,
+    /// RFC 3339 timestamp (ISO 17978-3 C-050).
+    ts: String,
     /// Sequence number
     seq: u64,
     /// Flattened parameter values
@@ -159,7 +159,7 @@ pub async fn stream_subscription(
         match result {
             Ok(data_point) => {
                 let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
-                let ts = Utc::now().timestamp_millis();
+                let ts = Utc::now().to_rfc3339();
 
                 // Look up parameter name and DID from the data point ID
                 let (param_name, did) = did_to_info
@@ -310,7 +310,7 @@ fn create_sse_stream(
         match result {
             Ok(data_point) => {
                 let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
-                let ts = Utc::now().timestamp_millis();
+                let ts = Utc::now().to_rfc3339();
 
                 // Look up parameter name and DID from the data point ID
                 let (param_name, did) = did_to_info

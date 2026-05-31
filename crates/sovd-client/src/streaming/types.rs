@@ -7,9 +7,9 @@ use thiserror::Error;
 /// A streaming data event from an SSE subscription
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamEvent {
-    /// Unix timestamp in milliseconds
+    /// RFC 3339 timestamp (ISO 17978-3 C-050).
     #[serde(rename = "ts")]
-    pub timestamp: i64,
+    pub timestamp: String,
 
     /// Sequence number (monotonically increasing)
     #[serde(rename = "seq")]

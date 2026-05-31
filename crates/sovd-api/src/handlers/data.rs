@@ -81,8 +81,8 @@ pub struct DidResponse {
     pub length: usize,
     /// Whether a conversion was applied
     pub converted: bool,
-    /// Timestamp
-    pub timestamp: i64,
+    /// Server-side read time, RFC 3339 (ISO 17978-3 C-050).
+    pub timestamp: String,
 }
 
 /// Request for DID write operations
@@ -309,7 +309,7 @@ async fn read_did_internal(
                             raw,
                             length,
                             converted: !raw_only && has_raw,
-                            timestamp: Utc::now().timestamp_millis(),
+                            timestamp: Utc::now().to_rfc3339(),
                         }));
                     }
 
@@ -340,7 +340,7 @@ async fn read_did_internal(
                         raw: hex::encode(&raw_bytes),
                         length: raw_bytes.len(),
                         converted: false,
-                        timestamp: Utc::now().timestamp_millis(),
+                        timestamp: Utc::now().to_rfc3339(),
                     }));
                 }
 
@@ -357,7 +357,7 @@ async fn read_did_internal(
                     raw: hex::encode(&raw_bytes),
                     length: raw_bytes.len(),
                     converted,
-                    timestamp: Utc::now().timestamp_millis(),
+                    timestamp: Utc::now().to_rfc3339(),
                 }));
             } else {
                 // No local definition — fall back to read_data() on the child backend.
@@ -382,7 +382,7 @@ async fn read_did_internal(
                         raw,
                         length,
                         converted: !raw_only && has_raw,
-                        timestamp: Utc::now().timestamp_millis(),
+                        timestamp: Utc::now().to_rfc3339(),
                     }));
                 }
 
@@ -413,7 +413,7 @@ async fn read_did_internal(
                 raw,
                 length,
                 converted: !raw_only && has_raw,
-                timestamp: Utc::now().timestamp_millis(),
+                timestamp: Utc::now().to_rfc3339(),
             }));
         }
 
@@ -449,7 +449,7 @@ async fn read_did_internal(
                     raw,
                     length,
                     converted: !raw_only && has_raw,
-                    timestamp: Utc::now().timestamp_millis(),
+                    timestamp: Utc::now().to_rfc3339(),
                 }));
             }
 
@@ -486,7 +486,7 @@ async fn read_did_internal(
                     raw,
                     length: value.len(),
                     converted: true,
-                    timestamp: Utc::now().timestamp_millis(),
+                    timestamp: Utc::now().to_rfc3339(),
                 }));
             }
             return Err(ApiError::NotImplemented("read_raw_did".to_string()));
@@ -504,7 +504,7 @@ async fn read_did_internal(
             raw: hex::encode(&raw_bytes),
             length: raw_bytes.len(),
             converted: false,
-            timestamp: Utc::now().timestamp_millis(),
+            timestamp: Utc::now().to_rfc3339(),
         }));
     }
 
@@ -527,7 +527,7 @@ async fn read_did_internal(
         raw: hex::encode(&raw_bytes),
         length: raw_bytes.len(),
         converted,
-        timestamp: Utc::now().timestamp_millis(),
+        timestamp: Utc::now().to_rfc3339(),
     }))
 }
 
@@ -554,7 +554,7 @@ async fn write_did_internal(
             raw: hex::encode(&data),
             length: data.len(),
             converted: false,
-            timestamp: Utc::now().timestamp_millis(),
+            timestamp: Utc::now().to_rfc3339(),
         }));
     }
 
@@ -604,7 +604,7 @@ async fn write_did_internal(
         raw: hex::encode(&data),
         length: data.len(),
         converted,
-        timestamp: Utc::now().timestamp_millis(),
+        timestamp: Utc::now().to_rfc3339(),
     }))
 }
 

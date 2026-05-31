@@ -1232,7 +1232,7 @@ async fn test_sse_stream_periodic_data() {
                                         );
                                     }
                                     assert!(json["seq"].is_number(), "Expected sequence number");
-                                    assert!(json["ts"].is_number(), "Expected timestamp");
+                                    assert!(json["ts"].is_string(), "Expected RFC 3339 timestamp");
                                 }
                             }
                         }
