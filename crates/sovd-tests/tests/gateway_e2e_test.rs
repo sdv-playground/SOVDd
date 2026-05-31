@@ -1436,17 +1436,13 @@ async fn test_security_flow_raw_http() {
     );
     assert_eq!(status, 200);
     assert_eq!(body["id"], "security");
-    // Seed should be in body.seed.Request_Seed as space-separated hex (e.g., "0xaa 0xbb 0xcc 0xdd")
-    let seed_str = body["seed"]["Request_Seed"]
+    // Spec wire: body.seed = "<concatenated lowercase hex>"
+    let seed_str = body["seed"]
         .as_str()
-        .expect("Seed response should have seed.Request_Seed");
+        .expect("Seed response should have seed hex string");
     eprintln!("Raw seed string: {}", seed_str);
 
-    // Parse seed from "0xaa 0xbb 0xcc 0xdd" format
-    let seed_bytes: Vec<u8> = seed_str
-        .split_whitespace()
-        .map(|s| u8::from_str_radix(s.trim_start_matches("0x"), 16).unwrap())
-        .collect();
+    let seed_bytes: Vec<u8> = hex::decode(seed_str).expect("Invalid hex seed");
     assert!(!seed_bytes.is_empty(), "Seed bytes should not be empty");
     eprintln!("Parsed seed: {}", hex::encode(&seed_bytes));
 

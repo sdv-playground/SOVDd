@@ -913,12 +913,11 @@ impl SovdClient {
         Ok(())
     }
 
-    /// Request security access (send seed request, receive seed)
+    /// Request security access (send seed request, receive seed).
     ///
-    /// SOVD standard response format:
-    /// ```json
-    /// {"id": "security", "seed": {"Request_Seed": "0xaa 0xbb 0xcc 0xdd"}}
-    /// ```
+    /// Spec wire shape: `{"id": "security", "seed": "aabbccdd"}` where
+    /// `seed` is concatenated lowercase hex per spec `string:hex`
+    /// primitive (ISO 17978-3 sovd_iso17978_spec.yaml line 192).
     #[instrument(skip(self))]
     pub async fn security_access_request_seed(
         &self,
@@ -960,32 +959,16 @@ impl SovdClient {
         let response = self.client.put(url).json(&body).send().await?;
         let result: serde_json::Value = self.handle_response(response).await?;
 
-        // SOVD standard: {"id": "security", "seed": {"Request_Seed": "0xaa 0xbb 0xcc 0xdd"}}
-        if let Some(seed_obj) = result.get("seed") {
-            // Try SOVD standard format first: seed.Request_Seed
-            if let Some(seed_str) = seed_obj.get("Request_Seed").and_then(|v| v.as_str()) {
-                // Parse space-separated "0xaa 0xbb" format
-                let bytes: Vec<u8> = seed_str
-                    .split_whitespace()
-                    .filter_map(|s| {
-                        let s = s.trim_start_matches("0x").trim_start_matches("0X");
-                        u8::from_str_radix(s, 16).ok()
-                    })
-                    .collect();
-                if !bytes.is_empty() {
-                    return Ok(bytes);
-                }
-            }
-            // Fallback: seed as direct hex string
-            if let Some(seed_str) = seed_obj.as_str() {
-                return hex::decode(seed_str)
-                    .map_err(|e| SovdClientError::ParseError(e.to_string()));
-            }
-        }
+        // Spec shape: `{"id": "security", "seed": "aabbccdd"}` — `seed`
+        // is concatenated lowercase hex (string:hex primitive).
+        let seed_str = result
+            .get("seed")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                SovdClientError::ParseError("No seed in security access response".into())
+            })?;
 
-        Err(SovdClientError::ParseError(
-            "No seed in security access response".into(),
-        ))
+        hex::decode(seed_str).map_err(|e| SovdClientError::ParseError(e.to_string()))
     }
 
     /// Send security access key

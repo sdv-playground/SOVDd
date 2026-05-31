@@ -509,7 +509,7 @@ pub async fn put_security_mode(
     Path((component_id, app_id)): Path<(String, String)>,
     Json(request): Json<SecurityModeRequest>,
 ) -> Result<axum::response::Response, ApiError> {
-    use super::modes::{SecurityKeyResponse, SecuritySeedResponse, SovdSeed};
+    use super::modes::{SecurityKeyResponse, SecuritySeedResponse};
     use axum::response::IntoResponse;
 
     let backend = resolve(&state, &component_id, &app_id).await?;
@@ -525,18 +525,10 @@ pub async fn put_security_mode(
         .await?;
 
     if is_seed_request {
-        let seed_hex = mode.seed.unwrap_or_default();
-        let seed_formatted = seed_hex
-            .as_bytes()
-            .chunks(2)
-            .map(|chunk| format!("0x{}", std::str::from_utf8(chunk).unwrap_or("00")))
-            .collect::<Vec<_>>()
-            .join(" ");
+        let seed = mode.seed.unwrap_or_default().to_lowercase();
         Ok(Json(SecuritySeedResponse {
             id: "security".to_string(),
-            seed: SovdSeed {
-                request_seed: seed_formatted,
-            },
+            seed,
         })
         .into_response())
     } else {

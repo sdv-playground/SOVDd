@@ -1474,24 +1474,13 @@ async fn test_security_access_success() {
     );
     assert_eq!(json["id"], "security");
 
-    // New format: seed is in { seed: { Request_Seed: "0xaa 0xbb 0xcc 0xdd" } }
-    let seed_obj = &json["seed"];
-    assert!(
-        seed_obj.is_object(),
-        "Expected seed object in response: {}",
-        json
-    );
-
-    let seed_str = seed_obj["Request_Seed"]
+    // Spec wire: { id: "security", seed: "<concatenated lowercase hex>" }
+    let seed_str = json["seed"]
         .as_str()
-        .expect("Expected Request_Seed string in seed object");
+        .expect("Expected seed hex string in response");
     eprintln!("Received seed: {}", seed_str);
 
-    // Parse space-separated hex bytes (e.g., "0xc9 0xb6 0xc5 0x72")
-    let seed: Vec<u8> = seed_str
-        .split_whitespace()
-        .map(|s| u8::from_str_radix(s.trim_start_matches("0x"), 16).expect("Invalid hex byte"))
-        .collect();
+    let seed: Vec<u8> = hex::decode(seed_str).expect("Invalid hex seed");
 
     // Step 2: Calculate key using the same algorithm as example-ecu (XOR with secret)
     // Default secret is "ff" (single byte 0xFF)
@@ -1550,24 +1539,13 @@ async fn test_security_access_failure_wrong_key() {
     assert_eq!(status, 200, "Expected 200 OK for seed request");
     assert_eq!(json["id"], "security");
 
-    // New format: seed is in { seed: { Request_Seed: "0xaa 0xbb 0xcc 0xdd" } }
-    let seed_obj = &json["seed"];
-    assert!(
-        seed_obj.is_object(),
-        "Expected seed object in response: {}",
-        json
-    );
-
-    let seed_str = seed_obj["Request_Seed"]
+    // Spec wire: { id: "security", seed: "<concatenated lowercase hex>" }
+    let seed_str = json["seed"]
         .as_str()
-        .expect("Expected Request_Seed string in seed object");
+        .expect("Expected seed hex string in response");
     eprintln!("Received seed: {}", seed_str);
 
-    // Parse space-separated hex bytes
-    let seed: Vec<u8> = seed_str
-        .split_whitespace()
-        .map(|s| u8::from_str_radix(s.trim_start_matches("0x"), 16).expect("Invalid hex byte"))
-        .collect();
+    let seed: Vec<u8> = hex::decode(seed_str).expect("Invalid hex seed");
 
     // Step 2: Send WRONG key (use different secret)
     let wrong_secret = vec![0xAAu8]; // Wrong secret!

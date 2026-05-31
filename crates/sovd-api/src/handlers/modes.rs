@@ -68,21 +68,16 @@ pub struct SecurityModeRequest {
     pub key: Option<String>,
 }
 
-/// SOVD standard seed response (for Request_Seed)
-#[derive(Debug, Serialize)]
-pub struct SovdSeed {
-    /// Seed bytes as space-separated hex (e.g., "0xaa 0xbb 0xcc 0xdd")
-    #[serde(rename = "Request_Seed")]
-    pub request_seed: String,
-}
-
-/// SOVD standard response for security seed request
+/// Response for a security seed request.
+///
+/// Spec primitive `string:hex` (sovd_iso17978_spec.yaml line 192):
+/// concatenated lowercase hex, no `0x` per byte, no spacing.
 #[derive(Debug, Serialize)]
 pub struct SecuritySeedResponse {
     /// Mode identifier (always "security")
     pub id: String,
-    /// The seed value
-    pub seed: SovdSeed,
+    /// Seed bytes, concatenated lowercase hex.
+    pub seed: String,
 }
 
 /// SOVD standard response for security send key (success)
@@ -200,8 +195,9 @@ pub async fn get_security_mode(
 /// Request seed or send key for security access (SOVD standard format)
 ///
 /// Returns different response types based on the operation:
-/// - Request seed: returns `{"id": "security", "seed": {"Request_Seed": "0xaa 0xbb..."}}`
-/// - Send key: returns `{"id": "security", "value": "level1"}`
+/// - Request seed: `{"id": "security", "seed": "aabbccdd"}` — seed is
+///   concatenated lowercase hex per spec `string:hex` primitive.
+/// - Send key: `{"id": "security", "value": "level1"}`
 pub async fn put_security_mode(
     State(state): State<AppState>,
     Path(component_id): Path<String>,
@@ -231,21 +227,12 @@ pub async fn put_security_mode(
         .await?;
 
     if is_seed_request {
-        // Return seed response
-        let seed_hex = mode.seed.unwrap_or_default();
-        // Convert hex string to space-separated 0xNN format
-        let seed_formatted = seed_hex
-            .as_bytes()
-            .chunks(2)
-            .map(|chunk| format!("0x{}", std::str::from_utf8(chunk).unwrap_or("00")))
-            .collect::<Vec<_>>()
-            .join(" ");
-
+        // Concatenated lowercase hex per spec `string:hex` primitive
+        // (sovd_iso17978_spec.yaml line 192).
+        let seed = mode.seed.unwrap_or_default().to_lowercase();
         Ok(Json(SecuritySeedResponse {
             id: "security".to_string(),
-            seed: SovdSeed {
-                request_seed: seed_formatted,
-            },
+            seed,
         })
         .into_response())
     } else {
