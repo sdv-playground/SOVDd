@@ -325,7 +325,7 @@ impl DiagnosticBackend for GatewayBackend {
         }
 
         // Sort by timestamp (most recent first)
-        all_logs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        all_logs.sort_by_key(|l| std::cmp::Reverse(l.timestamp));
 
         Ok(all_logs)
     }

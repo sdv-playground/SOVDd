@@ -107,12 +107,10 @@ pub fn decode_output_value(config: &OutputConfig, raw: &[u8]) -> Value {
                 let physical = signed as f64 * config.scale + config.offset;
                 return to_json_number(physical);
             }
-            DataType::Float => {
-                if raw.len() >= 4 {
-                    let f = f32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
-                    let physical = f as f64 * config.scale + config.offset;
-                    return to_json_number(physical);
-                }
+            DataType::Float if raw.len() >= 4 => {
+                let f = f32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
+                let physical = f as f64 * config.scale + config.offset;
+                return to_json_number(physical);
             }
             _ => {}
         }
