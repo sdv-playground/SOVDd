@@ -6176,6 +6176,164 @@ async fn test_updates_target_validation() {
     eprintln!("=== F.D3 target-validation test PASSED ===");
 }
 
+/// F.D4 campaigns wire surface: register over existing /updates,
+/// status fan-out, lifecycle action dispatched per-member.
+#[tokio::test]
+#[serial_test::serial]
+async fn test_campaigns_register_and_status() {
+    eprintln!("\n=== F.D4: register campaign + GET status ===");
+    let harness = TestHarness::new()
+        .await
+        .expect("Failed to create test harness");
+
+    // Register one /updates so the campaign has something to point at.
+    let (status, body) = harness
+        .post("/vehicle/v1/components/vtx_ecm/updates", json!({}))
+        .await
+        .expect("register update failed");
+    assert_eq!(status, 201);
+    let update_id = body["update_id"].as_str().unwrap().to_string();
+
+    // Register the campaign with that member.
+    let (status, body) = harness
+        .post(
+            "/vehicle/v1/campaigns",
+            json!({
+                "manifest": {"name": "test campaign"},
+                "members": [{"component_id": "vtx_ecm", "update_id": update_id.clone()}],
+            }),
+        )
+        .await
+        .expect("register campaign failed");
+    assert_eq!(status, 201, "register campaign expected 201, body = {body}");
+    let campaign_id = body["campaign_id"].as_str().unwrap().to_string();
+    let campaign_href = body["href"].as_str().unwrap().to_string();
+    assert!(campaign_href.contains(&campaign_id));
+
+    // GET /vehicle/v1/campaigns — campaign appears.
+    let (status, body) = harness
+        .get_with_status("/vehicle/v1/campaigns")
+        .await
+        .expect("list campaigns failed");
+    assert_eq!(status, 200);
+    let items = body["items"].as_array().expect("items missing");
+    assert!(items
+        .iter()
+        .any(|i| i["campaign_id"].as_str() == Some(campaign_id.as_str())));
+
+    // GET /vehicle/v1/campaigns/{id} — members include the update we registered.
+    let (status, body) = harness
+        .get_with_status(&campaign_href)
+        .await
+        .expect("get campaign failed");
+    assert_eq!(status, 200);
+    assert_eq!(body["campaign_id"].as_str(), Some(campaign_id.as_str()));
+    let members = body["members"].as_array().expect("members missing");
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0]["component_id"].as_str(), Some("vtx_ecm"));
+    assert_eq!(members[0]["update_id"].as_str(), Some(update_id.as_str()));
+
+    // Stage action — campaign is registered but update hasn't been
+    // verified, so stage should fail on the member.
+    let exec_path = format!("/vehicle/v1/campaigns/{}/executions", campaign_id);
+    let (status, body) = harness
+        .post(&exec_path, json!({"action": "stage"}))
+        .await
+        .expect("stage failed");
+    assert_eq!(status, 200, "executions returns 200 with status body");
+    assert_eq!(body["status"].as_str(), Some("failed"));
+    let member_outcomes = body["members"].as_array().expect("members missing");
+    assert_eq!(member_outcomes.len(), 1);
+    assert_eq!(member_outcomes[0]["status"].as_str(), Some("failed"));
+
+    // Campaign state reflects the failure.
+    let (_, body) = harness
+        .get_with_status(&campaign_href)
+        .await
+        .expect("status after stage failed");
+    assert_eq!(body["state"].as_str(), Some("failed"));
+
+    // DELETE the campaign — 204; member /updates not touched.
+    let del = harness
+        .delete(&campaign_href)
+        .await
+        .expect("DELETE campaign failed");
+    assert_eq!(del, 204);
+
+    // Clean up the orphaned update.
+    let _ = harness
+        .post(
+            &format!(
+                "/vehicle/v1/components/vtx_ecm/updates/{}/executions",
+                update_id
+            ),
+            json!({"action": "abort"}),
+        )
+        .await;
+
+    eprintln!("=== F.D4 register+status test PASSED ===");
+}
+
+/// Empty members list rejected with 400.
+#[tokio::test]
+#[serial_test::serial]
+async fn test_campaigns_register_rejects_empty_members() {
+    let harness = TestHarness::new()
+        .await
+        .expect("Failed to create test harness");
+
+    let (status, body) = harness
+        .post("/vehicle/v1/campaigns", json!({"members": []}))
+        .await
+        .expect("register empty failed");
+    assert_eq!(status, 400, "empty members must reject, body = {body}");
+    assert_eq!(body["error_code"].as_str(), Some("incomplete-request"));
+}
+
+/// Mismatched (component_id, update_id) pair rejected with 415.
+#[tokio::test]
+#[serial_test::serial]
+async fn test_campaigns_register_rejects_cross_component() {
+    let harness = TestHarness::new()
+        .await
+        .expect("Failed to create test harness");
+
+    // Open an update on vtx_ecm.
+    let (status, body) = harness
+        .post("/vehicle/v1/components/vtx_ecm/updates", json!({}))
+        .await
+        .expect("register update failed");
+    assert_eq!(status, 201);
+    let update_id = body["update_id"].as_str().unwrap().to_string();
+
+    // Try to register a campaign that addresses that update to a
+    // different component_id.  Should 415 wrong-target.
+    let (status, body) = harness
+        .post(
+            "/vehicle/v1/campaigns",
+            json!({"members": [{
+                "component_id": "vm-other",
+                "update_id": update_id.clone(),
+            }]}),
+        )
+        .await
+        .expect("register cross-component failed");
+    assert_eq!(status, 415, "cross-component should 415, body = {body}");
+    assert_eq!(body["error_code"].as_str(), Some("vendor-specific"));
+    assert_eq!(body["vendor_code"].as_str(), Some("wrong-target"));
+
+    // Clean up.
+    let _ = harness
+        .post(
+            &format!(
+                "/vehicle/v1/components/vtx_ecm/updates/{}/executions",
+                update_id
+            ),
+            json!({"action": "abort"}),
+        )
+        .await;
+}
+
 /// Unknown executions action returns 400 with the spec error code.
 #[tokio::test]
 #[serial_test::serial]

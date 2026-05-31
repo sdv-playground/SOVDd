@@ -503,6 +503,22 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/updates/{update_id}/executions",
             post(handlers::updates::post_execution),
         )
+        // Heterogeneous campaigns — F.D4.  Top-level collection (not
+        // under /components) because a campaign spans several.
+        .route(
+            "/vehicle/v1/campaigns",
+            post(handlers::campaigns::register_campaign)
+                .get(handlers::campaigns::list_campaigns),
+        )
+        .route(
+            "/vehicle/v1/campaigns/{campaign_id}",
+            get(handlers::campaigns::get_campaign)
+                .delete(handlers::campaigns::delete_campaign),
+        )
+        .route(
+            "/vehicle/v1/campaigns/{campaign_id}/executions",
+            post(handlers::campaigns::post_execution),
+        )
         // Admin routes - DID definitions management
         .route(
             "/admin/definitions",

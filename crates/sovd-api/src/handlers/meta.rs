@@ -232,6 +232,32 @@ const PATHS: &[PathEntry] = &[
         path: "/vehicle/v1/components/{component_id}/updates/{update_id}/executions",
         summary: "Drive lifecycle (verify|finalize|commit|rollback|abort).",
     },
+    // campaigns (§7.13) — heterogeneous multi-target orchestration (F.D4).
+    PathEntry {
+        method: "GET",
+        path: "/vehicle/v1/campaigns",
+        summary: "List campaigns.",
+    },
+    PathEntry {
+        method: "POST",
+        path: "/vehicle/v1/campaigns",
+        summary: "Register a campaign over existing /updates members — 201.",
+    },
+    PathEntry {
+        method: "GET",
+        path: "/vehicle/v1/campaigns/{campaign_id}",
+        summary: "Aggregated campaign status.",
+    },
+    PathEntry {
+        method: "DELETE",
+        path: "/vehicle/v1/campaigns/{campaign_id}",
+        summary: "Discard SOVD-side campaign bookkeeping — 204.",
+    },
+    PathEntry {
+        method: "POST",
+        path: "/vehicle/v1/campaigns/{campaign_id}/executions",
+        summary: "Drive campaign lifecycle (stage|apply|commit|rollback|abort).",
+    },
     // logs (§7.21)
     PathEntry {
         method: "GET",
