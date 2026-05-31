@@ -78,6 +78,13 @@ pub enum BackendError {
     #[error("Update in progress: {0}")]
     UpdateInProgress(String),
 
+    /// Payload type doesn't match the addressed component.  Maps to HTTP
+    /// 415 Unsupported Media Type.  Used by the F.D3 dispatcher when a
+    /// manifest's target doesn't match the component_id on the path —
+    /// e.g. a `vm1` manifest POSTed to `/components/vm2/updates`.
+    #[error("Unsupported media type: {0}")]
+    UnsupportedMediaType(String),
+
     /// Internal error
     #[error("Internal error: {0}")]
     Internal(String),
@@ -102,6 +109,7 @@ impl BackendError {
             BackendError::Timeout => 504,
             BackendError::Busy(_) => 409,
             BackendError::UpdateInProgress(_) => 409,
+            BackendError::UnsupportedMediaType(_) => 415,
             BackendError::Internal(_) => 500,
         }
     }

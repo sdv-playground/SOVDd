@@ -6135,6 +6135,47 @@ async fn test_updates_verify_rejects_empty() {
     eprintln!("=== F.D2 verify-empty guard test PASSED ===");
 }
 
+/// F.D3 target validation: matching `target` accepted; mismatched
+/// rejected with 415 + `vendor-specific` / `wrong-target` error code.
+#[tokio::test]
+#[serial_test::serial]
+async fn test_updates_target_validation() {
+    eprintln!("\n=== F.D3: target validation on POST /updates ===");
+    let harness = TestHarness::new()
+        .await
+        .expect("Failed to create test harness");
+
+    let (status, body) = harness
+        .post(
+            "/vehicle/v1/components/vtx_ecm/updates",
+            json!({"target": "vtx_ecm"}),
+        )
+        .await
+        .expect("POST /updates matching target failed");
+    assert_eq!(status, 201, "matching target should accept, body = {body}");
+    let update_id = body["update_id"].as_str().unwrap().to_string();
+    let exec_path = format!(
+        "/vehicle/v1/components/vtx_ecm/updates/{}/executions",
+        update_id
+    );
+    let _ = harness.post(&exec_path, json!({"action": "abort"})).await;
+
+    let (status, body) = harness
+        .post(
+            "/vehicle/v1/components/vtx_ecm/updates",
+            json!({"target": "vm-other"}),
+        )
+        .await
+        .expect("POST /updates mismatched target failed");
+    assert_eq!(
+        status, 415,
+        "mismatched target should 415 Unsupported Media Type, body = {body}"
+    );
+    assert_eq!(body["error_code"].as_str(), Some("vendor-specific"));
+    assert_eq!(body["vendor_code"].as_str(), Some("wrong-target"));
+    eprintln!("=== F.D3 target-validation test PASSED ===");
+}
+
 /// Unknown executions action returns 400 with the spec error code.
 #[tokio::test]
 #[serial_test::serial]

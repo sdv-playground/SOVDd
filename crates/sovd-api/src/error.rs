@@ -50,6 +50,10 @@ pub enum ApiError {
     /// but rejected the request given its current state; surface as
     /// a state-conflict to the client.
     EcuErrorResponse { message: String, nrc: u8, sid: u8 },
+    /// 415 Unsupported Media Type — F.D3 dispatcher rejects a payload
+    /// whose target doesn't match the addressed component.  Carries
+    /// `vendor-specific` error_code with vendor `wrong-target`.
+    UnsupportedMediaType(String),
     /// 500 Internal Server Error — `sovd-server-failure`.
     Internal(String),
 }
@@ -107,6 +111,10 @@ impl IntoResponse for ApiError {
                 StatusCode::GATEWAY_TIMEOUT,
                 GenericError::new(error_code::NOT_RESPONDING, msg),
             ),
+            ApiError::UnsupportedMediaType(msg) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                GenericError::vendor("wrong-target", msg),
+            ),
             ApiError::Internal(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 GenericError::new(error_code::SOVD_SERVER_FAILURE, msg),
@@ -157,6 +165,7 @@ impl From<BackendError> for ApiError {
             BackendError::Timeout => ApiError::GatewayTimeout("Operation timed out".to_string()),
             BackendError::Busy(msg) => ApiError::Conflict(msg),
             BackendError::UpdateInProgress(msg) => ApiError::UpdateInProgress(msg),
+            BackendError::UnsupportedMediaType(msg) => ApiError::UnsupportedMediaType(msg),
             BackendError::Internal(msg) => ApiError::Internal(msg),
         }
     }

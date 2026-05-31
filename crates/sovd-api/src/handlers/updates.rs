@@ -41,10 +41,27 @@ use crate::state::{AppState, UpdatePart, UpdateState, UpdatesEntry};
 // Wire types
 // ---------------------------------------------------------------------------
 
-/// Body for `POST /updates`.  Manifest is optional in F.D2 — recorded
-/// and echoed back, but the dispatcher does not yet route by it.
+/// Body for `POST /updates`.
+///
+/// `manifest` is the wire-level update description (not the raw SUIT
+/// envelope — the envelope arrives in /bulk-data parts).  F.D2 records
+/// it and echoes it back; F.D3 adds the optional `target` field which
+/// the SOVD dispatcher validates against the path's component_id and
+/// rejects on mismatch with HTTP 415.
+///
+/// Other manifest fields (parts list, version, security_ver, ...) are
+/// not yet consumed at the SOVD layer; they ride along for the
+/// downstream backend.
 #[derive(Debug, Deserialize, Default)]
 pub struct RegisterUpdateRequest {
+    /// Optional component id the manifest is addressed to.  When
+    /// present, MUST match the path's `{component_id}` — otherwise the
+    /// server returns 415 Unsupported Media Type before allocating an
+    /// update_id.  Absent means "trust the path" (F.D2 behaviour).
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Pass-through manifest document.  Schema is intentionally open
+    /// in F.D2/F.D3 — the dispatcher (F.D4+) tightens it.
     #[serde(default)]
     pub manifest: Option<serde_json::Value>,
 }
@@ -139,8 +156,23 @@ pub async fn register_update(
     // Verify the component exists before allocating an id.
     let _ = state.get_backend(&component_id)?;
 
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+
+    // F.D3 dispatcher target validation.  If the manifest carries an
+    // explicit `target`, it MUST match the addressed component.  We
+    // reject the mismatch up-front with 415 so the caller doesn't burn
+    // bandwidth uploading a payload the backend would refuse anyway.
+    if let Some(target) = req.target.as_deref() {
+        if target != component_id {
+            return Err(ApiError::UnsupportedMediaType(format!(
+                "manifest target {:?} does not match addressed component {:?}",
+                target, component_id
+            )));
+        }
+    }
+
     let update_id = Uuid::new_v4().to_string();
-    let manifest = body.and_then(|Json(b)| b.manifest);
+    let manifest = req.manifest;
 
     {
         let mut store = state.updates.0.lock();
