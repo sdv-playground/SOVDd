@@ -265,6 +265,23 @@ pub async fn delete_campaign(
 }
 
 /// POST /vehicle/v1/campaigns/{campaign_id}/executions
+///
+/// F.D5 sequencing — actions are now shape-aware per §5 of
+/// `tasks/sw-update-architecture.md`:
+///
+/// - `stage` — assert every member's `/updates` is at `verified` or
+///   further along.  Shape-agnostic.
+/// - `apply` — finalize **Banked** members only.  Singleshot members are
+///   not touched yet — they stay staged so a rollback can discard them
+///   without rewriting live state.  After `apply` the host typically
+///   reboots into the trial slot.
+/// - `commit` — once the trial boot is confirmed healthy: finalize
+///   **Singleshot** members (writes them live), then commit **Banked**
+///   members (raises their security floors).  Order matters because
+///   Singleshot commit is a one-way door.
+/// - `rollback` — Banked-only revert (Singleshot were never finalized;
+///   the SOVD layer drops them at the next abort/delete).
+/// - `abort` — fan-out abort to every member regardless of shape.
 pub async fn post_execution(
     State(state): State<AppState>,
     Path(campaign_id): Path<String>,
@@ -281,12 +298,23 @@ pub async fn post_execution(
     let started_at = Utc::now();
     let exec_id = Uuid::new_v4().to_string();
 
-    let (member_action, next_state, fail_state) = match request.action.as_str() {
-        "stage" => ("stage", CampaignState::Staged, CampaignState::Failed),
-        "apply" => ("finalize", CampaignState::Finalized, CampaignState::Failed),
-        "commit" => ("commit", CampaignState::Committed, CampaignState::Failed),
-        "rollback" => ("rollback", CampaignState::RolledBack, CampaignState::Failed),
-        "abort" => ("abort", CampaignState::Aborted, CampaignState::Failed),
+    // Resolve each member's update shape up-front so we can sequence
+    // them.  Unknown shapes are treated as Banked (conservative — the
+    // ordering is wrong for Singleshot but at least no Singleshot
+    // member is finalized before rollback is no longer available).
+    let shapes: Vec<UpdateShape> = members
+        .iter()
+        .map(|m| resolve_shape(&state, &m.component_id))
+        .collect();
+
+    // Pick which sub-action runs on which member and in what order
+    // per the §5 sequencing.
+    let plan = match request.action.as_str() {
+        "stage" => ExecPlan::uniform("stage", &members),
+        "apply" => ExecPlan::banked_only("finalize", &members, &shapes),
+        "commit" => ExecPlan::singleshot_then_banked_commit(&members, &shapes),
+        "rollback" => ExecPlan::banked_only("rollback", &members, &shapes),
+        "abort" => ExecPlan::uniform("abort", &members),
         other => {
             return Err(ApiError::BadRequest(format!(
                 "unknown campaign action {other:?}; want stage|apply|commit|rollback|abort"
@@ -297,24 +325,33 @@ pub async fn post_execution(
     let mut outcomes: Vec<MemberExecutionOutcome> = Vec::with_capacity(members.len());
     let mut overall_status = OperationStatus::Completed;
 
-    for m in &members {
-        let outcome = run_member_action(&state, m, member_action).await;
+    for step in &plan.steps {
+        let outcome = run_member_action(&state, &step.member, step.action).await;
         if matches!(outcome.status, OperationStatus::Failed) {
             overall_status = OperationStatus::Failed;
         }
         outcomes.push(outcome);
         if overall_status == OperationStatus::Failed {
-            // Short-circuit per F.D4 thin scope; F.D5's orchestrator
-            // adds rollback-on-partial-failure.
+            // Short-circuit per F.D5 thin scope; rollback-on-partial-
+            // failure is a host-orchestrator concern (sumo-onboard-agent).
             break;
         }
     }
+
+    let next_state = match request.action.as_str() {
+        "stage" => CampaignState::Staged,
+        "apply" => CampaignState::Finalized,
+        "commit" => CampaignState::Committed,
+        "rollback" => CampaignState::RolledBack,
+        "abort" => CampaignState::Aborted,
+        _ => CampaignState::Failed,
+    };
 
     {
         let mut store = state.campaigns.0.lock();
         if let Some(entry) = store.get_mut(&campaign_id) {
             entry.state = if overall_status == OperationStatus::Failed {
-                fail_state
+                CampaignState::Failed
             } else {
                 next_state
             };
@@ -340,6 +377,97 @@ pub async fn post_execution(
             .map_err(|e| ApiError::Internal(format!("bad Location header: {e}")))?,
     );
     Ok((StatusCode::OK, headers, Json(execution)))
+}
+
+// ---------------------------------------------------------------------------
+// F.D5 shape resolution + per-action plan
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdateShape {
+    Banked,
+    Singleshot,
+    Unknown,
+}
+
+fn resolve_shape(state: &AppState, component_id: &str) -> UpdateShape {
+    // Backends opt in via `DiagnosticBackend::update_shape()`.  Unknown
+    // defaults to Banked for safety (see post_execution comment).
+    let Ok(backend) = state.get_backend(component_id) else {
+        return UpdateShape::Unknown;
+    };
+    match backend.update_shape() {
+        "banked" => UpdateShape::Banked,
+        "singleshot" => UpdateShape::Singleshot,
+        _ => UpdateShape::Unknown,
+    }
+}
+
+struct ExecPlan {
+    steps: Vec<ExecStep>,
+}
+
+struct ExecStep {
+    member: CampaignMember,
+    action: &'static str,
+}
+
+impl ExecPlan {
+    /// Same sub-action on every member, in registration order.
+    fn uniform(action: &'static str, members: &[CampaignMember]) -> Self {
+        Self {
+            steps: members
+                .iter()
+                .map(|m| ExecStep {
+                    member: m.clone(),
+                    action,
+                })
+                .collect(),
+        }
+    }
+
+    /// Run `action` on Banked + Unknown members; skip Singleshot members.
+    /// Used by `apply` and `rollback` — Singleshot finalize is deferred
+    /// to commit-time, and Singleshot has nothing to roll back.
+    fn banked_only(
+        action: &'static str,
+        members: &[CampaignMember],
+        shapes: &[UpdateShape],
+    ) -> Self {
+        let steps = members
+            .iter()
+            .zip(shapes.iter())
+            .filter(|(_, s)| !matches!(s, UpdateShape::Singleshot))
+            .map(|(m, _)| ExecStep {
+                member: m.clone(),
+                action,
+            })
+            .collect();
+        Self { steps }
+    }
+
+    /// Commit ordering: first finalize all Singleshot members (writes
+    /// them live), then commit all Banked members (raises floor).
+    fn singleshot_then_banked_commit(members: &[CampaignMember], shapes: &[UpdateShape]) -> Self {
+        let mut steps = Vec::with_capacity(members.len());
+        for (m, s) in members.iter().zip(shapes.iter()) {
+            if matches!(s, UpdateShape::Singleshot) {
+                steps.push(ExecStep {
+                    member: m.clone(),
+                    action: "finalize",
+                });
+            }
+        }
+        for (m, s) in members.iter().zip(shapes.iter()) {
+            if !matches!(s, UpdateShape::Singleshot) {
+                steps.push(ExecStep {
+                    member: m.clone(),
+                    action: "commit",
+                });
+            }
+        }
+        Self { steps }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -410,5 +538,106 @@ async fn run_member_action(
             status: OperationStatus::Failed,
             message: Some(format!("{e:?}")),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn members(ids: &[(&str, &str)]) -> Vec<CampaignMember> {
+        ids.iter()
+            .map(|(c, u)| CampaignMember {
+                component_id: c.to_string(),
+                update_id: u.to_string(),
+            })
+            .collect()
+    }
+
+    fn collect(plan: &ExecPlan) -> Vec<(&str, &str, &str)> {
+        plan.steps
+            .iter()
+            .map(|s| {
+                (
+                    s.member.component_id.as_str(),
+                    s.member.update_id.as_str(),
+                    s.action,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn apply_skips_singleshot_members() {
+        let ms = members(&[("vm1", "u1"), ("hsm", "u2"), ("vm2", "u3")]);
+        let shapes = [
+            UpdateShape::Banked,
+            UpdateShape::Singleshot,
+            UpdateShape::Banked,
+        ];
+        let plan = ExecPlan::banked_only("finalize", &ms, &shapes);
+        assert_eq!(
+            collect(&plan),
+            vec![("vm1", "u1", "finalize"), ("vm2", "u3", "finalize")],
+        );
+    }
+
+    #[test]
+    fn rollback_skips_singleshot_members() {
+        let ms = members(&[("vm1", "u1"), ("hsm", "u2")]);
+        let shapes = [UpdateShape::Banked, UpdateShape::Singleshot];
+        let plan = ExecPlan::banked_only("rollback", &ms, &shapes);
+        assert_eq!(collect(&plan), vec![("vm1", "u1", "rollback")]);
+    }
+
+    #[test]
+    fn commit_runs_singleshot_finalize_then_banked_commit() {
+        // Mixed order: Banked, Singleshot, Banked, Singleshot.
+        let ms = members(&[
+            ("vm1", "u1"),
+            ("hsm", "u2"),
+            ("vm2", "u3"),
+            ("config", "u4"),
+        ]);
+        let shapes = [
+            UpdateShape::Banked,
+            UpdateShape::Singleshot,
+            UpdateShape::Banked,
+            UpdateShape::Singleshot,
+        ];
+        let plan = ExecPlan::singleshot_then_banked_commit(&ms, &shapes);
+        // Singleshot finalizes first (in registration order), then
+        // Banked commits.
+        assert_eq!(
+            collect(&plan),
+            vec![
+                ("hsm", "u2", "finalize"),
+                ("config", "u4", "finalize"),
+                ("vm1", "u1", "commit"),
+                ("vm2", "u3", "commit"),
+            ],
+        );
+    }
+
+    #[test]
+    fn unknown_shape_treated_as_banked() {
+        let ms = members(&[("ecu-x", "u1")]);
+        let shapes = [UpdateShape::Unknown];
+        let plan = ExecPlan::banked_only("finalize", &ms, &shapes);
+        assert_eq!(collect(&plan), vec![("ecu-x", "u1", "finalize")]);
+    }
+
+    #[test]
+    fn uniform_keeps_registration_order() {
+        let ms = members(&[("a", "u1"), ("b", "u2"), ("c", "u3")]);
+        let plan = ExecPlan::uniform("abort", &ms);
+        assert_eq!(
+            collect(&plan),
+            vec![
+                ("a", "u1", "abort"),
+                ("b", "u2", "abort"),
+                ("c", "u3", "abort")
+            ],
+        );
     }
 }
