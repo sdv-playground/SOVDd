@@ -2683,9 +2683,12 @@ async fn test_define_ddid_invalid_range() {
 // 4. GET /flash/transfer/:id - poll status
 // 5. PUT /flash/transferexit - finalize
 
-/// Test uploading a file (package)
+/// Test uploading a file (package).
+/// F.D8b: tested the retired /files wire directly; superseded by
+/// `test_updates_register_and_part_upload`.
 #[tokio::test]
 #[serial_test::serial]
+#[ignore = "F.D8b: legacy /files wire retired"]
 async fn test_upload_file() {
     eprintln!("\n=== Testing POST /files (Upload File) ===");
 
@@ -2802,7 +2805,11 @@ async fn test_verify_file() {
 
     assert!(verify_resp.valid, "Expected valid=true");
     assert!(verify_resp.checksum.is_some(), "Expected checksum");
-    assert_eq!(verify_resp.algorithm.as_deref(), Some("crc32"));
+    // F.D8b: /updates computes sha256 over the part bytes at upload
+    // time and returns that as the per-part ETag.  Legacy /files used
+    // a CRC32 derived from the package header.  Same role, stronger
+    // hash; the wire shape moves with the spec.
+    assert_eq!(verify_resp.algorithm.as_deref(), Some("sha256"));
 
     // Check file status is now "verified" (after verify, state becomes success/finished)
     let file_status = flash_client
@@ -2810,9 +2817,17 @@ async fn test_verify_file() {
         .await
         .expect("get_upload_status failed");
 
+    // F.D8b: under /updates, per-file state stays at `Pending` until
+    // `/executions{verify}` fires — the sha was computed at PUT time
+    // but is_terminal() doesn't apply.  Pending is the legitimate
+    // post-upload pre-finalize state.
+    use sovd_client::flash::TransferState as TS;
     assert!(
-        file_status.state.is_success() || file_status.state.is_terminal(),
-        "Expected file status to indicate completion, got {:?}",
+        matches!(
+            file_status.state,
+            TS::Pending | TS::Verified | TS::Finished | TS::Complete,
+        ),
+        "Expected file status to indicate completion or Pending, got {:?}",
         file_status.state
     );
 
@@ -3131,9 +3146,11 @@ async fn test_ecu_reset_types() {
     eprintln!("=== Test PASSED: All reset types work ===");
 }
 
-/// Test flash transfer with unverified file (should fail)
+/// Test flash transfer with unverified file (should fail).
+/// F.D8b: tested the retired /flash wire directly.
 #[tokio::test]
 #[serial_test::serial]
+#[ignore = "F.D8b: legacy /flash wire retired"]
 async fn test_flash_unverified_file() {
     eprintln!("\n=== Testing flash with unverified file (should fail) ===");
 
@@ -3176,9 +3193,11 @@ async fn test_flash_unverified_file() {
     eprintln!("=== Test PASSED: Unverified file correctly rejected ===");
 }
 
-/// Test flash transfer with invalid file ID (should fail)
+/// Test flash transfer with invalid file ID (should fail).
+/// F.D8b: tested the retired /flash wire directly.
 #[tokio::test]
 #[serial_test::serial]
+#[ignore = "F.D8b: legacy /flash wire retired"]
 async fn test_flash_invalid_file_id() {
     // Post-redesign: start_flash() no longer takes a file_id. Payload
     // uploads are sequential, so the server errors with "bad_request:
@@ -3265,18 +3284,16 @@ async fn test_abort_flash_transfer() {
         .await
         .expect("abort_flash failed");
 
-    // Check transfer is now failed
+    // Check transfer is now aborted.
+    // F.D8b: /updates uses a distinct `Aborted` terminal state; the
+    // legacy /flash backend collapsed aborts into `Failed` with an
+    // "abort" error message.  Aborted is the more accurate name.
     let status = flash_client
         .get_flash_status(transfer_id)
         .await
         .expect("get_flash_status failed");
 
-    assert_eq!(status.state, TransferState::Failed);
-    assert!(status
-        .error
-        .as_ref()
-        .map(|e| e.message.contains("abort"))
-        .unwrap_or(false));
+    assert_eq!(status.state, TransferState::Aborted);
 
     eprintln!("=== Test PASSED: Flash transfer aborted successfully ===");
 }
@@ -5388,19 +5405,23 @@ async fn test_flash_commit_wrong_state() {
 
     let flash_client = harness.flash_client();
 
-    // Verify activation state is not "activated" (should be "complete" or initial)
-    eprintln!("Step 1: Check initial activation state...");
-    let activation = flash_client
-        .get_activation_state()
-        .await
-        .expect("get_activation_state failed");
-    eprintln!("  State: {}", activation.state);
-    assert_ne!(
-        activation.state, "activated",
-        "Should not be in activated state without flash"
+    // F.D8b: with no upload yet, the FlashClient has no /updates
+    // session at all — get_activation_state surfaces that as a 404
+    // ("no active update session"), which is the correct answer to
+    // "activation state without any flash".  The legacy /flash/
+    // activation backend returned an "Initial" state instead.
+    eprintln!("Step 1: Check initial activation state — expect 404...");
+    let activation_result = flash_client.get_activation_state().await;
+    assert!(
+        matches!(
+            activation_result,
+            Err(sovd_client::flash::FlashError::NotFound(_))
+        ),
+        "Expected NotFound when no session active, got {:?}",
+        activation_result
     );
 
-    // Attempt commit — should fail
+    // Attempt commit — should fail (no session)
     eprintln!("Step 2: Attempting commit without prior flash...");
     let commit_result = flash_client.commit_flash().await;
     assert!(
@@ -5499,25 +5520,17 @@ async fn test_abort_during_awaiting_activation() {
         .await
         .expect("abort_flash should succeed at AwaitingActivation");
 
-    // Step 4: Verify state is Failed
-    eprintln!("Step 4: Verifying transfer state is Failed...");
+    // Step 4: Verify state is Aborted.  F.D8b: /updates uses
+    // `Aborted` instead of the legacy `Failed + "abort"` collapse.
+    eprintln!("Step 4: Verifying transfer state is Aborted...");
     let status = flash_client
         .get_flash_status(transfer_id)
         .await
         .expect("get_flash_status failed");
     assert_eq!(
         status.state,
-        TransferState::Failed,
-        "Expected Failed state after abort"
-    );
-    assert!(
-        status
-            .error
-            .as_ref()
-            .map(|e| e.message.contains("abort"))
-            .unwrap_or(false),
-        "Expected abort error message, got: {:?}",
-        status.error
+        TransferState::Aborted,
+        "Expected Aborted state after abort"
     );
 
     eprintln!("=== Test PASSED: Abort during AwaitingActivation ===");
@@ -6336,8 +6349,10 @@ async fn test_campaigns_register_rejects_cross_component() {
 
 /// F.D8a: every /flash + /files response carries deprecation
 /// headers (RFC 8594 + RFC 9745) pointing at the /updates successor.
+/// F.D8b: routes deleted — this test no longer applicable.
 #[tokio::test]
 #[serial_test::serial]
+#[ignore = "F.D8b: legacy /flash + /files routes retired"]
 async fn test_legacy_flash_files_carry_deprecation_headers() {
     eprintln!("\n=== F.D8a: deprecation headers on /flash + /files ===");
     let harness = TestHarness::new()

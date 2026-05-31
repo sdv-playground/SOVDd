@@ -429,6 +429,15 @@ pub async fn post_execution(
                 backend.verify_package(fid).await?;
             }
             let tid = backend.start_flash().await?;
+            // backend.start_flash spawns the UDS download as a
+            // background task and returns immediately; the legacy
+            // /flash wire let the caller poll /flash/transfer/{id}
+            // until the state settled.  In the /updates wire there
+            // is no equivalent poll, so block here until backend
+            // reaches a settled (success or failure) state before
+            // returning a "verified" result.  This bounds the wait
+            // by the per-request timeout the caller already set.
+            await_flash_settled(backend.as_ref(), &tid).await?;
             (
                 UpdateState::Verified,
                 Some(tid),
@@ -442,8 +451,28 @@ pub async fn post_execution(
                     current_state.as_str()
                 )));
             }
+            // Legacy lifecycle is finalize_flash → validate → activate.
+            // The dual-bank backend rejects `activate()` when called
+            // directly from `AwaitingActivation` — it needs `Validated`
+            // first.  /updates {finalize} chains all three so callers
+            // see the same end state regardless of which intermediate
+            // step the backend is in.
             backend.finalize_flash().await?;
-            backend.activate().await?;
+            // `validate()` is allowed from AwaitingActivation/Validated/
+            // AwaitingReboot; second call is idempotent.  Single-bank
+            // backends return NotSupported here — swallow it.
+            match backend.validate().await {
+                Ok(()) => {}
+                Err(sovd_core::BackendError::NotSupported(_)) => {}
+                Err(e) => return Err(e.into()),
+            }
+            // `activate()` may already be the terminal state for
+            // single-bank backends; swallow NotSupported.
+            match backend.activate().await {
+                Ok(()) => {}
+                Err(sovd_core::BackendError::NotSupported(_)) => {}
+                Err(e) => return Err(e.into()),
+            }
             (
                 UpdateState::Finalized,
                 transfer_id.clone(),
@@ -531,4 +560,42 @@ fn part_status_entry(component_id: &str, update_id: &str, p: &UpdatePart) -> Par
             component_id, update_id, p.part_id
         ),
     }
+}
+
+/// Block until the backend's flash transfer reaches a settled state
+/// (`AwaitingActivation` or beyond, or a terminal failure).  The
+/// `backend.start_flash` call spawns the actual UDS download as a
+/// background task; this helper bridges that asynchrony for the
+/// /updates wire which is otherwise synchronous.  Bounded by a 30 s
+/// wait — beyond that the caller can re-issue `verify` (idempotent)
+/// or `abort`.
+async fn await_flash_settled(
+    backend: &dyn sovd_core::DiagnosticBackend,
+    transfer_id: &str,
+) -> Result<(), ApiError> {
+    use sovd_core::FlashState;
+    for _ in 0..300 {
+        let status = backend.get_flash_status(transfer_id).await?;
+        if matches!(
+            status.state,
+            FlashState::AwaitingActivation
+                | FlashState::Validated
+                | FlashState::AwaitingReboot
+                | FlashState::Activated
+                | FlashState::Complete
+                | FlashState::Committed
+        ) {
+            return Ok(());
+        }
+        if matches!(status.state, FlashState::Failed) {
+            return Err(ApiError::Conflict(format!(
+                "flash transfer failed during verify: state={:?}",
+                status.state
+            )));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Err(ApiError::GatewayTimeout(
+        "flash transfer did not settle within 30s after start_flash".into(),
+    ))
 }

@@ -11,8 +11,9 @@ pub mod data_lists;
 pub mod definitions;
 pub mod discovery;
 pub mod faults;
-pub mod files;
-pub mod flash;
+// F.D8b: handlers::files + handlers::flash deleted.  The legacy
+// wire shapes they served are replaced by /updates (F.D2) +
+// /campaigns (F.D4).
 pub mod logs;
 pub mod logs_ext;
 pub mod meta;

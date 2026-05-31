@@ -204,7 +204,7 @@ impl FlashConfig {
     /// When both `gateway_id` and `component_id` are set, produces sub-entity
     /// paths per SOVD §6.5:
     /// `/vehicle/v1/components/{gateway}/apps/{app}`
-    fn base_prefix(&self) -> String {
+    pub fn base_prefix(&self) -> String {
         match (&self.gateway_id, &self.component_id) {
             (Some(gw), Some(app)) => format!(
                 "/vehicle/v1/components/{}/apps/{}",
@@ -349,6 +349,41 @@ impl FlashConfig {
     /// `/vehicle/v1/components/:id/status/restart`.
     pub fn flash_status_restart_path(&self) -> String {
         format!("{}/status/restart", self.base_prefix())
+    }
+
+    // ---------------------------------------------------------------
+    // F.D8b: spec-compliant /updates collection paths.  These replace
+    // /flash + /files when FlashClient migrates its internals.
+    // ---------------------------------------------------------------
+
+    /// `{base_prefix}/updates` — collection POST/GET.
+    pub fn updates_collection_path(&self) -> String {
+        format!("{}/updates", self.base_prefix())
+    }
+
+    /// `{base_prefix}/updates/{update_id}` — status GET / DELETE.
+    pub fn updates_status_path(&self, update_id: &str) -> String {
+        format!("{}/updates/{}", self.base_prefix(), update_id)
+    }
+
+    /// `{base_prefix}/updates/{update_id}/bulk-data` — list parts GET.
+    pub fn updates_bulk_data_path(&self, update_id: &str) -> String {
+        format!("{}/updates/{}/bulk-data", self.base_prefix(), update_id)
+    }
+
+    /// `{base_prefix}/updates/{update_id}/bulk-data/{part_id}` — PUT.
+    pub fn updates_part_path(&self, update_id: &str, part_id: &str) -> String {
+        format!(
+            "{}/updates/{}/bulk-data/{}",
+            self.base_prefix(),
+            update_id,
+            part_id
+        )
+    }
+
+    /// `{base_prefix}/updates/{update_id}/executions` — lifecycle verb POST.
+    pub fn updates_executions_path(&self, update_id: &str) -> String {
+        format!("{}/updates/{}/executions", self.base_prefix(), update_id)
     }
 }
 

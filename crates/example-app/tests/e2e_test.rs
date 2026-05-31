@@ -723,6 +723,7 @@ async fn set_programming_session(env: &TestEnv) {
 // =============================================================================
 
 #[tokio::test]
+#[ignore = "F.D8b: legacy /apps/{app_id}/files route retired"]
 async fn test_receive_package() {
     let env = setup(None).await;
     set_programming_session(&env).await;
@@ -757,6 +758,7 @@ async fn test_receive_package() {
 // =============================================================================
 
 #[tokio::test]
+#[ignore = "F.D8b: legacy /apps/{app_id}/files route retired"]
 async fn test_verify_package() {
     let env = setup(None).await;
     set_programming_session(&env).await;
@@ -806,6 +808,7 @@ async fn test_verify_package() {
 // =============================================================================
 
 #[tokio::test]
+#[ignore = "F.D8b: legacy /apps/{app_id}/files route retired"]
 async fn test_reject_small_package() {
     let env = setup(None).await;
     set_programming_session(&env).await;
