@@ -478,6 +478,31 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/flash/activation",
             get(handlers::flash::get_activation_state),
         )
+        // Spec-compliant `/updates` collection — F.D2 thin alias over
+        // the existing flash backend.  ISO 17978-3 §7.13.  Multipart-
+        // inline transport (§3.1 of the SW-update design doc).
+        // URL-referenced manifests land in F.D7.  /flash + /files
+        // remain wired for now; they retire at F.D8.
+        .route(
+            "/vehicle/v1/components/{component_id}/updates",
+            post(handlers::updates::register_update).get(handlers::updates::list_updates),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/updates/{update_id}",
+            get(handlers::updates::get_update).delete(handlers::updates::delete_update),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data",
+            get(handlers::updates::list_bulk_data),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data/{part_id}",
+            put(handlers::updates::put_bulk_data_part),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/updates/{update_id}/executions",
+            post(handlers::updates::post_execution),
+        )
         // Admin routes - DID definitions management
         .route(
             "/admin/definitions",

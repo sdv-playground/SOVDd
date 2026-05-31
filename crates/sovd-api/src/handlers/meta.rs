@@ -196,6 +196,42 @@ const PATHS: &[PathEntry] = &[
         summary: "Stop an execution — 204.",
     },
     // I/O controls share the /operations collection (ISO 17978-3 C-133).
+    // updates (§7.13) — spec-compliant SW update wire (F.D2 thin alias).
+    PathEntry {
+        method: "GET",
+        path: "/vehicle/v1/components/{component_id}/updates",
+        summary: "List available SW updates (§7.13).",
+    },
+    PathEntry {
+        method: "POST",
+        path: "/vehicle/v1/components/{component_id}/updates",
+        summary: "Register a new SW update — 201 + Location.",
+    },
+    PathEntry {
+        method: "GET",
+        path: "/vehicle/v1/components/{component_id}/updates/{update_id}",
+        summary: "Update status (state, parts, manifest).",
+    },
+    PathEntry {
+        method: "DELETE",
+        path: "/vehicle/v1/components/{component_id}/updates/{update_id}",
+        summary: "Abort update and discard staging — 204.",
+    },
+    PathEntry {
+        method: "GET",
+        path: "/vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data",
+        summary: "List uploaded parts.",
+    },
+    PathEntry {
+        method: "PUT",
+        path: "/vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data/{part_id}",
+        summary: "Upload a part (manifest or detached payload). 201 + ETag.",
+    },
+    PathEntry {
+        method: "POST",
+        path: "/vehicle/v1/components/{component_id}/updates/{update_id}/executions",
+        summary: "Drive lifecycle (verify|finalize|commit|rollback|abort).",
+    },
     // logs (§7.21)
     PathEntry {
         method: "GET",

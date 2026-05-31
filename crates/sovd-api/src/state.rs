@@ -77,6 +77,71 @@ pub struct LogConfigStore(pub Arc<Mutex<HashMap<String, serde_json::Value>>>);
 #[derive(Clone, Debug, Default)]
 pub struct ClearDataStatusStore(pub Arc<Mutex<HashMap<String, String>>>);
 
+/// Per-update tracking for the spec-compliant `/updates` collection.
+///
+/// F.D2 adds a thin wire alias over the existing flash backend; the
+/// backend already manages session state (transfer_id is the truth)
+/// but the new wire surfaces `/bulk-data/{part_id}` PUTs that the
+/// backend has no first-class notion of.  This store remembers which
+/// part ids the SOVD layer has accepted for each update so:
+///
+/// - `GET /updates/{id}/bulk-data` can enumerate them.
+/// - `POST /updates/{id}/executions {verify}` can refuse if zero parts
+///   have been uploaded (otherwise the backend would just succeed on an
+///   empty session).
+///
+/// Held in memory only — survives no restart.  Entries roll off when
+/// the update reaches a terminal state.
+#[derive(Clone, Debug, Default)]
+pub struct UpdatesStore(pub Arc<Mutex<HashMap<String, UpdatesEntry>>>);
+
+#[derive(Clone, Debug, Default)]
+pub struct UpdatesEntry {
+    pub component_id: String,
+    pub parts: Vec<UpdatePart>,
+    pub manifest: Option<serde_json::Value>,
+    /// Phase the SOVD wire has reached.
+    pub state: UpdateState,
+    /// Backend's transfer_id, populated once `verify` calls `start_flash`.
+    pub transfer_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct UpdatePart {
+    pub part_id: String,
+    pub size: u64,
+    pub sha256: String,
+    /// Backend's file_id from `receive_package_stream`; needed by the
+    /// `verify` step which calls `verify_package(file_id)` per part.
+    pub file_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UpdateState {
+    #[default]
+    Registered,
+    Uploading,
+    Verified,
+    Finalized,
+    Committed,
+    RolledBack,
+    Aborted,
+}
+
+impl UpdateState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Registered => "registered",
+            Self::Uploading => "uploading",
+            Self::Verified => "verified",
+            Self::Finalized => "finalized",
+            Self::Committed => "committed",
+            Self::RolledBack => "rolledback",
+            Self::Aborted => "aborted",
+        }
+    }
+}
+
 /// Application state shared across all handlers
 #[derive(Clone)]
 pub struct AppState {
@@ -94,6 +159,8 @@ pub struct AppState {
     pub log_config: LogConfigStore,
     /// Per-component clear-data activity status.
     pub clear_data_status: ClearDataStatusStore,
+    /// Per-update part tracking for the `/updates` collection.
+    pub updates: UpdatesStore,
 }
 
 impl AppState {
@@ -107,6 +174,7 @@ impl AppState {
             operation_executions: Arc::new(OperationExecutionCache::default()),
             log_config: LogConfigStore::default(),
             clear_data_status: ClearDataStatusStore::default(),
+            updates: UpdatesStore::default(),
         }
     }
 
@@ -123,6 +191,7 @@ impl AppState {
             operation_executions: Arc::new(OperationExecutionCache::default()),
             log_config: LogConfigStore::default(),
             clear_data_status: ClearDataStatusStore::default(),
+            updates: UpdatesStore::default(),
         }
     }
 
@@ -140,6 +209,7 @@ impl AppState {
             operation_executions: Arc::new(OperationExecutionCache::default()),
             log_config: LogConfigStore::default(),
             clear_data_status: ClearDataStatusStore::default(),
+            updates: UpdatesStore::default(),
         }
     }
 

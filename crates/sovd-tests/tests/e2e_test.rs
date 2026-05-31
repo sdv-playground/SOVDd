@@ -15,7 +15,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use reqwest::Client;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::time::sleep;
 
 /// Options for configuring the test harness
@@ -523,7 +523,24 @@ security_level = 0
         Ok((status, json))
     }
 
-    #[allow(dead_code)]
+    async fn put_bytes(
+        &self,
+        path: &str,
+        body: Vec<u8>,
+    ) -> Result<(u16, Value), Box<dyn std::error::Error>> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .client
+            .put(&url)
+            .header("content-length", body.len().to_string())
+            .body(body)
+            .send()
+            .await?;
+        let status = resp.status().as_u16();
+        let json: Value = resp.json().await.unwrap_or(Value::Null);
+        Ok((status, json))
+    }
+
     async fn delete(&self, path: &str) -> Result<u16, Box<dyn std::error::Error>> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self.client.delete(&url).send().await?;
@@ -5961,4 +5978,187 @@ async fn test_abort_after_awaiting_reboot_rejected() {
     );
 
     eprintln!("=== Test PASSED: Abort after awaiting reset rejected ===");
+}
+
+// =============================================================================
+// F.D2 — spec-compliant /updates collection (alias over flash backend)
+// =============================================================================
+
+/// Verify the new /updates wire surface end-to-end without driving the
+/// full SUIT lifecycle (which the existing /flash tests cover).  This
+/// asserts the SOVD-side state plumbing: register, per-part upload,
+/// status, listing, and abort/delete.
+#[tokio::test]
+#[serial_test::serial]
+async fn test_updates_register_and_part_upload() {
+    eprintln!("\n=== F.D2: /updates register + multipart upload + delete ===");
+
+    let harness = TestHarness::new()
+        .await
+        .expect("Failed to create test harness");
+
+    let (status, body) = harness
+        .post("/vehicle/v1/components/vtx_ecm/updates", json!({}))
+        .await
+        .expect("POST /updates failed");
+    assert_eq!(status, 201, "expected 201 Created, body = {body}");
+    let update_id = body["update_id"]
+        .as_str()
+        .expect("update_id missing")
+        .to_string();
+    eprintln!("Registered update: {update_id}");
+    assert!(body["href"]
+        .as_str()
+        .is_some_and(|h| h.contains(&update_id)));
+    assert!(body["bulk_data_href"]
+        .as_str()
+        .is_some_and(|h| h.ends_with("/bulk-data")));
+    assert!(body["executions_href"]
+        .as_str()
+        .is_some_and(|h| h.ends_with("/executions")));
+
+    // PUT a manifest part.
+    let manifest_bytes = b"{\"manifest_version\":1}".to_vec();
+    let manifest_path = format!(
+        "/vehicle/v1/components/vtx_ecm/updates/{}/bulk-data/manifest",
+        update_id
+    );
+    let (status, body) = harness
+        .put_bytes(&manifest_path, manifest_bytes.clone())
+        .await
+        .expect("PUT manifest failed");
+    assert_eq!(status, 201, "expected 201, body = {body}");
+    assert_eq!(
+        body["size"].as_u64(),
+        Some(manifest_bytes.len() as u64),
+        "size mismatch"
+    );
+    let manifest_sha = body["sha256"]
+        .as_str()
+        .expect("sha256 missing in part upload response")
+        .to_string();
+    assert_eq!(manifest_sha.len(), 64, "sha256 should be 64 hex chars");
+
+    // PUT a payload part.
+    let payload_bytes = TestHarness::create_firmware_package(128);
+    let payload_path = format!(
+        "/vehicle/v1/components/vtx_ecm/updates/{}/bulk-data/payload-0",
+        update_id
+    );
+    let (status, body) = harness
+        .put_bytes(&payload_path, payload_bytes.clone())
+        .await
+        .expect("PUT payload failed");
+    assert_eq!(status, 201, "expected 201, body = {body}");
+
+    // GET /bulk-data — both parts listed.
+    let bulk_data_path = format!(
+        "/vehicle/v1/components/vtx_ecm/updates/{}/bulk-data",
+        update_id
+    );
+    let (status, body) = harness
+        .get_with_status(&bulk_data_path)
+        .await
+        .expect("GET /bulk-data failed");
+    assert_eq!(status, 200);
+    let items = body["items"].as_array().expect("items missing");
+    assert_eq!(items.len(), 2, "expected 2 parts, got {items:?}");
+    let part_ids: Vec<&str> = items.iter().filter_map(|i| i["part_id"].as_str()).collect();
+    assert!(part_ids.contains(&"manifest"), "manifest part missing");
+    assert!(part_ids.contains(&"payload-0"), "payload-0 part missing");
+
+    // GET /updates/{id} — top-level status surfaces parts_uploaded.
+    let status_path = format!("/vehicle/v1/components/vtx_ecm/updates/{}", update_id);
+    let (status, body) = harness
+        .get_with_status(&status_path)
+        .await
+        .expect("GET /updates/{id} failed");
+    assert_eq!(status, 200);
+    assert_eq!(body["parts_uploaded"].as_u64(), Some(2));
+    assert_eq!(body["update_id"].as_str(), Some(update_id.as_str()));
+
+    // DELETE — cleans up SOVD-side state + asks backend to abort.
+    let del_status = harness
+        .delete(&status_path)
+        .await
+        .expect("DELETE /updates/{id} failed");
+    assert_eq!(del_status, 204);
+
+    // Post-delete GET → 404.
+    let (status, _) = harness
+        .get_with_status(&status_path)
+        .await
+        .expect("GET after DELETE failed");
+    assert_eq!(status, 404);
+
+    eprintln!("=== F.D2 test PASSED ===");
+}
+
+/// /executions {verify} refuses when no part has been uploaded.  This
+/// guards against an empty upload session silently succeeding through
+/// to the backend's verify pipeline.
+#[tokio::test]
+#[serial_test::serial]
+async fn test_updates_verify_rejects_empty() {
+    eprintln!("\n=== F.D2: /updates verify rejects empty session ===");
+    let harness = TestHarness::new()
+        .await
+        .expect("Failed to create test harness");
+
+    let (status, body) = harness
+        .post("/vehicle/v1/components/vtx_ecm/updates", json!({}))
+        .await
+        .expect("POST /updates failed");
+    assert_eq!(status, 201, "expected 201, body = {body}");
+    let update_id = body["update_id"].as_str().unwrap().to_string();
+
+    let exec_path = format!(
+        "/vehicle/v1/components/vtx_ecm/updates/{}/executions",
+        update_id
+    );
+    let (status, body) = harness
+        .post(&exec_path, json!({"action": "verify"}))
+        .await
+        .expect("POST /executions verify failed");
+    assert_eq!(status, 400, "expected 400 BadRequest, body = {body}");
+    assert_eq!(body["error_code"].as_str(), Some("incomplete-request"));
+
+    // Clean up.
+    let exec_path_abort = format!(
+        "/vehicle/v1/components/vtx_ecm/updates/{}/executions",
+        update_id
+    );
+    let _ = harness
+        .post(&exec_path_abort, json!({"action": "abort"}))
+        .await;
+
+    eprintln!("=== F.D2 verify-empty guard test PASSED ===");
+}
+
+/// Unknown executions action returns 400 with the spec error code.
+#[tokio::test]
+#[serial_test::serial]
+async fn test_updates_executions_unknown_action() {
+    let harness = TestHarness::new()
+        .await
+        .expect("Failed to create test harness");
+
+    let (status, body) = harness
+        .post("/vehicle/v1/components/vtx_ecm/updates", json!({}))
+        .await
+        .expect("POST /updates failed");
+    assert_eq!(status, 201);
+    let update_id = body["update_id"].as_str().unwrap().to_string();
+
+    let exec_path = format!(
+        "/vehicle/v1/components/vtx_ecm/updates/{}/executions",
+        update_id
+    );
+    let (status, body) = harness
+        .post(&exec_path, json!({"action": "nuke-from-orbit"}))
+        .await
+        .expect("POST /executions failed");
+    assert_eq!(status, 400, "expected 400, body = {body}");
+    assert_eq!(body["error_code"].as_str(), Some("incomplete-request"));
+    let _ = harness.post(&exec_path, json!({"action": "abort"})).await;
 }

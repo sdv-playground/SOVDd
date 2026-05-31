@@ -23,3 +23,4 @@ pub mod streams;
 pub mod stubs;
 pub mod sub_entity;
 pub mod subscriptions;
+pub mod updates;
