@@ -2498,7 +2498,7 @@ async fn test_list_operations() {
 #[tokio::test]
 #[serial_test::serial]
 async fn test_routine_start() {
-    eprintln!("\n=== Testing POST /operations/check_preconditions (Start Routine) ===");
+    eprintln!("\n=== Testing POST /operations/check_preconditions/executions (Start Routine) ===");
 
     let harness = TestHarness::new()
         .await
@@ -2512,17 +2512,17 @@ async fn test_routine_start() {
         .expect("set_session extended failed");
 
     let result = client
-        .execute_operation("vtx_ecm", "check_preconditions", "start", None)
+        .start_operation_execution("vtx_ecm", "check_preconditions", None)
         .await
-        .expect("execute_operation failed");
+        .expect("start_operation_execution failed");
 
     eprintln!(
-        "Response: operation_id={}, action={}, status={}",
-        result.operation_id, result.action, result.status
+        "Response: operation_id={}, exec_id={}, status={}",
+        result.operation_id, result.execution_id, result.status
     );
 
     assert_eq!(result.operation_id, "check_preconditions");
-    assert_eq!(result.action, "start");
+    assert!(!result.execution_id.is_empty(), "Expected exec_id");
     assert!(
         result.status == sovd_client::OperationStatus::Running
             || result.status == sovd_client::OperationStatus::Completed
@@ -2531,41 +2531,40 @@ async fn test_routine_start() {
     eprintln!("=== Test PASSED: Routine started successfully ===");
 }
 
-/// Test getting routine result
+/// Test polling routine status via the executions sub-resource
 #[tokio::test]
 #[serial_test::serial]
 async fn test_routine_result() {
-    eprintln!("\n=== Testing POST /operations/check_preconditions action=result ===");
+    eprintln!("\n=== Testing GET /operations/check_preconditions/executions/{{exec_id}} ===");
 
     let harness = TestHarness::new()
         .await
         .expect("Failed to create test harness");
     let client = harness.sovd_client();
 
-    // Routine requires extended session per UDS spec
     client
         .set_session("vtx_ecm", sovd_client::SessionType::Extended)
         .await
         .expect("set_session extended failed");
 
-    // First start the routine
-    client
-        .execute_operation("vtx_ecm", "check_preconditions", "start", None)
+    // Start the routine — server returns exec_id we then poll
+    let started = client
+        .start_operation_execution("vtx_ecm", "check_preconditions", None)
         .await
-        .expect("execute_operation start failed");
+        .expect("start_operation_execution failed");
 
-    // Now get the result
+    // Poll via the executions sub-resource
     let result = client
-        .execute_operation("vtx_ecm", "check_preconditions", "result", None)
+        .get_operation_execution("vtx_ecm", "check_preconditions", &started.execution_id)
         .await
-        .expect("execute_operation result failed");
+        .expect("get_operation_execution failed");
 
     eprintln!(
-        "Response: action={}, status={}",
-        result.action, result.status
+        "Response: exec_id={}, status={}",
+        result.execution_id, result.status
     );
 
-    assert_eq!(result.action, "result");
+    assert_eq!(result.execution_id, started.execution_id);
     assert_eq!(result.status, sovd_client::OperationStatus::Completed);
 
     eprintln!("=== Test PASSED: Routine result retrieved ===");
@@ -2584,7 +2583,7 @@ async fn test_routine_security_required() {
 
     // Try to start erase_memory without security - should fail
     let result = client
-        .execute_operation("vtx_ecm", "erase_memory", "start", None)
+        .start_operation_execution("vtx_ecm", "erase_memory", None)
         .await;
 
     // Should fail with security access denied
@@ -2605,7 +2604,7 @@ async fn test_routine_not_found() {
     let client = harness.sovd_client();
 
     let result = client
-        .execute_operation("vtx_ecm", "nonexistent_routine", "start", None)
+        .start_operation_execution("vtx_ecm", "nonexistent_routine", None)
         .await;
 
     // Should fail with not found

@@ -640,38 +640,83 @@ impl SovdClient {
             .map(|r| r.items)
     }
 
-    /// Execute an operation on a component
+    /// Start an operation execution (UDS RoutineControl 0x31 0x01).
+    ///
+    /// Wire: `POST /components/{id}/operations/{op_id}/executions`
+    /// → 200/202 + `Location` header to the created executions resource.
     #[instrument(skip(self))]
-    pub async fn execute_operation(
+    pub async fn start_operation_execution(
         &self,
         component_id: &str,
         operation_id: &str,
-        action: &str,
         parameters: Option<&str>,
-    ) -> Result<OperationResponse> {
+    ) -> Result<OperationExecution> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/operations/{}",
+            "/vehicle/v1/components/{}/operations/{}/executions",
             component_id,
             encode_path_segment(operation_id)
         ))?;
 
-        let request = OperationRequest {
-            action: action.to_string(),
+        let request = StartExecutionRequest {
             parameters: parameters.map(|s| s.to_string()),
         };
         let response = self.client.post(url).json(&request).send().await?;
         self.handle_response(response).await
     }
 
-    /// Execute an operation with "start" action and no parameters
+    /// Start an operation execution with no parameters.
     #[instrument(skip(self))]
     pub async fn execute_operation_simple(
         &self,
         component_id: &str,
         operation_id: &str,
-    ) -> Result<OperationResponse> {
-        self.execute_operation(component_id, operation_id, "start", None)
+    ) -> Result<OperationExecution> {
+        self.start_operation_execution(component_id, operation_id, None)
             .await
+    }
+
+    /// Poll an in-flight execution.
+    ///
+    /// Wire: `GET /components/{id}/operations/{op_id}/executions/{exec_id}`.
+    #[instrument(skip(self))]
+    pub async fn get_operation_execution(
+        &self,
+        component_id: &str,
+        operation_id: &str,
+        exec_id: &str,
+    ) -> Result<OperationExecution> {
+        let url = self.base_url.join(&format!(
+            "/vehicle/v1/components/{}/operations/{}/executions/{}",
+            component_id,
+            encode_path_segment(operation_id),
+            exec_id,
+        ))?;
+        let response = self.client.get(url).send().await?;
+        self.handle_response(response).await
+    }
+
+    /// Stop an in-flight execution (UDS RoutineControl 0x31 0x02).
+    ///
+    /// Wire: `DELETE /components/{id}/operations/{op_id}/executions/{exec_id}`.
+    #[instrument(skip(self))]
+    pub async fn stop_operation_execution(
+        &self,
+        component_id: &str,
+        operation_id: &str,
+        exec_id: &str,
+    ) -> Result<()> {
+        let url = self.base_url.join(&format!(
+            "/vehicle/v1/components/{}/operations/{}/executions/{}",
+            component_id,
+            encode_path_segment(operation_id),
+            exec_id,
+        ))?;
+        let response = self.client.delete(url).send().await?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(self.extract_error(response).await)
+        }
     }
 
     // =========================================================================

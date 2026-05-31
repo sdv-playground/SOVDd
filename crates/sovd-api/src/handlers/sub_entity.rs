@@ -36,9 +36,8 @@ use super::flash::{
 use super::modes::{
     SecurityModeGetResponse, SecurityModeRequest, SessionModeRequest, SessionModeResponse,
 };
-use super::operations::{
-    ExecuteOperationRequest, OperationInfoResponse, OperationResultResponse, OperationsResponse,
-};
+use super::operations::{OperationInfoResponse, OperationsResponse};
+use axum::response::IntoResponse;
 use sovd_core::{FaultFilter, FaultSeverity, OperationStatus, SecurityState, VerifyResult};
 
 /// Resolve a sub-entity backend from a `(component_id, app_id)` path.
@@ -904,85 +903,98 @@ pub async fn list_sub_entity_operations(
             description: op.description.clone(),
             requires_security: op.requires_security,
             security_level: op.security_level,
-            href: format!("{}/{}", base, op.id),
+            href: format!("{}/{}/executions", base, op.id),
         })
         .collect();
 
     Ok(Json(OperationsResponse { items }))
 }
 
-/// POST .../apps/:app_id/operations/:operation_id
-pub async fn execute_sub_entity_operation(
+/// POST .../apps/:app_id/operations/:operation_id/executions
+///
+/// Spec-conforming start.  Mirrors the entity-root handler in
+/// handlers/operations.rs — see the module doc there for the
+/// single-op-at-a-time `exec_id` contract.
+pub async fn start_sub_entity_operation(
     State(state): State<AppState>,
     Path((component_id, app_id, operation_id)): Path<(String, String, String)>,
-    Json(request): Json<ExecuteOperationRequest>,
-) -> Result<Json<OperationResultResponse>, ApiError> {
+    Json(request): Json<super::operations::StartExecutionRequest>,
+) -> Result<axum::response::Response, ApiError> {
     let backend = resolve(&state, &component_id, &app_id).await?;
 
-    let action = request.action.to_lowercase();
-    match action.as_str() {
-        "start" | "" => {
-            let params = request
-                .parameters
-                .as_deref()
-                .map(|p| hex::decode(p).unwrap_or_default())
-                .unwrap_or_default();
+    let params: Vec<u8> = match request.parameters.as_deref() {
+        Some(hex_str) => hex::decode(hex_str)
+            .map_err(|e| ApiError::BadRequest(format!("Invalid hex parameters: {}", e)))?,
+        None => Vec::new(),
+    };
 
-            let execution = backend
-                .start_operation(&operation_id, &params)
-                .await
-                .map_err(ApiError::from)?;
+    let mut execution = backend
+        .start_operation(&operation_id, &params)
+        .await
+        .map_err(ApiError::from)?;
 
-            Ok(Json(OperationResultResponse {
-                operation_id: execution.operation_id,
-                action: "start".to_string(),
-                status: execution.status,
-                result_data: execution.result.and_then(|v| {
-                    v.get("routine_result")
-                        .and_then(|r| r.as_str())
-                        .map(|s| s.to_string())
-                }),
-                error: execution.error,
-                timestamp: execution.started_at.to_rfc3339(),
-            }))
-        }
-        "result" | "status" => {
-            let execution = backend
-                .get_operation_status(&operation_id)
-                .await
-                .map_err(ApiError::from)?;
+    let exec_id = uuid::Uuid::new_v4().to_string();
+    execution.execution_id = exec_id.clone();
 
-            Ok(Json(OperationResultResponse {
-                operation_id: execution.operation_id,
-                action: "result".to_string(),
-                status: execution.status,
-                result_data: execution.result.and_then(|v| {
-                    v.get("routine_result")
-                        .and_then(|r| r.as_str())
-                        .map(|s| s.to_string())
-                }),
-                error: execution.error,
-                timestamp: execution.started_at.to_rfc3339(),
-            }))
-        }
-        "stop" => {
-            backend
-                .stop_operation(&operation_id)
-                .await
-                .map_err(ApiError::from)?;
+    // Cache the final execution under the (gateway, app/op_id) key so the
+    // matching GET .../executions/{exec_id} below can return it without
+    // re-querying the (synchronous) backend.  Use the fully-qualified
+    // `apps/{app}/operations/{op}` form as the cache key namespace.
+    let cache_op_id = format!("apps/{}/{}", app_id, operation_id);
+    state
+        .operation_executions
+        .record(&component_id, &cache_op_id, execution.clone());
 
-            Ok(Json(OperationResultResponse {
-                operation_id: operation_id.clone(),
-                action: "stop".to_string(),
-                status: OperationStatus::Cancelled,
-                result_data: None,
-                error: None,
-                timestamp: Utc::now().to_rfc3339(),
-            }))
-        }
-        _ => Err(ApiError::BadRequest(format!(
-            "Invalid action: {}. Use 'start', 'result', or 'stop'",
-            action
-        ))),
+    let href = format!(
+        "/vehicle/v1/components/{}/apps/{}/operations/{}/executions/{}",
+        component_id, app_id, operation_id, exec_id
+    );
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::LOCATION,
+        axum::http::HeaderValue::from_str(&href)
+            .map_err(|e| ApiError::Internal(format!("bad Location header: {e}")))?,
+    );
+
+    let status_code = match execution.status {
+        OperationStatus::Running => StatusCode::ACCEPTED,
+        _ => StatusCode::OK,
+    };
+
+    Ok((status_code, headers, Json(execution)).into_response())
+}
+
+/// GET .../apps/:app_id/operations/:operation_id/executions/:exec_id
+pub async fn get_sub_entity_operation_execution(
+    State(state): State<AppState>,
+    Path((component_id, app_id, operation_id, exec_id)): Path<(String, String, String, String)>,
+) -> Result<Json<sovd_core::OperationExecution>, ApiError> {
+    let cache_op_id = format!("apps/{}/{}", app_id, operation_id);
+    if let Some(cached) = state
+        .operation_executions
+        .get(&component_id, &cache_op_id, &exec_id)
+    {
+        return Ok(Json(cached));
     }
+
+    let backend = resolve(&state, &component_id, &app_id).await?;
+    let mut execution = backend
+        .get_operation_status(&operation_id)
+        .await
+        .map_err(ApiError::from)?;
+    execution.execution_id = exec_id;
+    Ok(Json(execution))
+}
+
+/// DELETE .../apps/:app_id/operations/:operation_id/executions/:exec_id
+pub async fn stop_sub_entity_operation_execution(
+    State(state): State<AppState>,
+    Path((component_id, app_id, operation_id, _exec_id)): Path<(String, String, String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let backend = resolve(&state, &component_id, &app_id).await?;
+    backend
+        .stop_operation(&operation_id)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(StatusCode::NO_CONTENT)
 }

@@ -1,14 +1,67 @@
 //! Application state for the SOVD API
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use sovd_conv::DidStore;
-use sovd_core::DiagnosticBackend;
+use sovd_core::{DiagnosticBackend, OperationExecution};
 use sovd_uds::config::OutputConfig;
 
 use crate::error::ApiError;
 use crate::handlers::subscriptions::SubscriptionManager;
+
+/// Bounded recent-executions cache keyed by `(component_id, op_id, exec_id)`.
+///
+/// UDS RoutineControl is synchronous: `start_operation` returns the
+/// final state immediately; subsequent backend polls have nothing new
+/// to report.  Storing the start result here lets `GET .../executions/
+/// {exec_id}` return the captured `OperationExecution` for ~64 recent
+/// executions per component, after which entries roll off.
+#[derive(Default)]
+pub struct OperationExecutionCache {
+    inner: Mutex<HashMap<(String, String, String), OperationExecution>>,
+    // FIFO order of keys for bounded eviction.
+    order: Mutex<VecDeque<(String, String, String)>>,
+}
+
+const OPERATION_EXEC_CACHE_CAP: usize = 64;
+
+impl OperationExecutionCache {
+    pub fn record(&self, component_id: &str, op_id: &str, execution: OperationExecution) {
+        let key = (
+            component_id.to_string(),
+            op_id.to_string(),
+            execution.execution_id.clone(),
+        );
+        let mut order = self.order.lock();
+        let mut inner = self.inner.lock();
+        if inner.len() >= OPERATION_EXEC_CACHE_CAP {
+            if let Some(evict) = order.pop_front() {
+                inner.remove(&evict);
+            }
+        }
+        order.push_back(key.clone());
+        inner.insert(key, execution);
+    }
+
+    pub fn get(
+        &self,
+        component_id: &str,
+        op_id: &str,
+        exec_id: &str,
+    ) -> Option<OperationExecution> {
+        self.inner
+            .lock()
+            .get(&(
+                component_id.to_string(),
+                op_id.to_string(),
+                exec_id.to_string(),
+            ))
+            .cloned()
+    }
+}
 
 /// Application state shared across all handlers
 #[derive(Clone)]
@@ -21,6 +74,8 @@ pub struct AppState {
     pub subscription_manager: Arc<SubscriptionManager>,
     /// Output configs per component: component_id -> Vec<OutputConfig>
     output_configs: Arc<HashMap<String, Vec<OutputConfig>>>,
+    /// Bounded cache of recent operation executions for `GET ../executions/{id}`.
+    pub operation_executions: Arc<OperationExecutionCache>,
 }
 
 impl AppState {
@@ -31,6 +86,7 @@ impl AppState {
             did_store: Arc::new(DidStore::new()),
             subscription_manager: Arc::new(SubscriptionManager::new()),
             output_configs: Arc::new(HashMap::new()),
+            operation_executions: Arc::new(OperationExecutionCache::default()),
         }
     }
 
@@ -44,6 +100,7 @@ impl AppState {
             did_store,
             subscription_manager: Arc::new(SubscriptionManager::new()),
             output_configs: Arc::new(HashMap::new()),
+            operation_executions: Arc::new(OperationExecutionCache::default()),
         }
     }
 
@@ -58,6 +115,7 @@ impl AppState {
             did_store,
             subscription_manager: Arc::new(SubscriptionManager::new()),
             output_configs: Arc::new(output_configs),
+            operation_executions: Arc::new(OperationExecutionCache::default()),
         }
     }
 

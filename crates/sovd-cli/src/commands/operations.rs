@@ -32,36 +32,38 @@ pub async fn ops(client: &SovdClient, ecu: &str, ctx: &OutputContext) -> Result<
     Ok(())
 }
 
-/// Execute an operation/routine
+/// Execute an operation/routine (UDS RoutineControl 0x31 0x01 start).
+///
+/// Spec §7.14 executions sub-resource — the CLI starts one execution
+/// per run; the resulting execution-id is printed for further polling
+/// or stopping with `sovd-cli` follow-up commands.
 pub async fn run(
     client: &SovdClient,
     ecu: &str,
     operation_id: &str,
-    action: Option<&str>,
+    _action: Option<&str>,
     params_json: Option<&str>,
     ctx: &OutputContext,
 ) -> Result<()> {
-    let action = action.unwrap_or("start");
-
     ctx.info(&format!(
-        "Executing operation '{}' with action '{}'...",
-        operation_id, action
+        "Starting execution of operation '{}'...",
+        operation_id
     ));
 
     let result = client
-        .execute_operation(ecu, operation_id, action, params_json)
+        .start_operation_execution(ecu, operation_id, params_json)
         .await?;
 
     if let Some(error) = result.error {
         ctx.error(&format!("Operation failed: {}", error));
     } else {
-        ctx.success(&format!("Operation {} completed", result.status));
+        ctx.success(&format!(
+            "Operation {} (exec_id {})",
+            result.status, result.execution_id
+        ));
 
-        // Print result data if present
-        if let Some(ref data) = result.result_data {
-            if !data.is_empty() {
-                ctx.info(&format!("Result: {}", data));
-            }
+        if let Some(ref data) = result.result {
+            ctx.info(&format!("Result: {}", data));
         }
     }
 

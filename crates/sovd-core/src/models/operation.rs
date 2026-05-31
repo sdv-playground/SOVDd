@@ -74,29 +74,32 @@ pub struct OperationExecution {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-/// Status of an operation execution
+/// Status of an operation execution — ISO 17978-3 §7.14 line 387.
+///
+/// Spec-defined values: `running | completed | failed | stopped`.
+/// (Pre-Phase-E variants `pending`/`cancelled` were non-spec and have
+/// been removed — `pending` collapses to `running` once an execution
+/// resource exists; `cancelled` is spelled `stopped` by the spec.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationStatus {
-    /// Operation is pending/queued
-    Pending,
-    /// Operation is currently running
+    /// Operation is currently running.
     Running,
-    /// Operation completed successfully
+    /// Operation completed successfully.
     Completed,
-    /// Operation failed
+    /// Operation failed.
     Failed,
-    /// Operation was cancelled
-    Cancelled,
+    /// Operation was stopped (UDS RoutineControl 0x31 0x02).
+    Stopped,
 }
 
 impl OperationExecution {
-    /// Create a new pending operation
-    pub fn pending(execution_id: impl Into<String>, operation_id: impl Into<String>) -> Self {
+    /// Create a fresh execution in the `running` state.
+    pub fn running(execution_id: impl Into<String>, operation_id: impl Into<String>) -> Self {
         Self {
             execution_id: execution_id.into(),
             operation_id: operation_id.into(),
-            status: OperationStatus::Pending,
+            status: OperationStatus::Running,
             result: None,
             error: None,
             started_at: Utc::now(),

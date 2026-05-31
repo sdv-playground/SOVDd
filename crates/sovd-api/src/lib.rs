@@ -115,14 +115,19 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/logs/{log_id}",
             get(handlers::logs::get_log).delete(handlers::logs::delete_log),
         )
-        // Operation routes
+        // Operation routes — ISO 17978-3 §7.14 executions sub-resource.
         .route(
             "/vehicle/v1/components/{component_id}/operations",
             get(handlers::operations::list_operations),
         )
         .route(
-            "/vehicle/v1/components/{component_id}/operations/{operation_id}",
-            post(handlers::operations::execute_operation),
+            "/vehicle/v1/components/{component_id}/operations/{operation_id}/executions",
+            post(handlers::operations::start_operation_execution),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/operations/{operation_id}/executions/{exec_id}",
+            get(handlers::operations::get_operation_execution)
+                .delete(handlers::operations::stop_operation_execution),
         )
         // Output routes (I/O control)
         .route(
@@ -237,14 +242,20 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/apps/{app_id}/faults/{fault_id}",
             get(handlers::sub_entity::get_sub_entity_fault),
         )
-        // Sub-entity operation routes
+        // Sub-entity operation routes — same executions sub-resource
+        // pattern as the entity-root operations (§7.14).
         .route(
             "/vehicle/v1/components/{component_id}/apps/{app_id}/operations",
             get(handlers::sub_entity::list_sub_entity_operations),
         )
         .route(
-            "/vehicle/v1/components/{component_id}/apps/{app_id}/operations/{operation_id}",
-            post(handlers::sub_entity::execute_sub_entity_operation),
+            "/vehicle/v1/components/{component_id}/apps/{app_id}/operations/{operation_id}/executions",
+            post(handlers::sub_entity::start_sub_entity_operation),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/apps/{app_id}/operations/{operation_id}/executions/{exec_id}",
+            get(handlers::sub_entity::get_sub_entity_operation_execution)
+                .delete(handlers::sub_entity::stop_sub_entity_operation_execution),
         )
         // Component-level streaming routes (SSE for real-time data)
         .route(

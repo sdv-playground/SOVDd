@@ -677,38 +677,33 @@ impl DiagnosticBackend for SovdProxyBackend {
         let prefixed = routing::prefixed_id(operation_id, self.sub_entity_prefix.as_deref());
         let resp = self
             .client
-            .execute_operation(
-                &self.component_id,
-                &prefixed,
-                "start",
-                params_str.as_deref(),
-            )
+            .start_operation_execution(&self.component_id, &prefixed, params_str.as_deref())
             .await
             .map_err(Self::map_err)?;
 
         let status = match resp.status {
-            sovd_client::OperationStatus::Pending => OperationStatus::Pending,
             sovd_client::OperationStatus::Running => OperationStatus::Running,
             sovd_client::OperationStatus::Completed => OperationStatus::Completed,
             sovd_client::OperationStatus::Failed => OperationStatus::Failed,
-            sovd_client::OperationStatus::Cancelled => OperationStatus::Cancelled,
+            sovd_client::OperationStatus::Stopped => OperationStatus::Stopped,
         };
 
-        let now = chrono::Utc::now();
-        let completed_at =
-            if status == OperationStatus::Completed || status == OperationStatus::Failed {
-                Some(now)
-            } else {
-                None
-            };
+        let started_at = chrono::DateTime::parse_from_rfc3339(&resp.started_at)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+        let completed_at = resp.completed_at.as_deref().and_then(|s| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .ok()
+        });
 
         Ok(OperationExecution {
-            execution_id: resp.operation_id.clone(),
+            execution_id: resp.execution_id,
             operation_id: resp.operation_id,
             status,
-            result: resp.result_data.map(serde_json::Value::String),
+            result: resp.result,
             error: resp.error,
-            started_at: now,
+            started_at,
             completed_at,
         })
     }

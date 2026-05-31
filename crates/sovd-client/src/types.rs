@@ -249,61 +249,60 @@ pub struct OperationsResponse {
     pub items: Vec<OperationInfo>,
 }
 
-/// Operation execution request
+/// Operation start request body — ISO 17978-3 §7.14.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OperationRequest {
-    /// Action: "start", "stop", or "result"
-    #[serde(default = "default_action")]
-    pub action: String,
-    /// Optional parameters (hex string)
-    #[serde(skip_serializing_if = "Option::is_none")]
+pub struct StartExecutionRequest {
+    /// Optional parameters (hex string — UDS RoutineControl sub-function payload).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameters: Option<String>,
 }
 
-fn default_action() -> String {
-    "start".to_string()
-}
-
-/// Status of an operation execution
+/// Status of an operation execution — ISO 17978-3 §7.14 line 387.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationStatus {
-    /// Operation is pending/queued
-    Pending,
-    /// Operation is currently running
+    /// Operation is currently running.
     Running,
-    /// Operation completed successfully
+    /// Operation completed successfully.
     Completed,
-    /// Operation failed
+    /// Operation failed.
     Failed,
-    /// Operation was cancelled
-    Cancelled,
+    /// Operation was stopped (UDS RoutineControl 0x31 0x02).
+    Stopped,
 }
 
 impl std::fmt::Display for OperationStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            OperationStatus::Pending => write!(f, "pending"),
             OperationStatus::Running => write!(f, "running"),
             OperationStatus::Completed => write!(f, "completed"),
             OperationStatus::Failed => write!(f, "failed"),
-            OperationStatus::Cancelled => write!(f, "cancelled"),
+            OperationStatus::Stopped => write!(f, "stopped"),
         }
     }
 }
 
-/// Operation execution response
+/// Operation execution resource — ISO 17978-3 §7.14 (mirror of
+/// `sovd_core::OperationExecution`).
+///
+/// The server allocates `execution_id` on POST and returns it in the
+/// `Location` header.  Clients re-use it for `GET .../executions/{exec_id}`
+/// polls and `DELETE .../executions/{exec_id}` stop calls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OperationResponse {
+pub struct OperationExecution {
+    pub execution_id: String,
     pub operation_id: String,
-    pub action: String,
     pub status: OperationStatus,
-    #[serde(default)]
-    pub result_data: Option<String>,
-    #[serde(default)]
+    /// Result payload (if completed) — opaque JSON, schema is operation-defined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    /// Error message (if status == failed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Operation start time, RFC 3339 (ISO 17978-3 C-050).
-    pub timestamp: String,
+    /// RFC 3339 start time.
+    pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
 }
 
 // =============================================================================
