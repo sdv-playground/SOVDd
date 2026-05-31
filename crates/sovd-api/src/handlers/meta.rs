@@ -4,8 +4,11 @@
 //! change across API editions), which is why the version-info route
 //! is mounted at `/version-info` not `/vehicle/v1/version-info`.
 
+use axum::http::{StatusCode, Uri};
 use axum::Json;
 use serde::{Deserialize, Serialize};
+
+use crate::error::ApiError;
 
 /// One row of `/version-info` — describes a supported SOVD API edition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +37,24 @@ pub async fn version_info() -> Json<VersionInfoResponse> {
             x_sovd_version: "1.1".to_string(),
         }],
     })
+}
+
+/// Router fallback for unknown paths — emit `GenericError` with the
+/// spec-conforming shape instead of axum's plain-text default.
+pub async fn not_found_fallback(uri: Uri) -> ApiError {
+    ApiError::NotFound(format!("No resource at {}", uri.path()))
+}
+
+/// Router fallback for matched paths with disallowed methods.
+/// Spec §5.8 405 carries `GenericError`.
+pub async fn method_not_allowed_fallback(
+    uri: Uri,
+) -> (StatusCode, axum::Json<sovd_core::GenericError>) {
+    let err = sovd_core::GenericError::vendor(
+        "method-not-allowed",
+        format!("Method not allowed on {}", uri.path()),
+    );
+    (StatusCode::METHOD_NOT_ALLOWED, axum::Json(err))
 }
 
 /// GET /vehicle/v1/docs — minimal OpenAPI 3.1.0 capability description (§7.5).

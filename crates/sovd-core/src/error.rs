@@ -71,6 +71,13 @@ pub enum BackendError {
     #[error("Resource busy: {0}")]
     Busy(String),
 
+    /// Software update already in progress.  Distinct from `Busy` so
+    /// the API layer can surface the spec-defined `update-process-in-progress`
+    /// error_code (ISO 17978-3 Table 18) instead of the generic
+    /// `precondition-not-fulfilled`.
+    #[error("Update in progress: {0}")]
+    UpdateInProgress(String),
+
     /// Internal error
     #[error("Internal error: {0}")]
     Internal(String),
@@ -94,6 +101,7 @@ impl BackendError {
             BackendError::InvalidRequest(_) => 400,
             BackendError::Timeout => 504,
             BackendError::Busy(_) => 409,
+            BackendError::UpdateInProgress(_) => 409,
             BackendError::Internal(_) => 500,
         }
     }

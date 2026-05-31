@@ -1298,10 +1298,11 @@ async fn test_read_extended_did_without_session() {
         .await
         .expect("Request failed");
 
-    // Should get 412 (Precondition Failed) with session-related message
+    // Spec §5.8 set doesn't include 412 — precondition-not-fulfilled
+    // routes to 409 Conflict per Phase F.3.
     assert_eq!(
-        status, 412,
-        "Expected 412 status (Precondition Failed), got {}: {:?}",
+        status, 409,
+        "Expected 409 (Conflict / precondition-not-fulfilled), got {}: {:?}",
         status, json
     );
     let message = json["message"].as_str().unwrap_or("").to_lowercase();
@@ -2348,10 +2349,10 @@ async fn test_write_parameter_wrong_session() {
 
     eprintln!("Response: status={}, body={}", status, json);
 
-    // Should fail with precondition failed (session requirement)
+    // Spec §5.8: precondition-not-fulfilled → 409 Conflict.
     assert_eq!(
-        status, 412,
-        "Expected 412 (Precondition Failed) without extended session, got {}",
+        status, 409,
+        "Expected 409 (Conflict / precondition-not-fulfilled) without extended session, got {}",
         status
     );
 
@@ -2384,8 +2385,12 @@ async fn test_write_parameter_security_required() {
 
     eprintln!("Response: status={}, body={}", status, json);
 
-    // Should fail with security access denied
-    assert_eq!(status, 403, "Expected 403 without security, got {}", status);
+    // Spec §5.8 401 covers "insufficient access rights" (no 403 in set).
+    assert_eq!(
+        status, 401,
+        "Expected 401 (insufficient-access-rights) without security, got {}",
+        status
+    );
     let message = json["message"].as_str().unwrap_or("");
     assert!(
         message.contains("Security") || message.contains("security"),
@@ -4008,10 +4013,11 @@ async fn test_link_control_requires_extended_session() {
         .await
         .expect("PUT verify baud rate failed");
 
-    // Should fail because not in extended session - ECU returns ConditionsNotCorrect (0x22) → 412 Precondition Failed
+    // ECU returns ConditionsNotCorrect (0x22) — UDS NRC maps to spec
+    // error-response (409 Conflict per Phase F.3 status-code remap).
     assert_eq!(
-        status, 412,
-        "Expected precondition failed (412) for session requirement"
+        status, 409,
+        "Expected 409 (Conflict / error-response) for session requirement"
     );
     eprintln!(
         "Link control in default session failed as expected (status {})",

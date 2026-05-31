@@ -102,6 +102,27 @@ impl SubscriptionManager {
             .remove(subscription_id)
             .is_some()
     }
+
+    /// Update the cadence and/or duration of an existing subscription
+    /// in place.  `resource` and `protocol` cannot change — those
+    /// require a new subscription resource.  Returns the updated row
+    /// when found.
+    pub async fn update(
+        &self,
+        subscription_id: &str,
+        interval: Option<SubscriptionInterval>,
+        duration: Option<u32>,
+    ) -> Option<CyclicSubscription> {
+        let mut guard = self.subscriptions.write().await;
+        let sub = guard.get_mut(subscription_id)?;
+        if let Some(i) = interval {
+            sub.interval = i;
+        }
+        if let Some(d) = duration {
+            sub.expires_at = Some(sub.created_at + Duration::seconds(d as i64));
+        }
+        Some(sub.clone())
+    }
 }
 
 /// A cyclic-subscription resource (spec §7.10).
@@ -120,9 +141,12 @@ pub struct CyclicSubscription {
 
 /// Spec line 358 — coarse-grained update cadence enum.
 ///
-/// Server maps these to concrete polling rates: fast = 20 Hz,
-/// normal = 5 Hz, slow = 1 Hz.  Clients that need a precise rate
-/// should pick `fast` and downsample client-side.
+/// Server maps to concrete polling rates within the spec's ≤500 ms
+/// per-event floor (i.e. ≥2 Hz minimum):
+///
+///   * `fast`   → 20 Hz (50 ms)
+///   * `normal` → 5 Hz  (200 ms)
+///   * `slow`   → 2 Hz  (500 ms — the spec floor)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SubscriptionInterval {
@@ -137,7 +161,7 @@ impl SubscriptionInterval {
         match self {
             Self::Fast => 20,
             Self::Normal => 5,
-            Self::Slow => 1,
+            Self::Slow => 2,
         }
     }
 }
@@ -158,6 +182,17 @@ pub struct CyclicSubscriptionRequest {
     pub duration: Option<u32>,
 }
 
+/// Request body for `PUT .../cyclic-subscriptions/{id}` — update cadence
+/// and/or duration without recreating the subscription (and without
+/// losing the SSE stream URL).
+#[derive(Debug, Deserialize, Default)]
+pub struct UpdateCyclicSubscriptionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<SubscriptionInterval>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<u32>,
+}
+
 fn default_protocol() -> String {
     "sse".to_string()
 }
@@ -173,8 +208,15 @@ pub async fn create_cyclic_subscription(
     Path(component_id): Path<String>,
     Json(request): Json<CyclicSubscriptionRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // Validate component exists.
     let _backend = state.get_backend(&component_id)?;
+
+    // Spec: duration=0 makes the subscription expire instantly and
+    // is nonsensical; reject as incomplete-request.
+    if let Some(0) = request.duration {
+        return Err(ApiError::BadRequest(
+            "duration must be > 0; omit the field for no expiry".to_string(),
+        ));
+    }
 
     let subscription = state
         .subscription_manager
@@ -218,6 +260,28 @@ pub async fn list_cyclic_subscriptions(
         .list_for_component(&component_id)
         .await;
     Ok(Json(CyclicSubscriptionsResponse { items }))
+}
+
+/// PUT /vehicle/v1/components/:component_id/cyclic-subscriptions/:subscription_id
+///
+/// Update cadence and/or duration in place.  Returns 200 with the
+/// updated `CyclicSubscription` body.
+pub async fn update_cyclic_subscription(
+    State(state): State<AppState>,
+    Path((_component_id, subscription_id)): Path<(String, String)>,
+    Json(request): Json<UpdateCyclicSubscriptionRequest>,
+) -> Result<Json<CyclicSubscription>, ApiError> {
+    if let Some(0) = request.duration {
+        return Err(ApiError::BadRequest(
+            "duration must be > 0; omit the field for no expiry".to_string(),
+        ));
+    }
+    state
+        .subscription_manager
+        .update(&subscription_id, request.interval, request.duration)
+        .await
+        .map(Json)
+        .ok_or_else(|| ApiError::NotFound(format!("Subscription not found: {}", subscription_id)))
 }
 
 /// GET /vehicle/v1/components/:component_id/cyclic-subscriptions/:subscription_id

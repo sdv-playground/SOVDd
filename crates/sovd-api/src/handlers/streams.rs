@@ -150,7 +150,24 @@ pub async fn stream_subscription(
                     Event::default().data(serde_json::to_string(&event).unwrap_or_default()),
                 ))
             }
-            Err(_) => None, // Skip lagged messages
+            Err(lag) => {
+                // Broadcast lag — consumer can't keep up.  Spec
+                // EventEnvelope (Table 5) carries error events; surface
+                // the lag rather than dropping it silently.
+                let timestamp = Utc::now().to_rfc3339();
+                let err = sovd_core::GenericError::vendor(
+                    "broadcast-lag",
+                    format!("subscriber lagged behind producer ({})", lag),
+                );
+                let event = StreamEvent {
+                    timestamp,
+                    payload: None,
+                    error: Some(err),
+                };
+                Some(Ok::<_, Infallible>(
+                    Event::default().data(serde_json::to_string(&event).unwrap_or_default()),
+                ))
+            }
         }
     });
 
@@ -306,7 +323,24 @@ fn create_sse_stream(
                     Event::default().data(serde_json::to_string(&event).unwrap_or_default()),
                 ))
             }
-            Err(_) => None, // Skip lagged messages
+            Err(lag) => {
+                // Broadcast lag — consumer can't keep up.  Spec
+                // EventEnvelope (Table 5) carries error events; surface
+                // the lag rather than dropping it silently.
+                let timestamp = Utc::now().to_rfc3339();
+                let err = sovd_core::GenericError::vendor(
+                    "broadcast-lag",
+                    format!("subscriber lagged behind producer ({})", lag),
+                );
+                let event = StreamEvent {
+                    timestamp,
+                    payload: None,
+                    error: Some(err),
+                };
+                Some(Ok::<_, Infallible>(
+                    Event::default().data(serde_json::to_string(&event).unwrap_or_default()),
+                ))
+            }
         }
     });
 

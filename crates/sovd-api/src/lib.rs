@@ -303,6 +303,7 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/vehicle/v1/components/{component_id}/cyclic-subscriptions/{subscription_id}",
             get(handlers::subscriptions::get_cyclic_subscription)
+                .put(handlers::subscriptions::update_cyclic_subscription)
                 .delete(handlers::subscriptions::delete_cyclic_subscription),
         )
         // SSE stream delivery for a cyclic subscription.
@@ -411,6 +412,11 @@ pub fn create_router(state: AppState) -> Router {
                 .put(handlers::definitions::put_definition)
                 .delete(handlers::definitions::delete_definition),
         )
+        // Fallback for unknown paths / methods so the error body
+        // matches the spec `GenericError` shape (axum's defaults are
+        // plain text otherwise).
+        .fallback(handlers::meta::not_found_fallback)
+        .method_not_allowed_fallback(handlers::meta::method_not_allowed_fallback)
         // Middleware
         .layer(DefaultBodyLimit::disable()) // SOVD streaming uploads (ASAM SOVD chunked transfer)
         .layer(TraceLayer::new_for_http())

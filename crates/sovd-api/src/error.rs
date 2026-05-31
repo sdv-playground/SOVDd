@@ -14,39 +14,42 @@ use axum::Json;
 use sovd_core::{error_code, BackendError, GenericError};
 
 /// API error type that converts to HTTP responses.
+///
+/// Status codes restricted to ISO 17978-3 §5.8 set:
+/// 200/201/202/204/400/401/404/405/406/409/415/500/501/503/504.
+/// 403/412/502/429 are NOT in the spec set and were removed.
 #[derive(Debug)]
 pub enum ApiError {
     /// 400 Bad Request — `incomplete-request`
     BadRequest(String),
-    /// 404 Not Found — `incomplete-request` (caller referenced a
-    /// non-existent resource path; spec has no dedicated "not-found"
-    /// enum value, treat as a malformed request)
+    /// 404 Not Found — `incomplete-request`
     NotFound(String),
-    /// 403 Forbidden — `insufficient-access-rights`
-    Forbidden(String),
-    /// 409 Conflict — `precondition-not-fulfilled` (generic resource
-    /// busy / state-machine conflict).  For lock-broken specifically
-    /// use the dedicated `LockBroken` variant; for in-progress flash
-    /// use `UpdateInProgress`.
+    /// 401 Unauthorized — `insufficient-access-rights`.
+    /// Spec §5.8 401 covers "authentication required / missing /
+    /// insufficient" — i.e. both authn AND authz issues route here.
+    Unauthorized(String),
+    /// 409 Conflict — `precondition-not-fulfilled` (generic).
     Conflict(String),
-    /// 409 Conflict — `lock-broken`.
-    LockBroken(String),
     /// 409 Conflict — `update-process-in-progress`.
     UpdateInProgress(String),
-    /// 412 Precondition Failed — `precondition-not-fulfilled`
+    /// 409 Conflict — `precondition-not-fulfilled` (mode/session/lock
+    /// gate failed).  Same status as Conflict; kept distinct for
+    /// telemetry/log clarity.
     PreconditionFailed(String),
-    /// 429 Too Many Requests — `vendor-specific` (no Table 18 mapping)
-    TooManyRequests(String),
-    /// 501 Not Implemented — `sovd-server-misconfigured`
+    /// 503 Service Unavailable — rate-limited or backpressured.
+    /// Spec §5.8 503 may include a `Retry-After` header.
+    Throttled(String),
+    /// 501 Not Implemented — `sovd-server-misconfigured`.
     NotImplemented(String),
-    /// 502 Bad Gateway — `not-responding` (upstream protocol error)
-    BadGateway(String),
-    /// 502 Bad Gateway — `error-response` (UDS NRC).
-    EcuErrorResponse { message: String, nrc: u8, sid: u8 },
-    /// 503 Service Unavailable — `not-responding` (transport unavailable).
+    /// 503 Service Unavailable — upstream protocol problem
+    /// (`not-responding`, no parseable answer from the ECU).
     ServiceUnavailable(String),
-    /// 504 Gateway Timeout — `not-responding`.
+    /// 504 Gateway Timeout — upstream didn't respond in time.
     GatewayTimeout(String),
+    /// 409 Conflict — `error-response` (UDS NRC).  The ECU answered
+    /// but rejected the request given its current state; surface as
+    /// a state-conflict to the client.
+    EcuErrorResponse { message: String, nrc: u8, sid: u8 },
     /// 500 Internal Server Error — `sovd-server-failure`.
     Internal(String),
 }
@@ -59,7 +62,9 @@ impl IntoResponse for ApiError {
                 let body = GenericError::new(error_code::ERROR_RESPONSE, message)
                     .with_param("service", format!("0x{:02X}", sid))
                     .with_param("nrc", format!("0x{:02X}", nrc));
-                (StatusCode::BAD_GATEWAY, body)
+                // 409 (Conflict): ECU answered but rejected — the
+                // resource is in a state incompatible with the request.
+                (StatusCode::CONFLICT, body)
             }
             ApiError::BadRequest(msg) => (
                 StatusCode::BAD_REQUEST,
@@ -70,47 +75,37 @@ impl IntoResponse for ApiError {
                 GenericError::new(error_code::INCOMPLETE_REQUEST, msg)
                     .with_param("http_code", "404"),
             ),
-            ApiError::Forbidden(msg) => (
-                StatusCode::FORBIDDEN,
+            ApiError::Unauthorized(msg) => (
+                StatusCode::UNAUTHORIZED,
                 GenericError::new(error_code::INSUFFICIENT_ACCESS_RIGHTS, msg),
             ),
             ApiError::Conflict(msg) => (
                 StatusCode::CONFLICT,
-                GenericError::new(error_code::PRECONDITION_NOT_FULFILLED, msg)
-                    .with_param("http_code", "409"),
-            ),
-            ApiError::LockBroken(msg) => (
-                StatusCode::CONFLICT,
-                GenericError::new(error_code::LOCK_BROKEN, msg),
+                GenericError::new(error_code::PRECONDITION_NOT_FULFILLED, msg),
             ),
             ApiError::UpdateInProgress(msg) => (
                 StatusCode::CONFLICT,
                 GenericError::new(error_code::UPDATE_PROCESS_IN_PROGRESS, msg),
             ),
             ApiError::PreconditionFailed(msg) => (
-                StatusCode::PRECONDITION_FAILED,
+                StatusCode::CONFLICT,
                 GenericError::new(error_code::PRECONDITION_NOT_FULFILLED, msg),
             ),
-            ApiError::TooManyRequests(msg) => (
-                StatusCode::TOO_MANY_REQUESTS,
-                GenericError::vendor("rate-limited", msg).with_param("http_code", "429"),
+            ApiError::Throttled(msg) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                GenericError::vendor("rate-limited", msg),
             ),
             ApiError::NotImplemented(msg) => (
                 StatusCode::NOT_IMPLEMENTED,
-                GenericError::new(error_code::SOVD_SERVER_MISCONFIGURED, msg)
-                    .with_param("http_code", "501"),
-            ),
-            ApiError::BadGateway(msg) => (
-                StatusCode::BAD_GATEWAY,
-                GenericError::new(error_code::NOT_RESPONDING, msg).with_param("http_code", "502"),
+                GenericError::new(error_code::SOVD_SERVER_MISCONFIGURED, msg),
             ),
             ApiError::ServiceUnavailable(msg) => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                GenericError::new(error_code::NOT_RESPONDING, msg).with_param("http_code", "503"),
+                GenericError::new(error_code::NOT_RESPONDING, msg),
             ),
             ApiError::GatewayTimeout(msg) => (
                 StatusCode::GATEWAY_TIMEOUT,
-                GenericError::new(error_code::NOT_RESPONDING, msg).with_param("http_code", "504"),
+                GenericError::new(error_code::NOT_RESPONDING, msg),
             ),
             ApiError::Internal(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -144,7 +139,7 @@ impl From<BackendError> for ApiError {
             BackendError::OperationNotFound(msg) => ApiError::NotFound(msg),
             BackendError::OutputNotFound(msg) => ApiError::NotFound(msg),
             BackendError::SecurityRequired(level) => {
-                ApiError::Forbidden(format!("Security access level {} required", level))
+                ApiError::Unauthorized(format!("Security access level {} required", level))
             }
             BackendError::SessionRequired(session) => {
                 ApiError::PreconditionFailed(format!("Session change required: {}", session))
@@ -152,15 +147,16 @@ impl From<BackendError> for ApiError {
             BackendError::NotSupported(op) => {
                 ApiError::NotImplemented(format!("Operation not supported: {}", op))
             }
-            BackendError::Protocol(msg) => ApiError::BadGateway(msg),
+            BackendError::Protocol(msg) => ApiError::ServiceUnavailable(msg),
             BackendError::EcuError { nrc, sid, message } => {
                 ApiError::EcuErrorResponse { message, nrc, sid }
             }
-            BackendError::RateLimited(msg) => ApiError::TooManyRequests(msg),
+            BackendError::RateLimited(msg) => ApiError::Throttled(msg),
             BackendError::Transport(msg) => ApiError::ServiceUnavailable(msg),
             BackendError::InvalidRequest(msg) => ApiError::BadRequest(msg),
             BackendError::Timeout => ApiError::GatewayTimeout("Operation timed out".to_string()),
             BackendError::Busy(msg) => ApiError::Conflict(msg),
+            BackendError::UpdateInProgress(msg) => ApiError::UpdateInProgress(msg),
             BackendError::Internal(msg) => ApiError::Internal(msg),
         }
     }
