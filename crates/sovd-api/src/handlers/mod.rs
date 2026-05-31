@@ -3,6 +3,7 @@
 //! These handlers use the DiagnosticBackend trait and are backend-agnostic.
 
 pub mod apps;
+pub mod clear_data;
 pub mod components;
 pub mod data;
 pub mod data_lists;
@@ -12,6 +13,8 @@ pub mod faults;
 pub mod files;
 pub mod flash;
 pub mod logs;
+pub mod logs_ext;
+pub mod meta;
 pub mod modes;
 pub mod operations;
 pub mod outputs;

@@ -40,6 +40,17 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         // Health check
         .route("/health", get(|| async { "OK" }))
+        // Spec §7.4 — version-info is version-INDEPENDENT (constant
+        // path across all API editions) and lists every version this
+        // server serves.  C-005 mandatory.
+        .route("/version-info", get(handlers::meta::version_info))
+        // Spec §7.5 — capability description (online OpenAPI doc)
+        // scoped to the entity path it's read from.  Minimal stub
+        // today; full path-walking emitter tracked separately.
+        .route(
+            "/vehicle/v1/docs",
+            get(handlers::meta::capability_description),
+        )
         // Component routes
         .route(
             "/vehicle/v1/components",
@@ -106,14 +117,38 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/data-lists/{list_id}",
             get(handlers::data_lists::read_data_list).delete(handlers::data_lists::clear_data_list),
         )
-        // Log routes (primarily for HPC and message passing)
+        // Log routes (primarily for HPC and message passing) +
+        // spec §7.21 logs/entries + logs/config sub-resources.
         .route(
             "/vehicle/v1/components/{component_id}/logs",
             get(handlers::logs::get_logs),
         )
         .route(
+            "/vehicle/v1/components/{component_id}/logs/entries",
+            get(handlers::logs_ext::list_log_entries),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/logs/config",
+            get(handlers::logs_ext::get_log_config)
+                .put(handlers::logs_ext::put_log_config)
+                .delete(handlers::logs_ext::reset_log_config),
+        )
+        .route(
             "/vehicle/v1/components/{component_id}/logs/{log_id}",
             get(handlers::logs::get_log).delete(handlers::logs::delete_log),
+        )
+        // Spec §7.13 clear-data collection — stub today.
+        .route(
+            "/vehicle/v1/components/{component_id}/clear-data",
+            get(handlers::clear_data::list_clear_data_types),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/clear-data/status",
+            get(handlers::clear_data::clear_data_status),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/clear-data/{action}",
+            put(handlers::clear_data::clear_data_action),
         )
         // Operation routes — ISO 17978-3 §7.14 executions sub-resource.
         .route(
