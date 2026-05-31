@@ -8,10 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
-use axum::Json;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::BroadcastStream;
@@ -20,31 +18,8 @@ use tokio_stream::StreamExt;
 use crate::error::ApiError;
 use crate::state::AppState;
 
-/// Request to create a subscription
-#[derive(Debug, Deserialize)]
-pub struct CreateSubscriptionRequest {
-    /// Parameter IDs to subscribe to
-    pub parameters: Vec<String>,
-    /// Desired update rate in Hz
-    #[serde(default = "default_rate")]
-    pub rate_hz: u32,
-}
-
 fn default_rate() -> u32 {
     10
-}
-
-/// Response for subscription creation
-#[derive(Debug, Serialize)]
-pub struct SubscriptionResponse {
-    /// Subscription ID
-    pub subscription_id: String,
-    /// URL to connect to the stream
-    pub stream_url: String,
-    /// Parameters included
-    pub parameters: Vec<String>,
-    /// Actual rate in Hz
-    pub rate_hz: u32,
 }
 
 /// Query parameters for inline streaming
@@ -70,45 +45,15 @@ struct StreamEvent {
     values: HashMap<String, serde_json::Value>,
 }
 
-/// POST /vehicle/v1/components/:component_id/subscriptions
-/// Create a new subscription and return subscription details
-pub async fn create_subscription(
-    State(state): State<AppState>,
-    Path(component_id): Path<String>,
-    Json(request): Json<CreateSubscriptionRequest>,
-) -> Result<(StatusCode, Json<SubscriptionResponse>), ApiError> {
-    let backend = state.get_backend(&component_id)?;
-
-    // Create subscription via backend
-    let _receiver = backend
-        .subscribe_data(&request.parameters, request.rate_hz)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    // Generate subscription ID
-    let subscription_id = uuid::Uuid::new_v4().to_string();
-
-    Ok((
-        StatusCode::CREATED,
-        Json(SubscriptionResponse {
-            subscription_id: subscription_id.clone(),
-            stream_url: format!(
-                "/vehicle/v1/components/{}/streams/{}",
-                component_id, subscription_id
-            ),
-            parameters: request.parameters,
-            rate_hz: request.rate_hz,
-        }),
-    ))
-}
-
-/// GET /vehicle/v1/streams/:subscription_id
-/// Stream data for a global subscription (created via /vehicle/v1/subscriptions)
+/// GET /vehicle/v1/components/:component_id/streams/:subscription_id
+///
+/// SSE delivery for a cyclic subscription created via
+/// `POST .../cyclic-subscriptions` (ISO 17978-3 §7.10).
 pub async fn stream_subscription(
     State(state): State<AppState>,
-    Path(subscription_id): Path<String>,
+    Path((component_id, subscription_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // Look up the subscription
+    // Look up the cyclic subscription.
     let subscription = state
         .subscription_manager
         .get(&subscription_id)
@@ -117,33 +62,36 @@ pub async fn stream_subscription(
             ApiError::NotFound(format!("Subscription not found: {}", subscription_id))
         })?;
 
-    // Get the backend for this subscription's component
-    let backend = state.get_backend(&subscription.component_id)?;
-
-    // Resolve parameter names to DID hex strings for the backend
-    // Also build a reverse mapping from DID to parameter name and numeric DID
-    let did_store = state.did_store_arc();
-    let mut dids: Vec<String> = Vec::new();
-    let mut did_to_info: HashMap<String, (String, u16)> = HashMap::new(); // DID str -> (param name, DID u16)
-
-    for param in &subscription.parameters {
-        if let Some(did) = did_store.resolve_did(param) {
-            let did_str = format!("{:04X}", did);
-            dids.push(did_str.clone());
-            did_to_info.insert(did_str, (param.clone(), did));
-        } else {
-            // Try treating as hex DID directly
-            dids.push(param.clone());
-            did_to_info.insert(param.clone(), (param.clone(), 0));
-        }
+    if subscription.component_id != component_id {
+        return Err(ApiError::NotFound(format!(
+            "Subscription {} not registered on component {}",
+            subscription_id, component_id
+        )));
     }
 
-    // Subscribe to data using resolved DIDs
+    let backend = state.get_backend(&subscription.component_id)?;
+
+    // Spec subscriptions carry a single `resource` (path or param-id).
+    // Resolve it against DidStore the same way as the old multi-param
+    // flow — DID hex strings pass through unchanged.
+    let did_store = state.did_store_arc();
+    let mut did_to_info: HashMap<String, (String, u16)> = HashMap::new();
+    let resource_param = subscription.resource.clone();
+    let did_str = if let Some(did) = did_store.resolve_did(&resource_param) {
+        let did_str = format!("{:04X}", did);
+        did_to_info.insert(did_str.clone(), (resource_param.clone(), did));
+        did_str
+    } else {
+        did_to_info.insert(resource_param.clone(), (resource_param.clone(), 0));
+        resource_param.clone()
+    };
+
+    let rate_hz = subscription.interval.rate_hz();
     let receiver = backend
-        .subscribe_data(&dids, subscription.rate_hz)
+        .subscribe_data(std::slice::from_ref(&did_str), rate_hz)
         .await
         .map_err(|e| {
-            tracing::error!(?e, dids = ?dids, rate_hz = subscription.rate_hz, "subscribe_data failed");
+            tracing::error!(?e, did = %did_str, rate_hz, "subscribe_data failed");
             ApiError::from(e)
         })?;
 

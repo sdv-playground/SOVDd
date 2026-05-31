@@ -1,9 +1,29 @@
-//! Global subscription handlers for SOVD API
+//! Cyclic subscription handlers — ISO 17978-3 §7.10.
 //!
-//! Manages subscriptions across all components.
+//! Wire shape:
+//!
+//!   `POST /vehicle/v1/components/{id}/cyclic-subscriptions`
+//!     body: `{resource: "<param-id>", interval, protocol?, duration?}`
+//!     → 201 Created + `Location: …/cyclic-subscriptions/{id}` + the
+//!       created `CyclicSubscription` body.
+//!
+//!   `GET  /vehicle/v1/components/{id}/cyclic-subscriptions`
+//!     → list of `CyclicSubscription`.
+//!
+//!   `GET  /vehicle/v1/components/{id}/cyclic-subscriptions/{id}`
+//!     → `CyclicSubscription`.
+//!
+//!   `DELETE /vehicle/v1/components/{id}/cyclic-subscriptions/{id}`
+//!     → 204 No Content.
+//!
+//! SSE stream delivery happens on a separate `streams` resource
+//! (`GET /vehicle/v1/components/{id}/streams/{subscription_id}`).
+//! Single resource per subscription per spec; for multi-parameter
+//! consumers, open N subscriptions and join the streams client-side.
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::IntoResponse;
 use axum::Json;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -14,10 +34,10 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::state::AppState;
 
-/// Global subscription manager
+/// Manager for per-component cyclic subscriptions.
 #[derive(Debug, Default)]
 pub struct SubscriptionManager {
-    subscriptions: RwLock<HashMap<String, Subscription>>,
+    subscriptions: RwLock<HashMap<String, CyclicSubscription>>,
 }
 
 impl SubscriptionManager {
@@ -27,23 +47,26 @@ impl SubscriptionManager {
         }
     }
 
-    pub async fn create(&self, request: CreateSubscriptionRequest) -> Subscription {
+    pub async fn create(
+        &self,
+        component_id: String,
+        request: CyclicSubscriptionRequest,
+    ) -> CyclicSubscription {
         let subscription_id = Uuid::new_v4().to_string();
         let now = Utc::now();
         let expires_at = request
-            .duration_secs
+            .duration
             .map(|secs| now + Duration::seconds(secs as i64));
 
-        let subscription = Subscription {
+        let subscription = CyclicSubscription {
             subscription_id: subscription_id.clone(),
-            component_id: request.component_id,
-            parameters: request.parameters,
-            rate_hz: request.rate_hz.unwrap_or(10),
-            mode: request.mode.unwrap_or_else(|| "periodic".to_string()),
+            component_id,
+            resource: request.resource,
+            interval: request.interval,
+            protocol: request.protocol.unwrap_or_else(default_protocol),
             status: "active".to_string(),
             created_at: now,
             expires_at,
-            stream_url: format!("/vehicle/v1/streams/{}", subscription_id),
         };
 
         self.subscriptions
@@ -54,7 +77,7 @@ impl SubscriptionManager {
         subscription
     }
 
-    pub async fn get(&self, subscription_id: &str) -> Option<Subscription> {
+    pub async fn get(&self, subscription_id: &str) -> Option<CyclicSubscription> {
         self.subscriptions
             .read()
             .await
@@ -62,8 +85,14 @@ impl SubscriptionManager {
             .cloned()
     }
 
-    pub async fn list(&self) -> Vec<Subscription> {
-        self.subscriptions.read().await.values().cloned().collect()
+    pub async fn list_for_component(&self, component_id: &str) -> Vec<CyclicSubscription> {
+        self.subscriptions
+            .read()
+            .await
+            .values()
+            .filter(|s| s.component_id == component_id)
+            .cloned()
+            .collect()
     }
 
     pub async fn delete(&self, subscription_id: &str) -> bool {
@@ -75,104 +104,127 @@ impl SubscriptionManager {
     }
 }
 
-/// A subscription entry
+/// A cyclic-subscription resource (spec §7.10).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Subscription {
+pub struct CyclicSubscription {
     pub subscription_id: String,
     pub component_id: String,
-    pub parameters: Vec<String>,
-    pub rate_hz: u32,
-    pub mode: String,
+    pub resource: String,
+    pub interval: SubscriptionInterval,
+    pub protocol: String,
     pub status: String,
     pub created_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
-    pub stream_url: String,
 }
 
-/// Request to create a subscription
+/// Spec line 358 — coarse-grained update cadence enum.
+///
+/// Server maps these to concrete polling rates: fast = 20 Hz,
+/// normal = 5 Hz, slow = 1 Hz.  Clients that need a precise rate
+/// should pick `fast` and downsample client-side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SubscriptionInterval {
+    Fast,
+    Normal,
+    Slow,
+}
+
+impl SubscriptionInterval {
+    /// Concrete polling rate this interval maps to.
+    pub fn rate_hz(self) -> u32 {
+        match self {
+            Self::Fast => 20,
+            Self::Normal => 5,
+            Self::Slow => 1,
+        }
+    }
+}
+
+/// Request body for creating a cyclic subscription.
 #[derive(Debug, Deserialize)]
-pub struct CreateSubscriptionRequest {
-    pub component_id: String,
-    pub parameters: Vec<String>,
-    #[serde(default)]
-    pub rate_hz: Option<u32>,
-    #[serde(default)]
-    pub mode: Option<String>,
-    #[serde(default)]
-    pub duration_secs: Option<u64>,
+pub struct CyclicSubscriptionRequest {
+    /// URI-reference to the parameter being subscribed to (e.g.
+    /// `data/coolant_temperature` or `apps/engine_ecu/data/F405`).
+    pub resource: String,
+    /// Polling cadence.
+    pub interval: SubscriptionInterval,
+    /// Stream protocol — defaults to `sse`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    /// Optional auto-expiry in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<u32>,
 }
 
-/// Response for subscription list
+fn default_protocol() -> String {
+    "sse".to_string()
+}
+
 #[derive(Debug, Serialize)]
-pub struct SubscriptionListResponse {
-    pub items: Vec<SubscriptionInfo>,
+pub struct CyclicSubscriptionsResponse {
+    pub items: Vec<CyclicSubscription>,
 }
 
-/// Subscription info for list response
-#[derive(Debug, Serialize)]
-pub struct SubscriptionInfo {
-    pub subscription_id: String,
-    pub component_id: String,
-    pub status: String,
-    pub parameters: Vec<String>,
-    pub stream_url: String,
-}
-
-impl From<&Subscription> for SubscriptionInfo {
-    fn from(s: &Subscription) -> Self {
-        Self {
-            subscription_id: s.subscription_id.clone(),
-            component_id: s.component_id.clone(),
-            status: s.status.clone(),
-            parameters: s.parameters.clone(),
-            stream_url: s.stream_url.clone(),
-        }
-    }
-}
-
-/// POST /vehicle/v1/subscriptions
-/// Create a new subscription
-pub async fn create_subscription(
+/// POST /vehicle/v1/components/:component_id/cyclic-subscriptions
+pub async fn create_cyclic_subscription(
     State(state): State<AppState>,
-    Json(request): Json<CreateSubscriptionRequest>,
-) -> Result<(StatusCode, Json<Subscription>), ApiError> {
-    // Validate component exists
-    let _backend = state.get_backend(&request.component_id)?;
+    Path(component_id): Path<String>,
+    Json(request): Json<CyclicSubscriptionRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    // Validate component exists.
+    let _backend = state.get_backend(&component_id)?;
 
-    // Validate all parameters exist in DidStore
-    let did_store = state.did_store();
-    for param in &request.parameters {
-        if did_store.resolve_did(param).is_none() {
-            return Err(ApiError::NotFound(format!(
-                "Parameter not found: {}",
-                param
-            )));
-        }
+    let subscription = state
+        .subscription_manager
+        .create(component_id.clone(), request)
+        .await;
+
+    let stream_path = format!(
+        "/vehicle/v1/components/{}/streams/{}",
+        component_id, subscription.subscription_id
+    );
+    let resource_path = format!(
+        "/vehicle/v1/components/{}/cyclic-subscriptions/{}",
+        component_id, subscription.subscription_id
+    );
+
+    // Spec: Location header points at the created subscription
+    // resource.  Add an additional `Link` header advertising the SSE
+    // stream (custom but harmless) so clients can discover where to
+    // attach without an extra round-trip.
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::LOCATION,
+        HeaderValue::from_str(&resource_path)
+            .map_err(|e| ApiError::Internal(format!("bad Location header: {e}")))?,
+    );
+    if let Ok(link) = HeaderValue::from_str(&format!("<{}>; rel=\"stream\"", stream_path)) {
+        headers.insert(header::LINK, link);
     }
 
-    let subscription = state.subscription_manager.create(request).await;
-
-    Ok((StatusCode::CREATED, Json(subscription)))
+    Ok((StatusCode::CREATED, headers, Json(subscription)))
 }
 
-/// GET /vehicle/v1/subscriptions
-/// List all subscriptions
-pub async fn list_subscriptions(
+/// GET /vehicle/v1/components/:component_id/cyclic-subscriptions
+pub async fn list_cyclic_subscriptions(
     State(state): State<AppState>,
-) -> Result<Json<SubscriptionListResponse>, ApiError> {
-    let subscriptions = state.subscription_manager.list().await;
-    let items: Vec<SubscriptionInfo> = subscriptions.iter().map(SubscriptionInfo::from).collect();
-
-    Ok(Json(SubscriptionListResponse { items }))
+    Path(component_id): Path<String>,
+) -> Result<Json<CyclicSubscriptionsResponse>, ApiError> {
+    let _backend = state.get_backend(&component_id)?;
+    let items = state
+        .subscription_manager
+        .list_for_component(&component_id)
+        .await;
+    Ok(Json(CyclicSubscriptionsResponse { items }))
 }
 
-/// GET /vehicle/v1/subscriptions/:subscription_id
-/// Get subscription details
-pub async fn get_subscription(
+/// GET /vehicle/v1/components/:component_id/cyclic-subscriptions/:subscription_id
+pub async fn get_cyclic_subscription(
     State(state): State<AppState>,
-    Path(subscription_id): Path<String>,
-) -> Result<Json<Subscription>, ApiError> {
+    Path((_component_id, subscription_id)): Path<(String, String)>,
+) -> Result<Json<CyclicSubscription>, ApiError> {
     state
         .subscription_manager
         .get(&subscription_id)
@@ -181,11 +233,10 @@ pub async fn get_subscription(
         .ok_or_else(|| ApiError::NotFound(format!("Subscription not found: {}", subscription_id)))
 }
 
-/// DELETE /vehicle/v1/subscriptions/:subscription_id
-/// Delete a subscription
-pub async fn delete_subscription(
+/// DELETE /vehicle/v1/components/:component_id/cyclic-subscriptions/:subscription_id
+pub async fn delete_cyclic_subscription(
     State(state): State<AppState>,
-    Path(subscription_id): Path<String>,
+    Path((_component_id, subscription_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     if state.subscription_manager.delete(&subscription_id).await {
         Ok(StatusCode::NO_CONTENT)

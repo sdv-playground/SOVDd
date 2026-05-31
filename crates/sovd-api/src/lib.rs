@@ -257,30 +257,29 @@ pub fn create_router(state: AppState) -> Router {
             get(handlers::sub_entity::get_sub_entity_operation_execution)
                 .delete(handlers::sub_entity::stop_sub_entity_operation_execution),
         )
-        // Component-level streaming routes (SSE for real-time data)
+        // Cyclic subscriptions — ISO 17978-3 §7.10. The subscription
+        // resource itself is component-scoped (one `resource` per sub);
+        // SSE delivery is on the matching `streams/{id}` URL.
         .route(
-            "/vehicle/v1/components/{component_id}/subscriptions",
-            post(handlers::streams::create_subscription),
+            "/vehicle/v1/components/{component_id}/cyclic-subscriptions",
+            get(handlers::subscriptions::list_cyclic_subscriptions)
+                .post(handlers::subscriptions::create_cyclic_subscription),
         )
+        .route(
+            "/vehicle/v1/components/{component_id}/cyclic-subscriptions/{subscription_id}",
+            get(handlers::subscriptions::get_cyclic_subscription)
+                .delete(handlers::subscriptions::delete_cyclic_subscription),
+        )
+        // SSE stream delivery for a cyclic subscription.
+        .route(
+            "/vehicle/v1/components/{component_id}/streams/{subscription_id}",
+            get(handlers::streams::stream_subscription),
+        )
+        // Inline `streams` reader (non-spec convenience kept for the
+        // query-style "subscribe without state" use case).
         .route(
             "/vehicle/v1/components/{component_id}/streams",
             get(handlers::streams::stream_data),
-        )
-        // Global subscription routes
-        .route(
-            "/vehicle/v1/subscriptions",
-            get(handlers::subscriptions::list_subscriptions)
-                .post(handlers::subscriptions::create_subscription),
-        )
-        .route(
-            "/vehicle/v1/subscriptions/{subscription_id}",
-            get(handlers::subscriptions::get_subscription)
-                .delete(handlers::subscriptions::delete_subscription),
-        )
-        // Global stream routes (for subscriptions created via /vehicle/v1/subscriptions)
-        .route(
-            "/vehicle/v1/streams/{subscription_id}",
-            get(handlers::streams::stream_subscription),
         )
         // ECU Reset — ISO 17978-3 §7.19. PUT returns 202 + Location to
         // the status sub-resource; the GET on the sub-resource is a stub

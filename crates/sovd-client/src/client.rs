@@ -1083,70 +1083,75 @@ impl SovdClient {
     // Streaming / Subscriptions
     // =========================================================================
 
-    /// Create a subscription for periodic data
+    /// Create a cyclic subscription (ISO 17978-3 §7.10).
+    ///
+    /// Wire: `POST /components/{id}/cyclic-subscriptions`
+    /// → 201 + `Location` header + `CyclicSubscription` body.
+    ///
+    /// Spec model is single-resource-per-subscription.  For
+    /// multi-parameter consumers, open N subscriptions and join the
+    /// streams client-side.
     #[instrument(skip(self))]
-    pub async fn create_subscription(
+    pub async fn create_cyclic_subscription(
         &self,
         component_id: &str,
-        parameters: Vec<String>,
-        rate_hz: u32,
-    ) -> Result<SubscriptionResponse> {
+        resource: &str,
+        interval: SubscriptionInterval,
+    ) -> Result<CyclicSubscription> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/subscriptions",
+            "/vehicle/v1/components/{}/cyclic-subscriptions",
             component_id
         ))?;
-
-        let request = SubscriptionRequest {
-            parameters,
-            rate_hz,
-            mode: Some("periodic".into()),
-            duration_secs: None,
+        let request = CyclicSubscriptionRequest {
+            resource: resource.to_string(),
+            interval,
+            protocol: None,
+            duration: None,
         };
-
         let response = self.client.post(url).json(&request).send().await?;
         self.handle_response(response).await
     }
 
-    /// List all subscriptions for a component
+    /// List cyclic subscriptions for a component.
     #[instrument(skip(self))]
-    pub async fn list_subscriptions(&self, component_id: &str) -> Result<SubscriptionListResponse> {
+    pub async fn list_cyclic_subscriptions(
+        &self,
+        component_id: &str,
+    ) -> Result<CyclicSubscriptionsResponse> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/subscriptions",
+            "/vehicle/v1/components/{}/cyclic-subscriptions",
             component_id
         ))?;
-
         let response = self.client.get(url).send().await?;
         self.handle_response(response).await
     }
 
-    /// Get a specific subscription
+    /// Get a specific cyclic subscription.
     #[instrument(skip(self))]
-    pub async fn get_subscription(
+    pub async fn get_cyclic_subscription(
         &self,
         component_id: &str,
         subscription_id: &str,
-    ) -> Result<SubscriptionResponse> {
+    ) -> Result<CyclicSubscription> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/subscriptions/{}",
+            "/vehicle/v1/components/{}/cyclic-subscriptions/{}",
             component_id, subscription_id
         ))?;
-
         let response = self.client.get(url).send().await?;
         self.handle_response(response).await
     }
 
-    /// Delete a subscription
+    /// Delete a cyclic subscription.
     #[instrument(skip(self))]
-    pub async fn delete_subscription(
+    pub async fn delete_cyclic_subscription(
         &self,
         component_id: &str,
         subscription_id: &str,
     ) -> Result<()> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/subscriptions/{}",
+            "/vehicle/v1/components/{}/cyclic-subscriptions/{}",
             component_id, subscription_id
         ))?;
-
         let response = self.client.delete(url).send().await?;
         if response.status().is_success() {
             Ok(())
@@ -1185,32 +1190,35 @@ impl SovdClient {
     ///     }
     /// }
     /// ```
-    #[instrument(skip(self, parameters))]
+    #[instrument(skip(self))]
     pub async fn subscribe(
         &self,
         component_id: &str,
-        parameters: Vec<String>,
-        rate_hz: u32,
+        resource: &str,
+        interval: SubscriptionInterval,
     ) -> Result<crate::streaming::Subscription> {
         use crate::streaming::Subscription;
 
-        // Create the subscription
         let response = self
-            .create_subscription(component_id, parameters, rate_hz)
+            .create_cyclic_subscription(component_id, resource, interval)
             .await?;
 
-        // Connect to the stream
-        let subscription = Subscription::connect(
+        // Cyclic subscriptions deliver SSE on the matching `streams/{id}`
+        // path (per the Link header SOVDd emits — we derive it locally).
+        let stream_url = format!(
+            "/vehicle/v1/components/{}/streams/{}",
+            component_id, response.subscription_id
+        );
+
+        Subscription::connect(
             self.base_url.clone(),
             self.client.clone(),
             response.subscription_id,
             Some(component_id.to_string()),
-            &response.stream_url,
+            &stream_url,
         )
         .await
-        .map_err(|e| SovdClientError::StreamError(e.to_string()))?;
-
-        Ok(subscription)
+        .map_err(|e| SovdClientError::StreamError(e.to_string()))
     }
 
     /// Subscribe using inline parameters (no subscription ID, direct stream)
@@ -1255,65 +1263,9 @@ impl SovdClient {
         Ok(subscription)
     }
 
-    // =========================================================================
-    // Global Subscription Management (flat namespace)
-    // =========================================================================
-
-    /// Create a global subscription (component_id in body)
-    #[instrument(skip(self))]
-    pub async fn create_global_subscription(
-        &self,
-        component_id: &str,
-        parameters: Vec<String>,
-        rate_hz: u32,
-    ) -> Result<GlobalSubscriptionResponse> {
-        let url = self.base_url.join("/vehicle/v1/subscriptions")?;
-
-        let body = serde_json::json!({
-            "component_id": component_id,
-            "parameters": parameters,
-            "rate_hz": rate_hz,
-            "mode": "periodic"
-        });
-
-        let response = self.client.post(url).json(&body).send().await?;
-        self.handle_response(response).await
-    }
-
-    /// List all global subscriptions
-    #[instrument(skip(self))]
-    pub async fn list_global_subscriptions(&self) -> Result<GlobalSubscriptionListResponse> {
-        let url = self.base_url.join("/vehicle/v1/subscriptions")?;
-        let response = self.client.get(url).send().await?;
-        self.handle_response(response).await
-    }
-
-    /// Get a global subscription by ID
-    #[instrument(skip(self))]
-    pub async fn get_global_subscription(
-        &self,
-        subscription_id: &str,
-    ) -> Result<GlobalSubscriptionResponse> {
-        let url = self
-            .base_url
-            .join(&format!("/vehicle/v1/subscriptions/{}", subscription_id))?;
-        let response = self.client.get(url).send().await?;
-        self.handle_response(response).await
-    }
-
-    /// Delete a global subscription
-    #[instrument(skip(self))]
-    pub async fn delete_global_subscription(&self, subscription_id: &str) -> Result<()> {
-        let url = self
-            .base_url
-            .join(&format!("/vehicle/v1/subscriptions/{}", subscription_id))?;
-        let response = self.client.delete(url).send().await?;
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(self.extract_error(response).await)
-        }
-    }
+    // Global flat-namespace subscriptions were a non-spec pre-Phase-E
+    // convenience; they're gone now.  Use cyclic_subscription methods
+    // above per ISO 17978-3 §7.10.
 
     // =========================================================================
     // Dynamic Data Identifiers (DDID)

@@ -404,30 +404,50 @@ pub struct AppsResponse {
 }
 
 // =============================================================================
-// Subscription/Stream Types
+// Cyclic-subscription Types — ISO 17978-3 §7.10
 // =============================================================================
 
-/// Subscription request
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubscriptionRequest {
-    pub parameters: Vec<String>,
-    #[serde(default = "default_rate")]
-    pub rate_hz: u32,
-    #[serde(default)]
-    pub mode: Option<String>,
-    #[serde(default)]
-    pub duration_secs: Option<u64>,
+/// Spec line 358 — coarse polling cadence.  Server maps these to
+/// concrete rates (fast=20 Hz / normal=5 Hz / slow=1 Hz on SOVDd).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SubscriptionInterval {
+    Fast,
+    Normal,
+    Slow,
 }
 
-fn default_rate() -> u32 {
-    1
+/// Request body for `POST .../cyclic-subscriptions`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CyclicSubscriptionRequest {
+    /// URI-reference to the subscribed parameter.
+    pub resource: String,
+    pub interval: SubscriptionInterval,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<u32>,
 }
 
-/// Subscription response
+/// Created cyclic subscription (mirror of the server's
+/// `CyclicSubscription`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubscriptionResponse {
+pub struct CyclicSubscription {
     pub subscription_id: String,
-    pub stream_url: String,
+    pub component_id: String,
+    pub resource: String,
+    pub interval: SubscriptionInterval,
+    pub protocol: String,
+    pub status: String,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+/// List response for `GET .../cyclic-subscriptions`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CyclicSubscriptionsResponse {
+    pub items: Vec<CyclicSubscription>,
 }
 
 // =============================================================================
@@ -778,44 +798,6 @@ pub struct OutputControlResponse {
     /// Error message (if failed)
     #[serde(default)]
     pub error: Option<String>,
-}
-
-// =============================================================================
-// Subscription List Response
-// =============================================================================
-
-/// Subscription list response (component-level)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubscriptionListResponse {
-    pub subscriptions: Vec<SubscriptionResponse>,
-}
-
-// =============================================================================
-// Global Subscription Types (flat namespace)
-// =============================================================================
-
-/// Global subscription response
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GlobalSubscriptionResponse {
-    pub subscription_id: String,
-    /// Stream URL for connecting to the subscription
-    pub stream_url: String,
-    /// Component ID
-    #[serde(default)]
-    pub component_id: Option<String>,
-    /// Parameters
-    #[serde(default)]
-    pub parameters: Option<Vec<String>>,
-    #[serde(default)]
-    pub rate_hz: Option<u32>,
-    #[serde(default)]
-    pub status: Option<String>,
-}
-
-/// Global subscription list response
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GlobalSubscriptionListResponse {
-    pub items: Vec<GlobalSubscriptionResponse>,
 }
 
 // =============================================================================

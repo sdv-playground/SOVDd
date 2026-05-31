@@ -874,123 +874,115 @@ async fn test_read_nonexistent_parameter() {
 }
 
 // =============================================================================
-// Subscription API Tests
+// Cyclic-subscription API tests — ISO 17978-3 §7.10
 // =============================================================================
 
-/// Test creating a subscription with PUBLIC DIDs only
+/// Test creating a cyclic subscription with a PUBLIC DID
 #[tokio::test]
 #[serial_test::serial]
 async fn test_create_subscription() {
+    use sovd_client::SubscriptionInterval;
+
     let harness = TestHarness::new()
         .await
         .expect("Failed to setup test harness");
     let client = harness.sovd_client();
 
-    // Use PUBLIC DIDs only - no session setup needed
     let sub = client
-        .create_global_subscription(
-            "vtx_ecm",
-            vec!["vehicle_speed".to_string(), "coolant_temp".to_string()],
-            1,
-        )
+        .create_cyclic_subscription("vtx_ecm", "vehicle_speed", SubscriptionInterval::Slow)
         .await
-        .expect("create_global_subscription failed");
+        .expect("create_cyclic_subscription failed");
 
     assert!(!sub.subscription_id.is_empty(), "Expected subscription_id");
-    assert!(!sub.stream_url.is_empty(), "Expected stream_url");
+    assert_eq!(sub.resource, "vehicle_speed");
+    assert_eq!(sub.interval, SubscriptionInterval::Slow);
 
-    // Clean up - delete the subscription
     client
-        .delete_global_subscription(&sub.subscription_id)
+        .delete_cyclic_subscription("vtx_ecm", &sub.subscription_id)
         .await
-        .expect("delete_global_subscription failed");
+        .expect("delete_cyclic_subscription failed");
 }
 
 #[tokio::test]
 #[serial_test::serial]
 async fn test_list_subscriptions() {
+    use sovd_client::SubscriptionInterval;
+
     let harness = TestHarness::new()
         .await
         .expect("Failed to setup test harness");
     let client = harness.sovd_client();
 
-    // Create a subscription first (PUBLIC DID only)
     let sub = client
-        .create_global_subscription("vtx_ecm", vec!["vehicle_speed".to_string()], 1)
+        .create_cyclic_subscription("vtx_ecm", "vehicle_speed", SubscriptionInterval::Slow)
         .await
-        .expect("create_global_subscription failed");
+        .expect("create_cyclic_subscription failed");
 
-    // List subscriptions
     let list = client
-        .list_global_subscriptions()
+        .list_cyclic_subscriptions("vtx_ecm")
         .await
-        .expect("list_global_subscriptions failed");
+        .expect("list_cyclic_subscriptions failed");
 
     assert!(!list.items.is_empty(), "Expected at least one subscription");
 
-    // Clean up
     client
-        .delete_global_subscription(&sub.subscription_id)
+        .delete_cyclic_subscription("vtx_ecm", &sub.subscription_id)
         .await
-        .expect("delete_global_subscription failed");
+        .expect("delete_cyclic_subscription failed");
 }
 
 #[tokio::test]
 #[serial_test::serial]
 async fn test_get_subscription() {
+    use sovd_client::SubscriptionInterval;
+
     let harness = TestHarness::new()
         .await
         .expect("Failed to setup test harness");
     let client = harness.sovd_client();
 
-    // Create a subscription first (PUBLIC DIDs only)
     let sub = client
-        .create_global_subscription(
-            "vtx_ecm",
-            vec!["vehicle_speed".to_string(), "coolant_temp".to_string()],
-            5,
-        )
+        .create_cyclic_subscription("vtx_ecm", "coolant_temp", SubscriptionInterval::Normal)
         .await
-        .expect("create_global_subscription failed");
+        .expect("create_cyclic_subscription failed");
 
-    // Get subscription details
     let details = client
-        .get_global_subscription(&sub.subscription_id)
+        .get_cyclic_subscription("vtx_ecm", &sub.subscription_id)
         .await
-        .expect("get_global_subscription failed");
+        .expect("get_cyclic_subscription failed");
 
     assert_eq!(details.subscription_id, sub.subscription_id);
-    assert_eq!(details.rate_hz, Some(5));
+    assert_eq!(details.interval, SubscriptionInterval::Normal);
 
-    // Clean up
     client
-        .delete_global_subscription(&sub.subscription_id)
+        .delete_cyclic_subscription("vtx_ecm", &sub.subscription_id)
         .await
-        .expect("delete_global_subscription failed");
+        .expect("delete_cyclic_subscription failed");
 }
 
 #[tokio::test]
 #[serial_test::serial]
 async fn test_delete_subscription() {
+    use sovd_client::SubscriptionInterval;
+
     let harness = TestHarness::new()
         .await
         .expect("Failed to setup test harness");
     let client = harness.sovd_client();
 
-    // Create a subscription (PUBLIC DID only)
     let sub = client
-        .create_global_subscription("vtx_ecm", vec!["vehicle_speed".to_string()], 1)
+        .create_cyclic_subscription("vtx_ecm", "vehicle_speed", SubscriptionInterval::Slow)
         .await
-        .expect("create_global_subscription failed");
+        .expect("create_cyclic_subscription failed");
 
-    // Delete it
     client
-        .delete_global_subscription(&sub.subscription_id)
+        .delete_cyclic_subscription("vtx_ecm", &sub.subscription_id)
         .await
-        .expect("delete_global_subscription failed");
+        .expect("delete_cyclic_subscription failed");
 
-    // Verify it's gone - should get error
-    let result = client.get_global_subscription(&sub.subscription_id).await;
+    let result = client
+        .get_cyclic_subscription("vtx_ecm", &sub.subscription_id)
+        .await;
     assert!(result.is_err(), "Expected error for deleted subscription");
 }
 
@@ -1012,33 +1004,22 @@ async fn test_invalid_component_id() {
 
 #[tokio::test]
 #[serial_test::serial]
-async fn test_subscription_invalid_parameter() {
-    let harness = TestHarness::new()
-        .await
-        .expect("Failed to setup test harness");
-    let client = harness.sovd_client();
-
-    let result = client
-        .create_global_subscription("vtx_ecm", vec!["nonexistent_param".to_string()], 1)
-        .await;
-
-    // Should fail with error (parameter not found)
-    assert!(result.is_err(), "Expected error for nonexistent parameter");
-}
-
-#[tokio::test]
-#[serial_test::serial]
 async fn test_subscription_invalid_ecu() {
+    use sovd_client::SubscriptionInterval;
+
     let harness = TestHarness::new()
         .await
         .expect("Failed to setup test harness");
     let client = harness.sovd_client();
 
     let result = client
-        .create_global_subscription("nonexistent_ecu", vec!["vehicle_speed".to_string()], 1)
+        .create_cyclic_subscription(
+            "nonexistent_ecu",
+            "vehicle_speed",
+            SubscriptionInterval::Slow,
+        )
         .await;
 
-    // Should fail with error (ECU not found)
     assert!(result.is_err(), "Expected error for nonexistent ECU");
 }
 
@@ -1154,33 +1135,16 @@ async fn test_sse_stream_periodic_data() {
         .await
         .expect("Failed to setup test harness");
 
-    // Create a subscription with periodic mode for PUBLIC DIDs only
-    let body = serde_json::json!({
-        "component_id": "vtx_ecm",
-        "parameters": ["vehicle_speed", "coolant_temp", "engine_load"],
-        "rate_hz": 10,  // 10Hz = 100ms intervals
-        "mode": "periodic",
-        "duration_secs": 30
-    });
-
-    let (status, create_json) = harness
-        .post("/vehicle/v1/subscriptions", body)
-        .await
-        .expect("POST failed");
-
-    assert_eq!(status, 201, "Expected 201 Created");
-    let sub_id = create_json["subscription_id"].as_str().unwrap();
-    let stream_url = create_json["stream_url"].as_str().unwrap();
-
-    eprintln!("Created subscription: {}", sub_id);
-    eprintln!("Stream URL: {}", stream_url);
-
-    // Connect to SSE stream
+    // Open an inline SSE stream for multiple parameters — spec
+    // cyclic-subscriptions are single-resource per sub; for multi-param
+    // streaming we use the inline query-style endpoint that joins N
+    // params into one stream.
     let stream_url = format!(
-        "http://localhost:{}{}",
-        TestHarness::SERVER_PORT,
-        stream_url
+        "http://localhost:{}/vehicle/v1/components/vtx_ecm/streams?parameters=vehicle_speed,coolant_temp,engine_load&rate_hz=10",
+        TestHarness::SERVER_PORT
     );
+
+    eprintln!("Stream URL: {}", stream_url);
 
     let client = reqwest::Client::new();
     let response = client
@@ -1269,12 +1233,7 @@ async fn test_sse_stream_periodic_data() {
         events_received
     );
 
-    // Clean up subscription
-    harness
-        .delete(&format!("/vehicle/v1/subscriptions/{}", sub_id))
-        .await
-        .expect("DELETE failed");
-
+    // Inline streams close on client disconnect — no cleanup needed.
     eprintln!("Test completed - SSE endpoint is functional");
 }
 
@@ -1636,49 +1595,22 @@ async fn test_sse_stream_mixed_access_levels() {
         .expect("security_access_send_key failed");
     eprintln!("Security access granted");
 
-    // Step 3: Create subscription with parameters from ALL access levels
-    eprintln!("=== Step 3: Creating mixed-access subscription ===");
-
-    // Public DIDs: vehicle_speed, coolant_temp
-    // Extended DIDs: engine_rpm, oil_pressure
-    // Protected DIDs: boost_pressure, throttle_position
-    let body = serde_json::json!({
-        "component_id": "vtx_ecm",
-        "parameters": [
-            "vehicle_speed",    // Public
-            "coolant_temp",     // Public
-            "engine_rpm",       // Extended
-            "oil_pressure",     // Extended
-            "boost_pressure",   // Protected
-            "throttle_position" // Protected
-        ],
-        "rate_hz": 10,
-        "mode": "periodic",
-        "duration_secs": 30
-    });
-
-    let (status, create_json) = harness
-        .post("/vehicle/v1/subscriptions", body)
-        .await
-        .expect("POST subscription failed");
-
-    assert_eq!(
-        status, 201,
-        "Expected 201 Created, got {}: {:?}",
-        status, create_json
+    // Step 3: Open an SSE stream subscribing to parameters from ALL
+    // access levels.  Spec cyclic-subscriptions are single-resource,
+    // so for this multi-param test we use the inline streaming path
+    // (`/components/{id}/streams?parameters=...`) which keeps the
+    // SSE-end-to-end behaviour we want to exercise here.
+    eprintln!("=== Step 3: Opening mixed-access SSE stream ===");
+    // Public: vehicle_speed, coolant_temp
+    // Extended: engine_rpm, oil_pressure
+    // Protected: boost_pressure, throttle_position
+    let stream_url = format!(
+        "http://localhost:{}/vehicle/v1/components/vtx_ecm/streams?parameters=vehicle_speed,coolant_temp,engine_rpm,oil_pressure,boost_pressure,throttle_position&rate_hz=10",
+        TestHarness::SERVER_PORT
     );
-    let sub_id = create_json["subscription_id"].as_str().unwrap();
-    let stream_url = create_json["stream_url"].as_str().unwrap();
-    eprintln!("Subscription created: {}", sub_id);
-    eprintln!("Stream URL: {}", stream_url);
 
     // Step 4: Connect to SSE stream and verify data from all access levels
     eprintln!("=== Step 4: Connecting to SSE stream ===");
-    let stream_url = format!(
-        "http://localhost:{}{}",
-        TestHarness::SERVER_PORT,
-        stream_url
-    );
 
     let http_client = reqwest::Client::new();
     let response = http_client
@@ -1788,12 +1720,9 @@ async fn test_sse_stream_mixed_access_levels() {
     eprintln!("Extended DIDs received: {}", extended_received);
     eprintln!("Protected DIDs received: {}", protected_received);
 
-    // Clean up subscription
-    client
-        .delete_global_subscription(sub_id)
-        .await
-        .expect("delete_global_subscription failed");
-    eprintln!("Subscription cleaned up");
+    // No subscription resource to clean up — inline streams close
+    // automatically when the client disconnects.
+    eprintln!("Stream closed");
 
     // Assert all access levels were covered
     assert!(

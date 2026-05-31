@@ -22,7 +22,10 @@ pub async fn monitor(
     ));
     ctx.info("Press Ctrl+C to stop");
 
-    let mut subscription = client.subscribe(ecu, params.clone(), rate).await?;
+    // The CLI subscribes to multiple parameters at once — spec model is
+    // single-resource-per-subscription, so use the inline query-style
+    // stream that lets us join N params into one SSE stream.
+    let mut subscription = client.subscribe_inline(ecu, params.clone(), rate).await?;
 
     // Set up Ctrl+C handler
     let running = Arc::new(AtomicBool::new(true));
