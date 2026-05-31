@@ -170,7 +170,12 @@ const PATHS: &[PathEntry] = &[
     PathEntry {
         method: "GET",
         path: "/vehicle/v1/components/{component_id}/operations",
-        summary: "List operations (§7.14).",
+        summary: "List operations (§7.14). Includes IO controls (C-133).",
+    },
+    PathEntry {
+        method: "GET",
+        path: "/vehicle/v1/components/{component_id}/operations/{operation_id}",
+        summary: "Get operation detail (IO state for outputs).",
     },
     PathEntry {
         method: "POST",
@@ -189,22 +194,7 @@ const PATHS: &[PathEntry] = &[
             "/vehicle/v1/components/{component_id}/operations/{operation_id}/executions/{exec_id}",
         summary: "Stop an execution — 204.",
     },
-    // outputs (non-spec; move to operations in a follow-up)
-    PathEntry {
-        method: "GET",
-        path: "/vehicle/v1/components/{component_id}/outputs",
-        summary: "List I/O controls (UDS 0x2F).",
-    },
-    PathEntry {
-        method: "GET",
-        path: "/vehicle/v1/components/{component_id}/outputs/{output_id}",
-        summary: "Read I/O state.",
-    },
-    PathEntry {
-        method: "POST",
-        path: "/vehicle/v1/components/{component_id}/outputs/{output_id}",
-        summary: "Control an output.",
-    },
+    // I/O controls share the /operations collection (ISO 17978-3 C-133).
     // logs (§7.21)
     PathEntry {
         method: "GET",

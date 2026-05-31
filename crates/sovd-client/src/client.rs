@@ -18,6 +18,38 @@ fn encode_path_segment(id: &str) -> String {
     id.replace('/', "%2F")
 }
 
+/// Convert an `/operations` entry (IO control flavor) into the
+/// legacy `OutputInfo` shape used by callers.
+fn operation_to_output(op: OperationInfo) -> OutputInfo {
+    let href = Some(format!("operations/{}", op.id));
+    OutputInfo {
+        id: op.id,
+        name: Some(op.name),
+        description: op.description,
+        data_type: op.data_type,
+        control_types: op.control_types,
+        href,
+        current_value: op.current_value,
+        default_value: None,
+        value: op.value,
+        default: op.default,
+        allowed: if op.allowed.is_empty() {
+            None
+        } else {
+            Some(
+                op.allowed
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            )
+        },
+        controlled_by_tester: op.controlled_by_tester,
+        frozen: op.frozen,
+        requires_security: Some(op.requires_security),
+        security_level: Some(op.security_level),
+    }
+}
+
 /// Default request timeout
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default connection timeout
@@ -671,7 +703,7 @@ impl SovdClient {
         ))?;
 
         let request = StartExecutionRequest {
-            parameters: parameters.map(|s| s.to_string()),
+            parameters: parameters.map(|s| serde_json::Value::String(s.to_string())),
         };
         let response = self.client.post(url).json(&request).send().await?;
         self.handle_response(response).await
@@ -784,7 +816,12 @@ impl SovdClient {
     // I/O Control / Outputs
     // =========================================================================
 
-    /// Control an output/actuator
+    /// Control an output/actuator.
+    ///
+    /// Outputs are exposed under `/operations` per ISO 17978-3 C-133
+    /// (UDS InputOutputControl folds into the operations collection).
+    /// This wrapper posts to the operation's executions sub-resource with
+    /// an `{action, value?}` parameters object.
     ///
     /// # Arguments
     /// * `component_id` - Component ID
@@ -800,46 +837,78 @@ impl SovdClient {
         value: Option<serde_json::Value>,
     ) -> Result<OutputControlResponse> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/outputs/{}",
+            "/vehicle/v1/components/{}/operations/{}/executions",
             component_id,
             encode_path_segment(output_id)
         ))?;
 
-        let mut body = serde_json::json!({
-            "action": action
-        });
+        let mut params = serde_json::json!({ "action": action });
         if let Some(v) = value {
-            body["value"] = v;
+            params["value"] = v;
         }
+        let body = serde_json::json!({ "parameters": params });
 
         let response = self.client.post(url).json(&body).send().await?;
-        self.handle_response(response).await
+        // Server wraps the IO control result inside an OperationExecution
+        // (executions sub-resource shape).  Unwrap `result` back to the
+        // legacy OutputControlResponse for caller compatibility.
+        let exec: OperationExecution = self.handle_response(response).await?;
+        let result = exec.result.ok_or_else(|| {
+            SovdClientError::ParseError("control_output: missing result in execution".into())
+        })?;
+        serde_json::from_value(result)
+            .map_err(|e| SovdClientError::ParseError(format!("control_output: {}", e)))
     }
 
-    /// List available outputs for a component
+    /// List available outputs for a component.
+    ///
+    /// Filters `/operations` for entries that carry an `output_id`
+    /// (the IO control marker set by the server).
     #[instrument(skip(self))]
     pub async fn list_outputs(&self, component_id: &str) -> Result<Vec<OutputInfo>> {
-        let url = self
-            .base_url
-            .join(&format!("/vehicle/v1/components/{}/outputs", component_id))?;
+        use crate::types::OperationInfo;
+        let url = self.base_url.join(&format!(
+            "/vehicle/v1/components/{}/operations",
+            component_id
+        ))?;
 
         let response = self.client.get(url).send().await?;
-        self.handle_response::<OutputsResponse>(response)
-            .await
-            .map(|r| r.items)
+        #[derive(serde::Deserialize)]
+        struct OperationsList {
+            items: Vec<OperationInfo>,
+        }
+        let resp: OperationsList = self.handle_response(response).await?;
+        let outputs: Vec<OutputInfo> = resp
+            .items
+            .into_iter()
+            .filter(|op| op.output_id.is_some())
+            .map(operation_to_output)
+            .collect();
+        Ok(outputs)
     }
 
-    /// Get detailed information about a specific output
+    /// Get detailed information about a specific output.
+    ///
+    /// Routes to `GET /operations/{id}`; the server returns IO control
+    /// fields populated for outputs.
     #[instrument(skip(self))]
     pub async fn get_output(&self, component_id: &str, output_id: &str) -> Result<OutputInfo> {
+        use crate::types::OperationInfo;
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/outputs/{}",
+            "/vehicle/v1/components/{}/operations/{}",
             component_id,
             encode_path_segment(output_id)
         ))?;
 
         let response = self.client.get(url).send().await?;
-        self.handle_response(response).await
+        let op: OperationInfo = self.handle_response(response).await?;
+        if op.output_id.is_none() {
+            return Err(SovdClientError::server_error(
+                404,
+                format!("operation {} is not an output (no output_id)", output_id),
+            ));
+        }
+        Ok(operation_to_output(op))
     }
 
     // =========================================================================

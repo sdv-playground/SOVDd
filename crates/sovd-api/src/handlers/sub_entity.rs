@@ -863,15 +863,10 @@ pub async fn list_sub_entity_operations(
     );
     let items: Vec<OperationInfoResponse> = operations
         .iter()
-        .map(|op| OperationInfoResponse {
-            id: op.id.clone(),
-            name: op.name.clone(),
-            translation_id: None,
-            description: op.description.clone(),
-            description_translation_id: None,
-            requires_security: op.requires_security,
-            security_level: op.security_level,
-            href: format!("{}/{}/executions", base, op.id),
+        .map(OperationInfoResponse::from)
+        .map(|mut info| {
+            info.href = format!("{}/{}/executions", base, info.id);
+            info
         })
         .collect();
 

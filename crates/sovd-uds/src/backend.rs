@@ -695,7 +695,10 @@ impl DiagnosticBackend for UdsBackend {
                 output_id: o.ioid.clone(),
                 requires_security: o.security_level > 0,
                 security_level: o.security_level,
-                href: format!("/vehicle/v1/components/{}/outputs/{}", self.config.id, o.id),
+                href: format!(
+                    "/vehicle/v1/components/{}/operations/{}",
+                    self.config.id, o.id
+                ),
                 data_type: None,
                 unit: None,
             })

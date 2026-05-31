@@ -51,19 +51,77 @@ pub struct OperationInfoResponse {
     pub requires_security: bool,
     pub security_level: u8,
     pub href: String,
+
+    // ----------------------------------------------------------------
+    // UDS 0x2F IO control extras — populated only for operations whose
+    // backend representation is an output, not a RoutineControl.
+    // These are vendor-shaped fields (spec is permissive about
+    // additional attributes per §5.10).
+    // ----------------------------------------------------------------
+    /// UDS DID in hex (e.g. `"F206"`); present for IO control ops.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_id: Option<String>,
+    /// Decoded data type (`"uint8"`, `"float32"`, …) when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_type: Option<String>,
+    /// Allowed values for enum-typed outputs.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub allowed: Vec<String>,
+    /// Supported IO control actions: `return_to_ecu`, `reset_to_default`,
+    /// `freeze`, `short_term_adjust`.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub control_types: Vec<String>,
+    /// Current raw value as hex string (populated on `op.read` for
+    /// outputs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_value: Option<String>,
+    /// Current typed value (decoded via output config) when `op.read`
+    /// is called on an output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    /// Default value (after `reset_to_default`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+    /// `true` when the tester currently owns the output (UDS 0x2F).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub controlled_by_tester: Option<bool>,
+    /// `true` when the value is frozen via `freeze_current_state`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frozen: Option<bool>,
+}
+
+fn default_operation_response() -> OperationInfoResponse {
+    OperationInfoResponse {
+        id: String::new(),
+        name: String::new(),
+        translation_id: None,
+        description: None,
+        description_translation_id: None,
+        requires_security: false,
+        security_level: 0,
+        href: String::new(),
+        output_id: None,
+        data_type: None,
+        allowed: Vec::new(),
+        control_types: Vec::new(),
+        current_value: None,
+        value: None,
+        default: None,
+        controlled_by_tester: None,
+        frozen: None,
+    }
 }
 
 impl From<&OperationInfo> for OperationInfoResponse {
     fn from(op: &OperationInfo) -> Self {
-        Self {
+        OperationInfoResponse {
             id: op.id.clone(),
             name: op.name.clone(),
-            translation_id: None,
             description: op.description.clone(),
-            description_translation_id: None,
             requires_security: op.requires_security,
             security_level: op.security_level,
             href: op.href.clone(),
+            ..default_operation_response()
         }
     }
 }
@@ -109,27 +167,97 @@ pub async fn list_operations(
         .map(|op| OperationInfoResponse {
             id: op.id.clone(),
             name: op.name.clone(),
-            translation_id: None,
             description: op.description.clone(),
-            description_translation_id: None,
             requires_security: op.requires_security,
             security_level: op.security_level,
             href: format!("{}/{}/executions", base, op.id),
+            ..default_operation_response()
         })
         .collect();
 
     items.extend(outputs.iter().map(|out| OperationInfoResponse {
         id: out.id.clone(),
         name: out.name.clone(),
-        translation_id: None,
         description: Some(format!("IO control (UDS 0x2F DID {})", out.output_id)),
-        description_translation_id: None,
         requires_security: out.requires_security,
         security_level: out.security_level,
         href: format!("{}/{}/executions", base, out.id),
+        output_id: Some(out.output_id.clone()),
+        ..default_operation_response()
     }));
 
     Ok(Json(OperationsResponse { items }))
+}
+
+/// GET /vehicle/v1/components/:component_id/operations/:operation_id
+///
+/// Spec §7.14 `op.read` — capability description for a single
+/// operation.  For IO control (UDS 0x2F) operations we attach the
+/// rich state (current value, default, allowed, controlled_by_tester,
+/// frozen) so clients don't need a second round-trip.
+pub async fn get_operation(
+    State(state): State<AppState>,
+    Path((component_id, operation_id)): Path<(String, String)>,
+) -> Result<Json<OperationInfoResponse>, ApiError> {
+    let backend = state.get_backend(&component_id)?;
+    let base = format!("/vehicle/v1/components/{}/operations", component_id);
+    let href = format!("{}/{}/executions", base, operation_id);
+
+    // RoutineControl path: pluck from list_operations.
+    let routines = backend.list_operations().await.unwrap_or_default();
+    if let Some(op) = routines.iter().find(|o| o.id == operation_id) {
+        return Ok(Json(OperationInfoResponse {
+            id: op.id.clone(),
+            name: op.name.clone(),
+            description: op.description.clone(),
+            requires_security: op.requires_security,
+            security_level: op.security_level,
+            href,
+            ..default_operation_response()
+        }));
+    }
+
+    // IO control path: enrich with output detail + per-component
+    // config (allowed values, decoded current value).
+    let outputs = backend.list_outputs().await.unwrap_or_default();
+    if let Some(out) = outputs.iter().find(|o| o.id == operation_id) {
+        let detail = backend.get_output(&operation_id).await.ok();
+        let cfg = state.get_output_config(&component_id, &operation_id);
+
+        // Always-known per-spec control set (the four UDS 0x2F sub-
+        // functions); plumbed via the OperationInfoResponse so a
+        // single GET answers "what can I do".
+        let control_types = vec![
+            "return_to_ecu".to_string(),
+            "reset_to_default".to_string(),
+            "freeze".to_string(),
+            "short_term_adjust".to_string(),
+        ];
+
+        return Ok(Json(OperationInfoResponse {
+            id: out.id.clone(),
+            name: out.name.clone(),
+            description: Some(format!("IO control (UDS 0x2F DID {})", out.output_id)),
+            requires_security: out.requires_security,
+            security_level: out.security_level,
+            href,
+            output_id: Some(out.output_id.clone()),
+            data_type: out.data_type.clone(),
+            allowed: cfg.map(|c| c.allowed.clone()).unwrap_or_default(),
+            control_types,
+            current_value: detail.as_ref().map(|d| d.current_value.clone()),
+            value: detail.as_ref().and_then(|d| d.value.clone()),
+            default: detail.as_ref().and_then(|d| d.default.clone()),
+            controlled_by_tester: detail.as_ref().map(|d| d.controlled_by_tester),
+            frozen: detail.as_ref().map(|d| d.frozen),
+            ..default_operation_response()
+        }));
+    }
+
+    Err(ApiError::NotFound(format!(
+        "Operation not found: {}",
+        operation_id
+    )))
 }
 
 /// POST /vehicle/v1/components/:component_id/operations/:operation_id/executions

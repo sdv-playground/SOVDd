@@ -231,9 +231,15 @@ pub fn create_router(state: AppState) -> Router {
             put(handlers::clear_data::clear_data_action),
         )
         // Operation routes — ISO 17978-3 §7.14 executions sub-resource.
+        // The collection now serves both UDS RoutineControl (0x31) and
+        // InputOutputControl (0x2F) per C-133.
         .route(
             "/vehicle/v1/components/{component_id}/operations",
             get(handlers::operations::list_operations),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/operations/{operation_id}",
+            get(handlers::operations::get_operation),
         )
         .route(
             "/vehicle/v1/components/{component_id}/operations/{operation_id}/executions",
@@ -244,15 +250,8 @@ pub fn create_router(state: AppState) -> Router {
             get(handlers::operations::get_operation_execution)
                 .delete(handlers::operations::stop_operation_execution),
         )
-        // Output routes (I/O control)
-        .route(
-            "/vehicle/v1/components/{component_id}/outputs",
-            get(handlers::outputs::list_outputs),
-        )
-        .route(
-            "/vehicle/v1/components/{component_id}/outputs/{output_id}",
-            get(handlers::outputs::get_output).post(handlers::outputs::control_output),
-        )
+        // Legacy /outputs routes removed in Phase F.7.  IO control
+        // (UDS 0x2F) lives under /operations per C-133.
         // Sub-entity routes (apps/containers for HPC)
         .route(
             "/vehicle/v1/components/{component_id}/apps",

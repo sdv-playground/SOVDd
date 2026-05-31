@@ -527,14 +527,14 @@ async fn test_read_multiple_public_parameters() {
             .client()
             .read_data("vehicle_gateway", &prefixed)
             .await
-            .expect(&format!("Failed to read {} through gateway", param_id));
+            .unwrap_or_else(|e| panic!("Failed to read {} through gateway: {}", param_id, e));
 
         eprintln!("{}: {:?}", param_id, result);
 
         let value = result
             .value
             .as_str()
-            .expect(&format!("{} should be string", param_id));
+            .unwrap_or_else(|| panic!("{} should be string", param_id));
         assert!(
             value.len() >= min_len,
             "{} should be at least {} chars, got: {}",
@@ -569,7 +569,7 @@ async fn test_read_numeric_parameters() {
         .as_f64()
         .expect("coolant_temp should be a number");
     assert!(
-        value >= -40.0 && value <= 215.0,
+        (-40.0..=215.0).contains(&value),
         "Coolant temp should be in valid range: {}",
         value
     );
@@ -589,7 +589,7 @@ async fn test_read_numeric_parameters() {
         .as_f64()
         .expect("vehicle_speed should be a number");
     assert!(
-        speed_val >= 0.0 && speed_val <= 255.0,
+        (0.0..=255.0).contains(&speed_val),
         "Speed should be in valid range: {}",
         speed_val
     );
@@ -757,7 +757,7 @@ async fn test_gateway_routes_parameter_read() {
             .client()
             .read_data("vehicle_gateway", param_id)
             .await
-            .expect(&format!("Failed to read {} through gateway", param_id));
+            .unwrap_or_else(|e| panic!("Failed to read {} through gateway: {}", param_id, e));
 
         eprintln!("{} (via gateway): {:?}", param_id, result);
     }
@@ -789,10 +789,12 @@ async fn test_gateway_routes_nested_path_read() {
                 child_id, param_name
             ))
             .await
-            .expect(&format!(
-                "Failed to read {}/{} through gateway nested path",
-                child_id, param_name
-            ));
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Failed to read {}/{} through gateway nested path: {}",
+                    child_id, param_name, e
+                )
+            });
 
         assert_eq!(
             status, 200,

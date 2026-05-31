@@ -523,6 +523,7 @@ security_level = 0
         Ok((status, json))
     }
 
+    #[allow(dead_code)]
     async fn delete(&self, path: &str) -> Result<u16, Box<dyn std::error::Error>> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self.client.delete(&url).send().await?;
@@ -849,7 +850,7 @@ async fn test_read_multiple_parameters() {
         let data = client
             .read_data("vtx_ecm", param)
             .await
-            .expect(&format!("read_data {} failed", param));
+            .unwrap_or_else(|e| panic!("read_data {} failed: {}", param, e));
 
         assert!(
             data.as_f64().is_some(),
@@ -1053,8 +1054,8 @@ async fn test_values_change_over_time() {
     let value2 = data2.as_f64().expect("Expected numeric value");
 
     // Values should be in valid range
-    assert!(value1 >= 0.0 && value1 < 256.0);
-    assert!(value2 >= 0.0 && value2 < 256.0);
+    assert!((0.0..256.0).contains(&value1));
+    assert!((0.0..256.0).contains(&value2));
 
     // Note: Values may or may not be different depending on random walk
     // Just verify they're both valid
@@ -1112,11 +1113,11 @@ async fn test_read_all_configured_parameters() {
         let data = client
             .read_data("vtx_ecm", param)
             .await
-            .expect(&format!("read_data {} failed", param));
+            .unwrap_or_else(|e| panic!("read_data {} failed: {}", param, e));
 
         let value = data
             .as_f64()
-            .expect(&format!("Expected numeric value for {}", param));
+            .unwrap_or_else(|| panic!("Expected numeric value for {}", param));
         eprintln!("{}: {}", param, value);
     }
 }
@@ -1131,7 +1132,7 @@ async fn test_read_all_configured_parameters() {
 async fn test_sse_stream_periodic_data() {
     use futures_util::StreamExt;
 
-    let harness = TestHarness::new()
+    let _harness = TestHarness::new()
         .await
         .expect("Failed to setup test harness");
 
@@ -1450,7 +1451,7 @@ async fn test_security_access_success() {
 
     // Step 2: Calculate key using the same algorithm as example-ecu (XOR with secret)
     // Default secret is "ff" (single byte 0xFF)
-    let secret = vec![0xFFu8]; // Default secret
+    let secret = [0xFFu8]; // Default secret
     let key: Vec<u8> = seed
         .iter()
         .enumerate()
@@ -1514,7 +1515,7 @@ async fn test_security_access_failure_wrong_key() {
     let seed: Vec<u8> = hex::decode(seed_str).expect("Invalid hex seed");
 
     // Step 2: Send WRONG key (use different secret)
-    let wrong_secret = vec![0xAAu8]; // Wrong secret!
+    let wrong_secret = [0xAAu8]; // Wrong secret!
     let wrong_key: Vec<u8> = seed
         .iter()
         .enumerate()
@@ -3091,7 +3092,7 @@ async fn test_ecu_reset_types() {
         let result = client
             .ecu_reset("vtx_ecm", input)
             .await
-            .expect(&format!("ecu_reset {} failed", input));
+            .unwrap_or_else(|e| panic!("ecu_reset {} failed: {}", input, e));
 
         assert_eq!(
             result.status, "completed",
@@ -3398,7 +3399,7 @@ async fn test_complete_flash_workflow() {
     eprintln!("  Payload size: {}", payload_size);
     eprintln!("  Duration: {:?}", transfer_time);
     eprintln!("  Final state: Complete");
-    eprintln!("  Version updated: {} -> {}", "previous", test_version);
+    eprintln!("  Version updated: previous -> {}", test_version);
 
     eprintln!("=== Test PASSED: Complete flash workflow with version verification ===");
 }

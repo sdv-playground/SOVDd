@@ -423,7 +423,7 @@ impl DiagnosticBackend for GatewayBackend {
                     for mut output in outputs {
                         output.id = routing::prefixed_id(&output.id, Some(backend_id));
                         output.href = format!(
-                            "/vehicle/v1/components/{}/outputs/{}",
+                            "/vehicle/v1/components/{}/operations/{}",
                             self.entity_info.id, output.id
                         );
                         all_outputs.push(output);

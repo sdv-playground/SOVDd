@@ -5,7 +5,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use sovd_client::{SovdClient, StreamEvent};
+//! use sovd_client::{SovdClient, StreamEvent, SubscriptionInterval};
 //! use futures::StreamExt;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -13,14 +13,14 @@
 //!
 //! // Create subscription and get stream
 //! let mut subscription = client
-//!     .subscribe("engine_ecu", vec!["vehicle_speed".into(), "engine_rpm".into()], 10)
+//!     .subscribe("engine_ecu", "data/vehicle_speed", SubscriptionInterval::Normal)
 //!     .await?;
 //!
 //! // Consume events
 //! while let Some(event) = subscription.next().await {
 //!     match event {
 //!         Ok(data) => {
-//!             println!("seq={}, values={:?}", data.sequence, data.values);
+//!             println!("seq={:?}, values={:?}", data.sequence(), data.values());
 //!         }
 //!         Err(e) => {
 //!             eprintln!("Stream error: {}", e);

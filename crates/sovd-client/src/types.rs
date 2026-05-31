@@ -241,7 +241,12 @@ pub struct ClearFaultsResponse {
 // Operation Types
 // =============================================================================
 
-/// Operation information
+/// Operation information.
+///
+/// Carries the spec routine fields plus IO control fields (per
+/// ISO 17978-3 C-133: UDS InputOutputControl folds under /operations).
+/// IO control fields are `Some(_)` only when the server marked the
+/// operation as an output (sets `output_id`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationInfo {
     pub id: String,
@@ -253,6 +258,32 @@ pub struct OperationInfo {
     #[serde(default)]
     pub security_level: u8,
     pub href: String,
+
+    // i18n
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description_translation_id: Option<String>,
+
+    // IO control (UDS 0x2F) — present only for outputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub control_types: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controlled_by_tester: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen: Option<bool>,
 }
 
 /// Operations list response
@@ -262,11 +293,14 @@ pub struct OperationsResponse {
 }
 
 /// Operation start request body — ISO 17978-3 §7.14.
+///
+/// `parameters` is polymorphic: a hex string for RoutineControl (0x31)
+/// or a JSON object `{ "action": "...", "value"?: ... }` for
+/// InputOutputControl (0x2F).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartExecutionRequest {
-    /// Optional parameters (hex string — UDS RoutineControl sub-function payload).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parameters: Option<String>,
+    pub parameters: Option<serde_json::Value>,
 }
 
 /// Status of an operation execution — ISO 17978-3 §7.14 line 387.

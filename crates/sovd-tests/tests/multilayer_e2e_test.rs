@@ -872,12 +872,12 @@ async fn test_example_app_synthetic_params_via_vehicle_gw() {
     let has_health_score = items.iter().any(|p| {
         p["id"]
             .as_str()
-            .map_or(false, |id| id.contains("engine_health_score"))
+            .is_some_and(|id| id.contains("engine_health_score"))
     });
     let has_maintenance = items.iter().any(|p| {
         p["id"]
             .as_str()
-            .map_or(false, |id| id.contains("maintenance_hours"))
+            .is_some_and(|id| id.contains("maintenance_hours"))
     });
 
     assert!(
@@ -970,11 +970,9 @@ async fn test_operations_through_example_app() {
     );
 
     // Should have at least the dpf_regen operation from the upstream ECU
-    let has_dpf_regen = items.iter().any(|o| {
-        o["id"]
-            .as_str()
-            .map_or(false, |id| id.contains("dpf_regen"))
-    });
+    let has_dpf_regen = items
+        .iter()
+        .any(|o| o["id"].as_str().is_some_and(|id| id.contains("dpf_regen")));
 
     assert!(
         has_dpf_regen,

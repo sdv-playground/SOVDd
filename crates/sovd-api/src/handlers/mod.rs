@@ -17,7 +17,6 @@ pub mod logs_ext;
 pub mod meta;
 pub mod modes;
 pub mod operations;
-pub mod outputs;
 pub mod reset;
 pub mod software;
 pub mod streams;
