@@ -645,18 +645,25 @@ pub struct FinalizeDownloadResponse {
     pub crc32: Option<String>,
 }
 
-/// Response from ECU reset
+/// Response from ECU reset — ISO 17978-3 §7.19 execution shape.
+///
+/// Server returns 202 + `Location` header to a status sub-resource;
+/// this body lives at that sub-resource too.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EcuResetResponse {
-    /// Whether the reset was initiated successfully
-    pub success: bool,
-    /// Type of reset performed ("hard", "soft", "key_off_on", "custom")
+    /// Execution status (always `completed` for reset — fire-and-forget).
+    pub status: String,
+    /// Server-allocated execution id (also embedded in `href`).
+    pub exec_id: String,
+    /// Type of reset performed ("hard", "soft", "key_off_on", "custom").
     pub reset_type: String,
-    /// Human-readable message
+    /// Human-readable message.
     pub message: String,
-    /// Power-down time in seconds (if provided by ECU)
+    /// Power-down time in seconds (if provided by ECU).
     #[serde(default)]
     pub power_down_time: Option<u8>,
+    /// HATEOAS link to the status sub-resource.
+    pub href: String,
 }
 
 // =============================================================================

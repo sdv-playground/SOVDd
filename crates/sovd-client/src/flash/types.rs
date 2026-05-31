@@ -332,18 +332,26 @@ fn default_reset_type() -> String {
     "hard".to_string()
 }
 
-/// ECU reset response
+/// ECU reset response — ISO 17978-3 §7.19 execution shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResetResponse {
-    /// Whether reset was initiated
-    pub success: bool,
+    /// Execution status (always `completed` for reset).
+    pub status: String,
 
-    /// Reset type performed
+    /// Server-allocated execution id.
+    #[serde(default)]
+    pub exec_id: String,
+
+    /// Reset type performed.
     pub reset_type: String,
 
     /// Message
     #[serde(default)]
     pub message: Option<String>,
+
+    /// HATEOAS link to the status sub-resource.
+    #[serde(default)]
+    pub href: String,
 }
 
 // =============================================================================

@@ -395,15 +395,19 @@ pub async fn get_activation_state(
 }
 
 // =========================================================================
-// ECU Reset
+// ECU Reset — ISO 17978-3 §7.19 PUT status/restart
 // =========================================================================
 
-/// POST .../apps/:app_id/reset
-pub async fn ecu_reset(
+/// PUT .../apps/:app_id/status/restart — sub-entity reset (spec §7.19).
+pub async fn status_restart(
     State(state): State<AppState>,
     Path((component_id, app_id)): Path<(String, String)>,
     Json(request): Json<super::reset::EcuResetRequest>,
-) -> Result<Json<super::reset::EcuResetResponse>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+    use axum::response::IntoResponse;
+    use uuid::Uuid;
+
     let backend = resolve(&state, &component_id, &app_id).await?;
 
     let reset_type_str = request.reset_type.to_lowercase();
@@ -436,6 +440,18 @@ pub async fn ecu_reset(
 
     let power_down_time = backend.ecu_reset(reset_type_byte).await?;
 
+    let exec_id = Uuid::new_v4().to_string();
+    let href = format!(
+        "/vehicle/v1/components/{}/apps/{}/status/restart/{}",
+        component_id, app_id, exec_id
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::LOCATION,
+        HeaderValue::from_str(&href)
+            .map_err(|e| ApiError::Internal(format!("bad Location header: {e}")))?,
+    );
+
     let message = match reset_type_name {
         "hard" => "hard reset initiated".to_string(),
         "soft" => "soft reset initiated".to_string(),
@@ -445,12 +461,26 @@ pub async fn ecu_reset(
 
     tracing::info!(app_id = %app_id, reset_type = %reset_type_name, "Sub-entity ECU reset");
 
-    Ok(Json(super::reset::EcuResetResponse {
-        success: true,
+    let body = super::reset::EcuResetExecution {
+        status: "completed".to_string(),
+        exec_id,
         reset_type: reset_type_name.to_string(),
         message,
         power_down_time,
-    }))
+        href,
+    };
+
+    Ok((StatusCode::ACCEPTED, headers, Json(body)).into_response())
+}
+
+/// GET .../apps/:app_id/status/restart/:exec_id — stub status.
+pub async fn status_restart_execution(
+    Path((_component_id, _app_id, exec_id)): Path<(String, String, String)>,
+) -> Json<super::reset::EcuResetExecutionStatus> {
+    Json(super::reset::EcuResetExecutionStatus {
+        status: "completed".to_string(),
+        exec_id,
+    })
 }
 
 // =========================================================================

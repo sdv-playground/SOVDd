@@ -3103,7 +3103,7 @@ async fn test_finalize_flash_transfer() {
 #[tokio::test]
 #[serial_test::serial]
 async fn test_ecu_reset() {
-    eprintln!("\n=== Testing POST /reset (ECU Reset) ===");
+    eprintln!("\n=== Testing PUT /status/restart (ECU Reset) ===");
 
     let harness = TestHarness::new()
         .await
@@ -3117,13 +3117,19 @@ async fn test_ecu_reset() {
         .expect("ecu_reset failed");
 
     eprintln!(
-        "Response: success={}, reset_type={}",
-        result.success, result.reset_type
+        "Response: status={}, reset_type={}, exec_id={}",
+        result.status, result.reset_type, result.exec_id
     );
 
-    assert!(result.success, "Expected success");
+    assert_eq!(result.status, "completed", "Expected status=completed");
     assert_eq!(result.reset_type, "soft");
     assert!(result.message.contains("soft"));
+    assert!(!result.exec_id.is_empty(), "Expected non-empty exec_id");
+    assert!(
+        result.href.contains("/status/restart/"),
+        "Expected href to point at the status sub-resource, got {}",
+        result.href
+    );
 
     eprintln!("=== Test PASSED: ECU reset successful ===");
 }
@@ -3154,7 +3160,11 @@ async fn test_ecu_reset_types() {
             .await
             .expect(&format!("ecu_reset {} failed", input));
 
-        assert!(result.success, "Expected success for reset type {}", input);
+        assert_eq!(
+            result.status, "completed",
+            "Expected status=completed for reset type {}",
+            input
+        );
         assert_eq!(
             result.reset_type, expected,
             "Reset type mismatch for input {}",
@@ -3420,7 +3430,7 @@ async fn test_complete_flash_workflow() {
         .ecu_reset_with_type("hard")
         .await
         .expect("ecu_reset failed");
-    assert!(reset_resp.success, "ECU reset failed");
+    assert_eq!(reset_resp.status, "completed", "ECU reset failed");
     eprintln!("  ECU reset successful");
 
     // Wait for ECU to come back
@@ -3559,7 +3569,7 @@ async fn test_flash_workflow_block_counter_1() {
         .ecu_reset_with_type("hard")
         .await
         .expect("ecu_reset failed");
-    assert!(reset_resp.success, "ECU reset failed");
+    assert_eq!(reset_resp.status, "completed", "ECU reset failed");
 
     // Wait for ECU to come back
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -4282,7 +4292,7 @@ async fn test_software_update_full_cycle_with_version_check() {
         .ecu_reset_with_type("hard")
         .await
         .expect("ecu_reset failed");
-    assert!(reset_resp.success, "ECU reset failed");
+    assert_eq!(reset_resp.status, "completed", "ECU reset failed");
     eprintln!("ECU reset successful");
 
     // Wait for ECU to come back
@@ -5149,7 +5159,7 @@ async fn test_flash_commit_workflow() {
         .ecu_reset_with_type("hard")
         .await
         .expect("ecu_reset failed");
-    assert!(reset_resp.success, "ECU reset failed");
+    assert_eq!(reset_resp.status, "completed", "ECU reset failed");
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
@@ -5298,7 +5308,7 @@ async fn test_flash_rollback_workflow() {
         .ecu_reset_with_type("hard")
         .await
         .expect("ecu_reset failed");
-    assert!(reset_resp.success);
+    assert_eq!(reset_resp.status, "completed");
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // Verify activation state is "activated" (transitioned by ecu_reset)
@@ -5627,7 +5637,7 @@ async fn test_abort_after_activated_rejected() {
         .ecu_reset_with_type("hard")
         .await
         .expect("ecu_reset failed");
-    assert!(reset_resp.success);
+    assert_eq!(reset_resp.status, "completed");
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // Verify we're in Activated state
@@ -5750,7 +5760,7 @@ async fn test_abort_after_committed_rejected() {
         .ecu_reset_with_type("hard")
         .await
         .expect("ecu_reset failed");
-    assert!(reset_resp.success);
+    assert_eq!(reset_resp.status, "completed");
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // Set up extended session + security for commit
@@ -5864,7 +5874,7 @@ async fn test_abort_after_rolledback_rejected() {
         .ecu_reset_with_type("hard")
         .await
         .expect("ecu_reset failed");
-    assert!(reset_resp.success);
+    assert_eq!(reset_resp.status, "completed");
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // Set up extended session + security for rollback

@@ -1,8 +1,17 @@
-//! ECU Reset handlers (UDS 0x11 ECUReset)
+//! ECU Reset handlers (UDS 0x11 ECUReset) — ISO 17978-3 §7.19.
+//!
+//! `PUT {entity}/status/restart` is async per spec line 552: returns
+//! 202 + `Location` header to a status sub-resource.  Reset is fire-
+//! and-forget — once the ECU is rebooting there's no observable
+//! progress — so the status sub-resource is a stateless stub that
+//! always reads `completed`.
 
 use axum::extract::{Path, State};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -14,14 +23,23 @@ pub struct EcuResetRequest {
     pub reset_type: String,
 }
 
-/// Response for ECU reset
+/// Execution-resource body returned alongside the 202.
 #[derive(Debug, Serialize)]
-pub struct EcuResetResponse {
-    pub success: bool,
+pub struct EcuResetExecution {
+    pub status: String,
+    pub exec_id: String,
     pub reset_type: String,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub power_down_time: Option<u8>,
+    pub href: String,
+}
+
+/// Status returned from `GET .../status/restart/{exec_id}`.
+#[derive(Debug, Serialize)]
+pub struct EcuResetExecutionStatus {
+    pub status: String,
+    pub exec_id: String,
 }
 
 /// Parse reset type string to UDS reset type byte
@@ -58,59 +76,61 @@ fn parse_reset_type(s: &str) -> Result<(u8, &'static str), ApiError> {
     }
 }
 
-/// POST /vehicle/v1/components/:component_id/reset
-/// Request ECU reset.
+/// PUT /vehicle/v1/components/:component_id/status/restart — spec §7.19.
 ///
-/// **DEPRECATED**: use `PUT /components/{id}/status/restart` instead per
-/// ISO 17978-3 §7.19 (CDA §8.7 maps UDS ECUReset 0x11 to this path).
-/// This handler is kept as an alias forwarding to the same backend
-/// operation so in-flight orchestrators keep working through the
-/// migration cycle. Slated for removal after Phase 4.
-pub async fn ecu_reset(
-    State(state): State<AppState>,
-    Path(component_id): Path<String>,
-    Json(request): Json<EcuResetRequest>,
-) -> Result<Json<EcuResetResponse>, ApiError> {
-    ecu_reset_inner(state, component_id, request).await
-}
-
-/// PUT /vehicle/v1/components/:component_id/status/restart
-/// Spec-conforming entry per ISO 17978-3 §7.19.
-///
-/// Body is the same `EcuResetRequest` (carries the UDS `ResetType` enum).
-/// 202 on success — async reset, caller polls `activation_state` to verify.
-/// 409 if a flash session is in progress (the backend currently surfaces
-/// this as an `ApiError`; orchestrator retries after the conflict clears).
+/// Returns **202 Accepted** with a `Location` header to
+/// `/vehicle/v1/components/{id}/status/restart/{exec_id}` for status
+/// polling.  409 on conflict (flash in progress) is produced by the
+/// backend layer.
 pub async fn status_restart(
     State(state): State<AppState>,
     Path(component_id): Path<String>,
     Json(request): Json<EcuResetRequest>,
-) -> Result<Json<EcuResetResponse>, ApiError> {
-    ecu_reset_inner(state, component_id, request).await
-}
-
-async fn ecu_reset_inner(
-    state: AppState,
-    component_id: String,
-    request: EcuResetRequest,
-) -> Result<Json<EcuResetResponse>, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     let backend = state.get_backend(&component_id)?;
-
     let (reset_type_byte, reset_type_name) = parse_reset_type(&request.reset_type)?;
-
     let power_down_time = backend.ecu_reset(reset_type_byte).await?;
 
-    let message = match reset_type_name {
-        "hard" => "hard reset initiated".to_string(),
-        "soft" => "soft reset initiated".to_string(),
-        "key_off_on" => "key_off_on reset initiated".to_string(),
-        _ => format!("Reset type 0x{:02X} initiated", reset_type_byte),
+    let exec_id = Uuid::new_v4().to_string();
+    let href = format!(
+        "/vehicle/v1/components/{}/status/restart/{}",
+        component_id, exec_id
+    );
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::LOCATION,
+        HeaderValue::from_str(&href)
+            .map_err(|e| ApiError::Internal(format!("bad Location header: {e}")))?,
+    );
+
+    let body = EcuResetExecution {
+        status: "completed".to_string(),
+        exec_id,
+        reset_type: reset_type_name.to_string(),
+        message: match reset_type_name {
+            "hard" => "hard reset initiated".to_string(),
+            "soft" => "soft reset initiated".to_string(),
+            "key_off_on" => "key_off_on reset initiated".to_string(),
+            _ => format!("Reset type 0x{:02X} initiated", reset_type_byte),
+        },
+        power_down_time,
+        href,
     };
 
-    Ok(Json(EcuResetResponse {
-        success: true,
-        reset_type: reset_type_name.to_string(),
-        message,
-        power_down_time,
-    }))
+    Ok((StatusCode::ACCEPTED, headers, Json(body)))
+}
+
+/// GET /vehicle/v1/components/:component_id/status/restart/:exec_id
+///
+/// Stub status — reset is fire-and-forget; once the kernel takes
+/// over we have no observable progress to report.  Any well-formed
+/// `exec_id` returns `completed`.
+pub async fn status_restart_execution(
+    Path((_component_id, exec_id)): Path<(String, String)>,
+) -> Json<EcuResetExecutionStatus> {
+    Json(EcuResetExecutionStatus {
+        status: "completed".to_string(),
+        exec_id,
+    })
 }

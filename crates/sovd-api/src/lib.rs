@@ -198,10 +198,16 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/apps/{app_id}/flash/activation",
             get(handlers::sub_entity::get_activation_state),
         )
-        // Sub-entity reset route
+        // Sub-entity ECU reset — same shape as the entity-root form
+        // (PUT status/restart returns 202 + Location; GET on the
+        // exec sub-resource is the stateless `completed` stub).
         .route(
-            "/vehicle/v1/components/{component_id}/apps/{app_id}/reset",
-            post(handlers::sub_entity::ecu_reset),
+            "/vehicle/v1/components/{component_id}/apps/{app_id}/status/restart",
+            put(handlers::sub_entity::status_restart),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/apps/{app_id}/status/restart/{exec_id}",
+            get(handlers::sub_entity::status_restart_execution),
         )
         // Sub-entity mode routes
         .route(
@@ -267,16 +273,17 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/streams/{subscription_id}",
             get(handlers::streams::stream_subscription),
         )
-        // ECU Reset routes — ISO 17978-3 §7.19. PUT status/restart is the
-        // spec-conforming entry; POST /reset is kept as a deprecated alias
-        // for one release cycle so in-flight orchestrators don't break.
+        // ECU Reset — ISO 17978-3 §7.19. PUT returns 202 + Location to
+        // the status sub-resource; the GET on the sub-resource is a stub
+        // that reads `completed` (reset is fire-and-forget, the ECU is
+        // rebooting by the time we'd report progress).
         .route(
             "/vehicle/v1/components/{component_id}/status/restart",
             put(handlers::reset::status_restart),
         )
         .route(
-            "/vehicle/v1/components/{component_id}/reset",
-            post(handlers::reset::ecu_reset),
+            "/vehicle/v1/components/{component_id}/status/restart/{exec_id}",
+            get(handlers::reset::status_restart_execution),
         )
         // Mode routes (session, security, link control)
         .route(

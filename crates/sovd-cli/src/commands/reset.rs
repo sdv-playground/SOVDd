@@ -18,13 +18,16 @@ pub async fn reset(
 
     let result = client.ecu_reset(ecu, rtype).await?;
 
-    if result.success {
-        ctx.success(&format!("ECU {} reset successful", result.reset_type));
+    // Spec §7.19: server returns 202 + Location; body status is
+    // `completed` once the reset is accepted (we never observe
+    // anything else — the ECU is rebooting).
+    if result.status == "completed" {
+        ctx.success(&format!("ECU {} reset accepted", result.reset_type));
         if !result.message.is_empty() {
             ctx.info(&result.message);
         }
     } else {
-        ctx.error(&format!("Reset failed: {}", result.message));
+        ctx.error(&format!("Reset status: {} ({})", result.status, result.message));
     }
 
     Ok(())
