@@ -58,10 +58,7 @@ pub async fn start_flash(
 ) -> Result<(StatusCode, Json<StartFlashResponse>), ApiError> {
     let backend = state.get_backend(&component_id)?;
 
-    let transfer_id = backend
-        .start_flash()
-        .await
-        .map_err(ApiError::from)?;
+    let transfer_id = backend.start_flash().await.map_err(ApiError::from)?;
 
     tracing::info!(
         component_id = %component_id,

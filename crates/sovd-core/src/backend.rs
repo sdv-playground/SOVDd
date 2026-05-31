@@ -22,9 +22,8 @@ use crate::models::{
 ///
 /// Used by `receive_package_stream` to avoid buffering the full firmware
 /// payload in memory. Each `Bytes` chunk is forwarded or processed inline.
-pub type PackageStream = Pin<
-    Box<dyn Stream<Item = Result<Bytes, Box<dyn std::error::Error + Send + Sync>>> + Send>,
->;
+pub type PackageStream =
+    Pin<Box<dyn Stream<Item = Result<Bytes, Box<dyn std::error::Error + Send + Sync>>> + Send>>;
 
 // =============================================================================
 // Package Management Types

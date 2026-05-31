@@ -232,7 +232,8 @@ impl FlashClient {
             bytes,
             elapsed_ms = elapsed.as_millis() as u64,
             "upload complete: {:.2} MB at {:.2} MB/s",
-            mb, mb_per_sec
+            mb,
+            mb_per_sec
         );
         result
     }

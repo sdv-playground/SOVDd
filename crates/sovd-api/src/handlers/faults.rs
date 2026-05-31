@@ -123,4 +123,3 @@ pub async fn clear_faults(
         message: result.message,
     }))
 }
-

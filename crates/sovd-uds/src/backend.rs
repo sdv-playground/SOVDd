@@ -1537,9 +1537,7 @@ impl DiagnosticBackend for UdsBackend {
             .as_mut()
             .ok_or_else(|| BackendError::EntityNotFound("No flash transfer in progress".into()))?;
         match transfer.state {
-            FlashState::AwaitingActivation
-            | FlashState::Validated
-            | FlashState::AwaitingReboot => {
+            FlashState::AwaitingActivation | FlashState::Validated | FlashState::AwaitingReboot => {
                 transfer.state = FlashState::Validated;
                 drop(flash_state);
                 let mut activation = self.activation_state.write();

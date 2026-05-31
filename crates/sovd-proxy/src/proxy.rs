@@ -11,8 +11,8 @@ use sovd_core::{
     ActivationState, BackendError, BackendResult, Capabilities, ClearFaultsResult, DataValue,
     DiagnosticBackend, EntityInfo, Fault, FaultFilter, FaultsResult, FlashStatus, IoControlAction,
     IoControlResult, LogEntry, LogFilter, OperationExecution, OperationInfo, OutputDetail,
-    OutputInfo, PackageInfo, PackageStream, ParameterInfo, SecurityMode, SecurityState, SessionMode,
-    VerifyResult,
+    OutputInfo, PackageInfo, PackageStream, ParameterInfo, SecurityMode, SecurityState,
+    SessionMode, VerifyResult,
 };
 
 /// Convert client-side capabilities to core Capabilities.

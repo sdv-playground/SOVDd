@@ -3253,8 +3253,14 @@ async fn test_flash_invalid_file_id() {
         status, 400,
         "Expected 400 Bad Request when no package is verified"
     );
-    let err = json.get("error_code").and_then(|v| v.as_str()).unwrap_or("");
-    assert_eq!(err, "bad-request", "expected error_code=bad-request, got {err}");
+    let err = json
+        .get("error_code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert_eq!(
+        err, "bad-request",
+        "expected error_code=bad-request, got {err}"
+    );
 
     eprintln!("=== Test PASSED: flash/transfer rejected without verified package ===");
 }
@@ -5528,7 +5534,8 @@ async fn test_abort_during_awaiting_activation() {
     // poll_flash_complete returns on is_success(), which includes AwaitingActivation
     eprintln!("  Transfer state: {:?}", status.state);
     assert!(
-        status.state == TransferState::AwaitingActivation || status.state == TransferState::Complete,
+        status.state == TransferState::AwaitingActivation
+            || status.state == TransferState::Complete,
         "Expected AwaitingActivation or Complete, got {:?}",
         status.state
     );

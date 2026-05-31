@@ -644,11 +644,10 @@ impl DiagnosticBackend for ManagedEcuBackend {
             )));
         }
 
-        let flash_resp = self
-            .flash_client
-            .start_flash()
-            .await
-            .map_err(|e| BackendError::Transport(format!("Upstream flash start failed: {}", e)))?;
+        let flash_resp =
+            self.flash_client.start_flash().await.map_err(|e| {
+                BackendError::Transport(format!("Upstream flash start failed: {}", e))
+            })?;
 
         tracing::info!(
             transfer_id = %flash_resp.transfer_id,

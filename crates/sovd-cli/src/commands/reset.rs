@@ -27,7 +27,10 @@ pub async fn reset(
             ctx.info(&result.message);
         }
     } else {
-        ctx.error(&format!("Reset status: {} ({})", result.status, result.message));
+        ctx.error(&format!(
+            "Reset status: {} ({})",
+            result.status, result.message
+        ));
     }
 
     Ok(())

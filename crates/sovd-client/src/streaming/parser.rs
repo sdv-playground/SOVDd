@@ -163,8 +163,7 @@ mod tests {
     fn test_parse_simple_event() {
         let mut parser = SseParser::new();
 
-        let input =
-            b"data: {\"ts\":\"2026-01-01T00:00:00Z\",\"seq\":1,\"speed\":60}\n\n";
+        let input = b"data: {\"ts\":\"2026-01-01T00:00:00Z\",\"seq\":1,\"speed\":60}\n\n";
         let events = parser.feed(Bytes::from_static(input));
 
         assert_eq!(events.len(), 1);

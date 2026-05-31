@@ -104,8 +104,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/vehicle/v1/components/{component_id}/data-lists/{list_id}",
-            get(handlers::data_lists::read_data_list)
-                .delete(handlers::data_lists::clear_data_list),
+            get(handlers::data_lists::read_data_list).delete(handlers::data_lists::clear_data_list),
         )
         // Log routes (primarily for HPC and message passing)
         .route(
@@ -150,8 +149,7 @@ pub fn create_router(state: AppState) -> Router {
         // Sub-entity file routes (SOVD spec: sub-entities inherit all resources)
         .route(
             "/vehicle/v1/components/{component_id}/apps/{app_id}/files",
-            post(handlers::sub_entity::upload_file)
-                .get(handlers::sub_entity::list_files),
+            post(handlers::sub_entity::upload_file).get(handlers::sub_entity::list_files),
         )
         .route(
             "/vehicle/v1/components/{component_id}/apps/{app_id}/files/{file_id}",
@@ -306,8 +304,7 @@ pub fn create_router(state: AppState) -> Router {
         // File (package) management routes - async flash flow
         .route(
             "/vehicle/v1/components/{component_id}/files",
-            post(handlers::files::upload_file)
-                .get(handlers::files::list_files),
+            post(handlers::files::upload_file).get(handlers::files::list_files),
         )
         .route(
             "/vehicle/v1/components/{component_id}/files/{file_id}",

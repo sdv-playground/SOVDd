@@ -961,12 +961,9 @@ impl SovdClient {
 
         // Spec shape: `{"id": "security", "seed": "aabbccdd"}` — `seed`
         // is concatenated lowercase hex (string:hex primitive).
-        let seed_str = result
-            .get("seed")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                SovdClientError::ParseError("No seed in security access response".into())
-            })?;
+        let seed_str = result.get("seed").and_then(|v| v.as_str()).ok_or_else(|| {
+            SovdClientError::ParseError("No seed in security access response".into())
+        })?;
 
         hex::decode(seed_str).map_err(|e| SovdClientError::ParseError(e.to_string()))
     }

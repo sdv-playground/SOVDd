@@ -211,10 +211,7 @@ pub async fn start_flash(
     Json(_request): Json<StartFlashRequest>,
 ) -> Result<(StatusCode, Json<StartFlashResponse>), ApiError> {
     let backend = resolve(&state, &component_id, &app_id).await?;
-    let transfer_id = backend
-        .start_flash()
-        .await
-        .map_err(ApiError::from)?;
+    let transfer_id = backend.start_flash().await.map_err(ApiError::from)?;
 
     tracing::info!(app_id = %app_id, transfer_id = %transfer_id, "Flash started on sub-entity");
 
