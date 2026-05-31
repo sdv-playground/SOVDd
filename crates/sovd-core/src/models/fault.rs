@@ -36,19 +36,44 @@ pub struct Fault {
     pub href: String,
 }
 
-/// Fault severity levels
+/// Fault severity per ISO 17978-3:2026 Table 61 (line 353): integer
+/// 1..4 where lower = higher severity (1=FATAL/Critical, 2=ERROR,
+/// 3=WARN, 4=INFO). The wire format is the integer code; the variants
+/// stay for ergonomic match arms in Rust.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(into = "u8", from = "u8")]
 pub enum FaultSeverity {
-    /// Informational only
-    Info,
-    /// Warning condition
-    Warning,
-    /// Error condition
+    /// Critical failure (1 — spec calls this FATAL)
+    Critical,
+    /// Error condition (2)
     #[default]
     Error,
-    /// Critical failure
-    Critical,
+    /// Warning condition (3)
+    Warning,
+    /// Informational only (4)
+    Info,
+}
+
+impl From<FaultSeverity> for u8 {
+    fn from(s: FaultSeverity) -> Self {
+        match s {
+            FaultSeverity::Critical => 1,
+            FaultSeverity::Error => 2,
+            FaultSeverity::Warning => 3,
+            FaultSeverity::Info => 4,
+        }
+    }
+}
+
+impl From<u8> for FaultSeverity {
+    fn from(n: u8) -> Self {
+        match n {
+            1 => Self::Critical,
+            2 => Self::Error,
+            3 => Self::Warning,
+            _ => Self::Info,
+        }
+    }
 }
 
 /// Filter for querying faults

@@ -785,13 +785,7 @@ pub async fn list_sub_entity_faults(
     let backend = resolve(&state, &component_id, &app_id).await?;
 
     let filter = FaultFilter {
-        severity: query.severity.as_deref().and_then(|s| match s {
-            "info" => Some(FaultSeverity::Info),
-            "warning" => Some(FaultSeverity::Warning),
-            "error" => Some(FaultSeverity::Error),
-            "critical" => Some(FaultSeverity::Critical),
-            _ => None,
-        }),
+        severity: query.severity.map(FaultSeverity::from),
         category: query.category.clone(),
         active_only: query.active_only,
         since: None,
@@ -812,9 +806,9 @@ pub async fn list_sub_entity_faults(
         .iter()
         .map(|f| FaultInfoResponse {
             id: f.id.clone(),
-            dtc_code: f.code.clone(),
-            severity: format!("{:?}", f.severity).to_lowercase(),
-            message: f.message.clone(),
+            code: f.code.clone(),
+            fault_name: f.message.clone(),
+            severity: f.severity,
             category: f.category.clone(),
             active: f.active,
             status: f.status.clone(),
@@ -823,11 +817,7 @@ pub async fn list_sub_entity_faults(
         .collect();
 
     let total_count = items.len();
-    Ok(Json(FaultsResponse {
-        items,
-        total_count,
-        status_availability_mask: result.status_availability_mask,
-    }))
+    Ok(Json(FaultsResponse { items, total_count }))
 }
 
 /// GET .../apps/:app_id/faults/:fault_id
@@ -847,9 +837,9 @@ pub async fn get_sub_entity_fault(
     );
     Ok(Json(FaultInfoResponse {
         id: fault.id.clone(),
-        dtc_code: fault.code.clone(),
-        severity: format!("{:?}", fault.severity).to_lowercase(),
-        message: fault.message.clone(),
+        code: fault.code.clone(),
+        fault_name: fault.message.clone(),
+        severity: fault.severity,
         category: fault.category.clone(),
         active: fault.active,
         status: fault.status.clone(),

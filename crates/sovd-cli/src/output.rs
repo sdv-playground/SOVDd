@@ -224,8 +224,8 @@ pub struct DataRow {
 pub struct FaultRow {
     #[tabled(rename = "Code")]
     pub code: String,
-    #[tabled(rename = "Message")]
-    pub message: String,
+    #[tabled(rename = "Fault")]
+    pub fault_name: String,
     #[tabled(rename = "Severity")]
     pub severity: String,
     #[tabled(rename = "Active")]

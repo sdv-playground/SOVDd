@@ -1,4 +1,4 @@
-//! Fault/DTC handlers
+//! Fault/DTC handlers — ISO 17978-3 §7.8
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
@@ -12,21 +12,21 @@ use crate::state::AppState;
 pub struct FaultsResponse {
     pub items: Vec<FaultInfoResponse>,
     pub total_count: usize,
-    /// Status availability mask (UDS-specific)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status_availability_mask: Option<u8>,
 }
 
+/// Spec §7.8 Table 61 (`Fault`): `code`, `fault_name`, integer
+/// severity (1=Critical, 2=Error, 3=Warning, 4=Info).  The
+/// `status` sub-object uses camelCase keys so the spec query
+/// filter `?status[confirmedDTC]=1` (line 448) matches.
 #[derive(Serialize)]
 pub struct FaultInfoResponse {
     pub id: String,
-    pub dtc_code: String,
-    pub severity: String,
-    pub message: String,
+    pub code: String,
+    pub fault_name: String,
+    pub severity: FaultSeverity,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
     pub active: bool,
-    /// DTC status information
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<serde_json::Value>,
     pub href: String,
@@ -39,9 +39,10 @@ pub struct ClearFaultsResponse {
     pub message: String,
 }
 
+/// Query: spec uses integer severity (1..4).  Filter is exact-match.
 #[derive(Deserialize, Default)]
 pub struct FaultFilterQuery {
-    pub severity: Option<String>,
+    pub severity: Option<u8>,
     pub category: Option<String>,
     pub active_only: Option<bool>,
     pub limit: Option<usize>,
@@ -51,15 +52,9 @@ impl From<&Fault> for FaultInfoResponse {
     fn from(fault: &Fault) -> Self {
         Self {
             id: fault.id.clone(),
-            dtc_code: fault.code.clone(),
-            severity: match fault.severity {
-                FaultSeverity::Info => "info",
-                FaultSeverity::Warning => "warning",
-                FaultSeverity::Error => "error",
-                FaultSeverity::Critical => "critical",
-            }
-            .to_string(),
-            message: fault.message.clone(),
+            code: fault.code.clone(),
+            fault_name: fault.message.clone(),
+            severity: fault.severity,
             category: fault.category.clone(),
             active: fault.active,
             status: fault.status.clone(),
@@ -83,13 +78,7 @@ pub async fn list_faults(
         || query.limit.is_some()
     {
         Some(FaultFilter {
-            severity: query.severity.and_then(|s| match s.as_str() {
-                "info" => Some(FaultSeverity::Info),
-                "warning" => Some(FaultSeverity::Warning),
-                "error" => Some(FaultSeverity::Error),
-                "critical" => Some(FaultSeverity::Critical),
-                _ => None,
-            }),
+            severity: query.severity.map(FaultSeverity::from),
             category: query.category,
             active_only: query.active_only,
             limit: query.limit,
@@ -104,11 +93,7 @@ pub async fn list_faults(
 
     let items: Vec<FaultInfoResponse> = result.faults.iter().map(FaultInfoResponse::from).collect();
 
-    Ok(Json(FaultsResponse {
-        items,
-        total_count,
-        status_availability_mask: result.status_availability_mask,
-    }))
+    Ok(Json(FaultsResponse { items, total_count }))
 }
 
 /// GET /vehicle/v1/components/:component_id/faults/:fault_id

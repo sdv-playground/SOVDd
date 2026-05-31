@@ -193,14 +193,14 @@ pub struct WriteDataRequest {
 // Fault Types
 // =============================================================================
 
-/// Fault/DTC information
+/// Fault/DTC information per ISO 17978-3 §7.8 Table 61.
+/// `severity` is integer 1..4 (1=Critical, 2=Error, 3=Warning, 4=Info).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FaultInfo {
     pub id: String,
-    #[serde(alias = "dtc_code")]
     pub code: String,
-    pub message: String,
-    pub severity: String,
+    pub fault_name: String,
+    pub severity: u8,
     #[serde(default)]
     pub category: Option<String>,
     pub active: bool,

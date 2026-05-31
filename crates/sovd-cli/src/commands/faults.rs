@@ -48,8 +48,8 @@ pub async fn faults(
         .into_iter()
         .map(|f| FaultRow {
             code: f.code,
-            message: f.message,
-            severity: f.severity,
+            fault_name: f.fault_name,
+            severity: severity_label(f.severity),
             active: if f.active {
                 "Yes".to_string()
             } else {
@@ -61,4 +61,17 @@ pub async fn faults(
 
     ctx.print(&rows);
     Ok(())
+}
+
+/// Spec §7.8 severity is integer 1..4; render as the well-known label
+/// for human-friendly CLI output.
+fn severity_label(s: u8) -> String {
+    match s {
+        1 => "FATAL",
+        2 => "ERROR",
+        3 => "WARN",
+        4 => "INFO",
+        _ => "?",
+    }
+    .to_string()
 }

@@ -2123,7 +2123,7 @@ async fn test_list_faults() {
     // Verify DTC structure
     let first_dtc = &faults[0];
     assert!(!first_dtc.id.is_empty(), "Expected id");
-    assert!(!first_dtc.code.is_empty(), "Expected dtc_code");
+    assert!(!first_dtc.code.is_empty(), "Expected code");
 
     // Check categories
     let categories: Vec<&str> = faults
@@ -2170,7 +2170,7 @@ async fn test_get_fault_detail() {
 
     // Verify response structure
     assert_eq!(detail.id, *dtc_id, "ID should match");
-    assert!(!detail.code.is_empty(), "Expected dtc_code");
+    assert!(!detail.code.is_empty(), "Expected code");
 
     eprintln!(
         "=== Test PASSED: Got detail for DTC {} ({}) ===",
@@ -2276,19 +2276,19 @@ async fn test_list_active_dtcs() {
 
     for item in items {
         let status = &item["status"];
-        let test_failed = status["test_failed"].as_bool().unwrap_or(false);
+        let test_failed = status["testFailed"].as_bool().unwrap_or(false);
 
         eprintln!(
-            "DTC {} ({}): test_failed={}",
-            item["dtc_code"].as_str().unwrap_or("?"),
+            "DTC {} ({}): testFailed={}",
+            item["code"].as_str().unwrap_or("?"),
             item["id"].as_str().unwrap_or("?"),
             test_failed
         );
 
         assert!(
             test_failed,
-            "Active DTC {} should have test_failed=true",
-            item["dtc_code"].as_str().unwrap_or("?")
+            "Active DTC {} should have testFailed=true",
+            item["code"].as_str().unwrap_or("?")
         );
     }
 

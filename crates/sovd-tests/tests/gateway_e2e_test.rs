@@ -723,7 +723,11 @@ async fn test_get_specific_fault() {
 
     assert_eq!(&fault.id, first_fault_id);
     assert!(!fault.code.is_empty(), "Fault should have code");
-    assert!(!fault.severity.is_empty(), "Fault should have severity");
+    assert!(
+        (1..=4).contains(&fault.severity),
+        "Fault severity should be 1..4, got {}",
+        fault.severity
+    );
 }
 
 #[tokio::test]

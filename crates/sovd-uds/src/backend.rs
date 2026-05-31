@@ -197,12 +197,16 @@ impl UdsBackend {
             occurrence_count: None,
             first_occurrence: None,
             last_occurrence: Some(Utc::now()),
+            // Spec §7.8 / line 448 — query-filter syntax is
+            // `?status[confirmedDTC]=1`; sub-object keys MUST be the
+            // camelCase tokens the spec query string targets.  `mask`
+            // is the spec name for the raw status byte.
             status: Some(serde_json::json!({
-                "raw": format!("0x{:02X}", dtc.status.raw),
-                "test_failed": dtc.status.test_failed,
-                "confirmed_dtc": dtc.status.confirmed_dtc,
-                "pending_dtc": dtc.status.pending_dtc,
-                "warning_indicator": dtc.status.warning_indicator_requested,
+                "mask": format!("0x{:02X}", dtc.status.raw),
+                "testFailed": dtc.status.test_failed,
+                "confirmedDTC": dtc.status.confirmed_dtc,
+                "pendingDTC": dtc.status.pending_dtc,
+                "warningIndicator": dtc.status.warning_indicator_requested,
             })),
             href: format!(
                 "/vehicle/v1/components/{}/faults/{}",

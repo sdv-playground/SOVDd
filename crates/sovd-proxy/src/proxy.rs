@@ -295,17 +295,6 @@ impl SovdProxyBackend {
         }
     }
 
-    /// Parse severity string from client response into FaultSeverity enum
-    fn parse_severity(s: &str) -> FaultSeverity {
-        match s.to_lowercase().as_str() {
-            "info" | "information" => FaultSeverity::Info,
-            "warning" | "warn" => FaultSeverity::Warning,
-            "error" => FaultSeverity::Error,
-            "critical" => FaultSeverity::Critical,
-            _ => FaultSeverity::Error,
-        }
-    }
-
     /// Parse a timestamp string into DateTime<Utc>, falling back to now
     fn parse_timestamp(s: &str) -> chrono::DateTime<chrono::Utc> {
         chrono::DateTime::parse_from_rfc3339(s)
@@ -585,8 +574,8 @@ impl DiagnosticBackend for SovdProxyBackend {
             .map(|f| Fault {
                 id: f.id,
                 code: f.code,
-                severity: Self::parse_severity(&f.severity),
-                message: f.message,
+                severity: FaultSeverity::from(f.severity),
+                message: f.fault_name,
                 category: f.category,
                 first_occurrence: None,
                 last_occurrence: None,
@@ -613,8 +602,8 @@ impl DiagnosticBackend for SovdProxyBackend {
         Ok(Fault {
             id: f.id,
             code: f.code,
-            severity: Self::parse_severity(&f.severity),
-            message: f.message,
+            severity: FaultSeverity::from(f.severity),
+            message: f.fault_name,
             category: f.category,
             first_occurrence: None,
             last_occurrence: None,
