@@ -469,12 +469,13 @@ async fn test_gateway_aggregates_faults() {
     eprintln!("Faults (via gateway): {:?}", faults);
     eprintln!("Found {} DTCs via gateway", faults.len());
 
-    // Faults should be prefixed with backend ID
+    // Spec Fault dropped the explicit `id` field; the per-child
+    // prefix now lives in the HATEOAS href.
     if !faults.is_empty() {
         assert!(
-            faults[0].id.starts_with("vtx_ecm/"),
-            "Fault ID should be prefixed: {}",
-            faults[0].id
+            faults[0].href.contains("vtx_ecm"),
+            "Fault href should carry the child backend prefix: {}",
+            faults[0].href
         );
     }
 }
@@ -709,19 +710,25 @@ async fn test_get_specific_fault() {
         return;
     }
 
-    let first_fault_id = &faults[0].id;
+    // Spec Fault has no `id` field; extract the gateway-prefixed id
+    // from the HATEOAS href (everything after `/faults/`).  The
+    // gateway-aggregated href looks like
+    // `…/components/vehicle_gateway/faults/vtx_ecm/010100`.
+    let first_fault_id = faults[0]
+        .href
+        .split_once("/faults/")
+        .map(|(_, tail)| tail.to_string())
+        .expect("fault href should contain /faults/");
     eprintln!("Getting details for fault: {}", first_fault_id);
 
-    // Get specific fault detail through gateway (SovdClient handles URL-encoding of '/')
     let fault = harness
         .client()
-        .get_fault("vehicle_gateway", first_fault_id)
+        .get_fault("vehicle_gateway", &first_fault_id)
         .await
         .expect("Failed to get fault detail through gateway");
 
     eprintln!("Fault detail: {:?}", fault);
 
-    assert_eq!(&fault.id, first_fault_id);
     assert!(!fault.code.is_empty(), "Fault should have code");
     assert!(
         (1..=4).contains(&fault.severity),

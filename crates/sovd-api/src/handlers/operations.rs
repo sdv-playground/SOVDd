@@ -25,7 +25,7 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use sovd_core::{OperationExecution, OperationInfo, OperationStatus};
+use sovd_core::{IoControlAction, OperationExecution, OperationInfo, OperationStatus};
 use uuid::Uuid;
 
 use crate::error::ApiError;
@@ -40,8 +40,14 @@ pub struct OperationsResponse {
 pub struct OperationInfoResponse {
     pub id: String,
     pub name: String,
+    /// Spec §5.7: sibling i18n key for the `name` field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Spec §5.7: `<attr>_translation_id` for the `description` field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description_translation_id: Option<String>,
     pub requires_security: bool,
     pub security_level: u8,
     pub href: String,
@@ -52,7 +58,9 @@ impl From<&OperationInfo> for OperationInfoResponse {
         Self {
             id: op.id.clone(),
             name: op.name.clone(),
+            translation_id: None,
             description: op.description.clone(),
+            description_translation_id: None,
             requires_security: op.requires_security,
             security_level: op.security_level,
             href: op.href.clone(),
@@ -60,11 +68,17 @@ impl From<&OperationInfo> for OperationInfoResponse {
     }
 }
 
+/// Body for `POST .../operations/{op_id}/executions`.
+///
+/// `parameters` is polymorphic:
+///   - String — hex-encoded RoutineControl bytes (UDS 0x31 path).
+///   - Object — structured IO control request (UDS 0x2F path),
+///     `{"action": "freeze" | "reset_to_default" | "return_to_ecu"
+///     | "short_term_adjust", "value": <optional>}`.
 #[derive(Debug, Deserialize, Default)]
 pub struct StartExecutionRequest {
-    /// Hex-encoded RoutineControl parameters (UDS 0x31 sub-function payload).
     #[serde(default)]
-    pub parameters: Option<String>,
+    pub parameters: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -76,25 +90,44 @@ pub struct ExecutionQuery {
 }
 
 /// GET /vehicle/v1/components/:component_id/operations
+///
+/// Spec C-133: UDS InputOutputControl (0x2F) folds into the
+/// operations collection alongside UDS RoutineControl (0x31).
+/// We merge backend.list_operations() with backend.list_outputs()
+/// here so a single GET enumerates both classes.
 pub async fn list_operations(
     State(state): State<AppState>,
     Path(component_id): Path<String>,
 ) -> Result<Json<OperationsResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
-    let operations = backend.list_operations().await?;
+    let routines = backend.list_operations().await?;
+    let outputs = backend.list_outputs().await.unwrap_or_default();
 
     let base = format!("/vehicle/v1/components/{}/operations", component_id);
-    let items: Vec<OperationInfoResponse> = operations
+    let mut items: Vec<OperationInfoResponse> = routines
         .iter()
         .map(|op| OperationInfoResponse {
             id: op.id.clone(),
             name: op.name.clone(),
+            translation_id: None,
             description: op.description.clone(),
+            description_translation_id: None,
             requires_security: op.requires_security,
             security_level: op.security_level,
             href: format!("{}/{}/executions", base, op.id),
         })
         .collect();
+
+    items.extend(outputs.iter().map(|out| OperationInfoResponse {
+        id: out.id.clone(),
+        name: out.name.clone(),
+        translation_id: None,
+        description: Some(format!("IO control (UDS 0x2F DID {})", out.output_id)),
+        description_translation_id: None,
+        requires_security: out.requires_security,
+        security_level: out.security_level,
+        href: format!("{}/{}/executions", base, out.id),
+    }));
 
     Ok(Json(OperationsResponse { items }))
 }
@@ -111,13 +144,37 @@ pub async fn start_operation_execution(
 ) -> Result<impl IntoResponse, ApiError> {
     let backend = state.get_backend(&component_id)?;
 
-    let params: Vec<u8> = match request.parameters.as_deref() {
-        Some(hex_str) => hex::decode(hex_str)
-            .map_err(|e| ApiError::BadRequest(format!("Invalid hex parameters: {}", e)))?,
-        None => Vec::new(),
-    };
+    // Decide between RoutineControl (0x31) and InputOutputControl (0x2F).
+    // Heuristic: if the operation_id matches an output, dispatch to
+    // control_output; else fall through to start_operation.  Output
+    // lookups are cheap (small list) and we avoid an explicit "type"
+    // hint in the wire body.
+    let outputs = backend.list_outputs().await.unwrap_or_default();
+    let is_output = outputs.iter().any(|o| o.id == operation_id);
 
-    let mut execution = backend.start_operation(&operation_id, &params).await?;
+    let mut execution = if is_output {
+        // IO control path — parse the structured parameters body.
+        let (action, value) = parse_io_control_params(request.parameters.as_ref())?;
+        let result = backend.control_output(&operation_id, action, value).await?;
+        sovd_core::OperationExecution::completed(
+            String::new(),
+            operation_id.clone(),
+            serde_json::to_value(result).unwrap_or(serde_json::Value::Null),
+        )
+    } else {
+        let params: Vec<u8> = match request.parameters.as_ref() {
+            Some(serde_json::Value::String(hex)) => hex::decode(hex)
+                .map_err(|e| ApiError::BadRequest(format!("Invalid hex parameters: {}", e)))?,
+            Some(serde_json::Value::Null) | None => Vec::new(),
+            Some(other) => {
+                return Err(ApiError::BadRequest(format!(
+                    "Operation '{}' is a RoutineControl op; parameters must be a hex string, got {}",
+                    operation_id, other
+                )));
+            }
+        };
+        backend.start_operation(&operation_id, &params).await?
+    };
     let exec_id = Uuid::new_v4().to_string();
     execution.execution_id = exec_id.clone();
 
@@ -174,6 +231,42 @@ pub async fn get_operation_execution(
     let mut execution = backend.get_operation_status(&operation_id).await?;
     execution.execution_id = exec_id;
     Ok(Json(execution))
+}
+
+/// Parse the structured `parameters` object for an IO control op.
+///
+/// Accepts shapes:
+///   `{"action": "freeze"}`
+///   `{"action": "short_term_adjust", "value": <any>}`
+fn parse_io_control_params(
+    params: Option<&serde_json::Value>,
+) -> Result<(IoControlAction, Option<serde_json::Value>), ApiError> {
+    let obj = match params {
+        Some(serde_json::Value::Object(m)) => m,
+        Some(other) => {
+            return Err(ApiError::BadRequest(format!(
+                "IO control parameters must be an object with `action`, got {}",
+                other
+            )));
+        }
+        None => {
+            return Err(ApiError::BadRequest(
+                "IO control parameters required (need at least `action`)".into(),
+            ));
+        }
+    };
+    let action_str = obj
+        .get("action")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::BadRequest("IO control parameters missing `action`".into()))?;
+    let action = IoControlAction::parse(action_str).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "Invalid IO control action: {} (use return_to_ecu | reset_to_default | freeze | short_term_adjust)",
+            action_str
+        ))
+    })?;
+    let value = obj.get("value").cloned();
+    Ok((action, value))
 }
 
 /// DELETE /vehicle/v1/components/:component_id/operations/:operation_id/executions/:exec_id

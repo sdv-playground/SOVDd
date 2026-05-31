@@ -2038,17 +2038,11 @@ async fn test_list_faults() {
 
     assert!(!faults.is_empty(), "Expected at least one DTC");
 
-    // Verify DTC structure
+    // Verify DTC structure (Phase F.6 dropped id and category from
+    // the wire — id segment now lives in href).
     let first_dtc = &faults[0];
-    assert!(!first_dtc.id.is_empty(), "Expected id");
     assert!(!first_dtc.code.is_empty(), "Expected code");
-
-    // Check categories
-    let categories: Vec<&str> = faults
-        .iter()
-        .filter_map(|f| f.category.as_deref())
-        .collect();
-    eprintln!("DTC categories found: {:?}", categories);
+    assert!(!first_dtc.href.is_empty(), "Expected href");
 
     eprintln!(
         "=== Test PASSED: List faults returned {} DTCs ===",
@@ -2075,19 +2069,21 @@ async fn test_get_fault_detail() {
 
     assert!(!faults.is_empty(), "Expected at least one DTC");
 
-    let dtc_id = &faults[0].id;
+    // Extract DTC id from the HATEOAS href (Phase F.6: no explicit id field).
+    let dtc_id = faults[0]
+        .href
+        .rsplit('/')
+        .next()
+        .expect("fault href should end with an id segment")
+        .to_string();
     eprintln!("Testing with DTC ID: {}", dtc_id);
 
-    // Get the detailed fault info
     let detail = client
-        .get_fault("vtx_ecm", dtc_id)
+        .get_fault("vtx_ecm", &dtc_id)
         .await
         .expect("get_fault failed");
 
-    eprintln!("Got detail for DTC {} ({})", detail.id, detail.code);
-
-    // Verify response structure
-    assert_eq!(detail.id, *dtc_id, "ID should match");
+    eprintln!("Got detail for DTC ({})", detail.code);
     assert!(!detail.code.is_empty(), "Expected code");
 
     eprintln!(
@@ -2239,11 +2235,8 @@ async fn test_list_faults_by_category() {
             "Expected P code for powertrain, got {}",
             fault.code
         );
-        assert_eq!(
-            fault.category.as_deref(),
-            Some("powertrain"),
-            "Expected category 'powertrain'"
-        );
+        // F.6 dropped the non-spec `category` field; the powertrain
+        // bucket is now inferred from the DTC code's leading letter.
     }
 
     eprintln!(

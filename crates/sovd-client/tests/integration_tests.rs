@@ -49,7 +49,12 @@ impl MockBackend {
             occurrence_count: Some(3),
             first_occurrence: None,
             last_occurrence: None,
-            status: None,
+            // Spec §7.8 derives "active" from status.testFailed.  Mock
+            // server emits a minimal status so clients can roundtrip.
+            status: Some(serde_json::json!({
+                "testFailed": true,
+                "confirmedDTC": true,
+            })),
             href: format!("/vehicle/v1/components/{}/faults/P0123", id),
         }];
 
@@ -321,7 +326,14 @@ async fn test_get_faults() {
     let faults = server.client.get_faults("example_ecu").await.unwrap();
     assert_eq!(faults.len(), 1);
     assert_eq!(faults[0].code, "P0123");
-    assert!(faults[0].active);
+    // Spec Fault dropped `active`; derive from status.testFailed.
+    let active = faults[0]
+        .status
+        .as_ref()
+        .and_then(|s| s.get("testFailed"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(active, "expected active fault per testFailed status bit");
 }
 
 #[tokio::test]

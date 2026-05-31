@@ -51,6 +51,9 @@ pub struct DidInfoResponse {
     /// Display name (if set)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Spec §5.7: sibling i18n key for the `name` field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translation_id: Option<String>,
     /// Data type
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_type: Option<String>,
@@ -131,6 +134,7 @@ pub async fn list_parameters(
                 id: p.id.clone(),
                 did: p.did.unwrap_or_default(),
                 name: Some(p.name),
+                translation_id: None,
                 data_type: p.data_type,
                 unit: p.unit,
                 writable: !p.read_only,
@@ -158,6 +162,7 @@ pub async fn list_parameters(
                         id: p.id.clone(),
                         did: p.did.unwrap_or_default(),
                         name: Some(p.name),
+                        translation_id: None,
                         data_type: p.data_type,
                         unit: p.unit,
                         writable: !p.read_only,
@@ -183,6 +188,7 @@ pub async fn list_parameters(
                 id: id.clone(),
                 did: did_hex,
                 name: def.name,
+                translation_id: None,
                 data_type: Some(def.data_type.to_string()),
                 unit: def.unit,
                 writable: def.writable,

@@ -15,19 +15,31 @@ pub struct FaultsResponse {
     pub total_count: usize,
 }
 
-/// Spec §7.8 Table 61 (`Fault`): `code`, `fault_name`, integer
-/// severity (1=Critical, 2=Error, 3=Warning, 4=Info).  The
-/// `status` sub-object uses camelCase keys so the spec query
-/// filter `?status[confirmedDTC]=1` (line 448) matches.
+/// Spec §7.8 Table 61 (`Fault`).  Wire fields:
+///
+///   code (M), fault_name (M), severity 1..4 (O), status (C),
+///   scope (O), display_code (O), symptom (C),
+///   fault_translation_id (O), symptom_translation_id (O).
+///
+/// The non-spec extras `id`, `category`, `active` are gone — clients
+/// derive "active" from `status.testFailed`, the URL path carries the
+/// id, and `category` was a UDS-internal helper that doesn't belong
+/// on the wire.
 #[derive(Serialize)]
 pub struct FaultInfoResponse {
-    pub id: String,
     pub code: String,
     pub fault_name: String,
     pub severity: FaultSeverity,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub category: Option<String>,
-    pub active: bool,
+    pub scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symptom: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fault_translation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symptom_translation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<serde_json::Value>,
     pub href: String,
@@ -52,12 +64,14 @@ pub struct FaultFilterQuery {
 impl From<&Fault> for FaultInfoResponse {
     fn from(fault: &Fault) -> Self {
         Self {
-            id: fault.id.clone(),
             code: fault.code.clone(),
             fault_name: fault.message.clone(),
             severity: fault.severity,
-            category: fault.category.clone(),
-            active: fault.active,
+            scope: None,
+            display_code: None,
+            symptom: None,
+            fault_translation_id: None,
+            symptom_translation_id: None,
             status: fault.status.clone(),
             href: fault.href.clone(),
         }

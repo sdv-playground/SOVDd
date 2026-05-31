@@ -195,15 +195,27 @@ pub struct WriteDataRequest {
 
 /// Fault/DTC information per ISO 17978-3 §7.8 Table 61.
 /// `severity` is integer 1..4 (1=Critical, 2=Error, 3=Warning, 4=Info).
+///
+/// The non-spec `id`, `category`, `active` extras were dropped in
+/// Phase F.6.  Clients derive "active" from `status.testFailed`; the
+/// id is implicit in the resource path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FaultInfo {
-    pub id: String,
     pub code: String,
     pub fault_name: String,
     pub severity: u8,
-    #[serde(default)]
-    pub category: Option<String>,
-    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symptom: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault_translation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symptom_translation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<serde_json::Value>,
     pub href: String,
 }
 

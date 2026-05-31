@@ -602,6 +602,7 @@ pub async fn list_sub_entity_parameters(
                     id: id.clone(),
                     did: did_hex,
                     name: def.name,
+                    translation_id: None,
                     data_type: Some(def.data_type.to_string()),
                     unit: def.unit,
                     writable: def.writable,
@@ -622,6 +623,7 @@ pub async fn list_sub_entity_parameters(
             id: p.id.clone(),
             did: p.did.unwrap_or_default(),
             name: Some(p.name),
+            translation_id: None,
             data_type: p.data_type,
             unit: p.unit,
             writable: !p.read_only,
@@ -787,12 +789,14 @@ pub async fn list_sub_entity_faults(
         .faults
         .iter()
         .map(|f| FaultInfoResponse {
-            id: f.id.clone(),
             code: f.code.clone(),
             fault_name: f.message.clone(),
             severity: f.severity,
-            category: f.category.clone(),
-            active: f.active,
+            scope: None,
+            display_code: None,
+            symptom: None,
+            fault_translation_id: None,
+            symptom_translation_id: None,
             status: f.status.clone(),
             href: format!("{}/{}", base, f.id),
         })
@@ -818,12 +822,14 @@ pub async fn get_sub_entity_fault(
         component_id, app_id
     );
     Ok(Json(FaultInfoResponse {
-        id: fault.id.clone(),
         code: fault.code.clone(),
         fault_name: fault.message.clone(),
         severity: fault.severity,
-        category: fault.category.clone(),
-        active: fault.active,
+        scope: None,
+        display_code: None,
+        symptom: None,
+        fault_translation_id: None,
+        symptom_translation_id: None,
         status: fault.status.clone(),
         href: format!("{}/{}", base, fault.id),
     }))
@@ -860,7 +866,9 @@ pub async fn list_sub_entity_operations(
         .map(|op| OperationInfoResponse {
             id: op.id.clone(),
             name: op.name.clone(),
+            translation_id: None,
             description: op.description.clone(),
+            description_translation_id: None,
             requires_security: op.requires_security,
             security_level: op.security_level,
             href: format!("{}/{}/executions", base, op.id),
@@ -882,10 +890,16 @@ pub async fn start_sub_entity_operation(
 ) -> Result<axum::response::Response, ApiError> {
     let backend = resolve(&state, &component_id, &app_id).await?;
 
-    let params: Vec<u8> = match request.parameters.as_deref() {
-        Some(hex_str) => hex::decode(hex_str)
+    let params: Vec<u8> = match request.parameters.as_ref() {
+        Some(serde_json::Value::String(hex)) => hex::decode(hex)
             .map_err(|e| ApiError::BadRequest(format!("Invalid hex parameters: {}", e)))?,
-        None => Vec::new(),
+        Some(serde_json::Value::Null) | None => Vec::new(),
+        Some(other) => {
+            return Err(ApiError::BadRequest(format!(
+                "Operation '{}' parameters must be a hex string, got {}",
+                operation_id, other
+            )));
+        }
     };
 
     let mut execution = backend

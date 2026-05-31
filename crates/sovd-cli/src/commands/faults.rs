@@ -46,16 +46,22 @@ pub async fn faults(
 
     let rows: Vec<FaultRow> = faults
         .into_iter()
-        .map(|f| FaultRow {
-            code: f.code,
-            fault_name: f.fault_name,
-            severity: severity_label(f.severity),
-            active: if f.active {
-                "Yes".to_string()
-            } else {
-                "No".to_string()
-            },
-            category: f.category.unwrap_or_else(|| "-".to_string()),
+        .map(|f| {
+            // Spec Fault dropped `active` and `category` in F.6;
+            // derive `active` from `status.testFailed`.
+            let active = f
+                .status
+                .as_ref()
+                .and_then(|s| s.get("testFailed"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            FaultRow {
+                code: f.code,
+                fault_name: f.fault_name,
+                severity: severity_label(f.severity),
+                active: if active { "Yes" } else { "No" }.to_string(),
+                category: "-".to_string(),
+            }
         })
         .collect();
 

@@ -571,18 +571,28 @@ impl DiagnosticBackend for SovdProxyBackend {
 
         let converted: Vec<Fault> = faults
             .into_iter()
-            .map(|f| Fault {
-                id: f.id,
-                code: f.code,
-                severity: FaultSeverity::from(f.severity),
-                message: f.fault_name,
-                category: f.category,
-                first_occurrence: None,
-                last_occurrence: None,
-                occurrence_count: None,
-                active: f.active,
-                status: None,
-                href: f.href,
+            .map(|f| {
+                // Spec Fault no longer carries id/category/active; derive
+                // them locally for the internal sovd-core::Fault model.
+                let active = f
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.get("testFailed"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                Fault {
+                    id: f.code.clone(),
+                    code: f.code,
+                    severity: FaultSeverity::from(f.severity),
+                    message: f.fault_name,
+                    category: None,
+                    first_occurrence: None,
+                    last_occurrence: None,
+                    occurrence_count: None,
+                    active,
+                    status: f.status,
+                    href: f.href,
+                }
             })
             .collect();
 
@@ -599,17 +609,23 @@ impl DiagnosticBackend for SovdProxyBackend {
             .await
             .map_err(Self::map_err)?;
 
+        let active = f
+            .status
+            .as_ref()
+            .and_then(|s| s.get("testFailed"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         Ok(Fault {
-            id: f.id,
+            id: f.code.clone(),
             code: f.code,
             severity: FaultSeverity::from(f.severity),
             message: f.fault_name,
-            category: f.category,
+            category: None,
             first_occurrence: None,
             last_occurrence: None,
             occurrence_count: None,
-            active: f.active,
-            status: None,
+            active,
+            status: f.status,
             href: f.href,
         })
     }
