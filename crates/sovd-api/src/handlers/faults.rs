@@ -139,28 +139,3 @@ pub async fn clear_faults(
     }))
 }
 
-/// GET /vehicle/v1/components/:component_id/dtcs
-/// List active (currently failing) DTCs only
-pub async fn list_active_dtcs(
-    State(state): State<AppState>,
-    Path(component_id): Path<String>,
-) -> Result<Json<FaultsResponse>, ApiError> {
-    let backend = state.get_backend(&component_id)?;
-
-    // Filter for active faults only (test_failed = true, status bit 0x01)
-    let filter = Some(FaultFilter {
-        active_only: Some(true),
-        ..Default::default()
-    });
-
-    let result = backend.get_faults(filter.as_ref()).await?;
-    let total_count = result.faults.len();
-
-    let items: Vec<FaultInfoResponse> = result.faults.iter().map(FaultInfoResponse::from).collect();
-
-    Ok(Json(FaultsResponse {
-        items,
-        total_count,
-        status_availability_mask: result.status_availability_mask,
-    }))
-}

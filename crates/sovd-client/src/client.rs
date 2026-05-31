@@ -384,19 +384,20 @@ impl SovdClient {
         }
     }
 
-    /// Read raw DID by hex identifier
+    /// Read raw DID by hex identifier.
+    ///
+    /// Routes through the standard `data/{param-id}?raw=true` (ISO 17978-3
+    /// §7.10). The dedicated `/did/{did}` route was removed in the spec
+    /// migration; the DID hex (e.g. "F405") is itself a valid param-id.
     #[instrument(skip(self))]
     pub async fn read_did(&self, component_id: &str, did: u16) -> Result<DataResponse> {
-        let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/did/{:04X}",
-            component_id, did
-        ))?;
-
-        let response = self.client.get(url).send().await?;
-        self.handle_response(response).await
+        self.read_data_raw(component_id, &format!("{:04X}", did))
+            .await
     }
 
-    /// Write raw DID by hex identifier
+    /// Write raw DID by hex identifier.
+    ///
+    /// Routes through the standard `data/{param-id}` (ISO 17978-3 §7.10).
     #[instrument(skip(self, value))]
     pub async fn write_did(
         &self,
@@ -405,7 +406,7 @@ impl SovdClient {
         value: serde_json::Value,
     ) -> Result<()> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/did/{:04X}",
+            "/vehicle/v1/components/{}/data/{:04X}",
             component_id, did
         ))?;
 
@@ -1293,7 +1294,10 @@ impl SovdClient {
     // Dynamic Data Identifiers (DDID)
     // =========================================================================
 
-    /// Create a dynamic data identifier (UDS 0x2C)
+    /// Define a dynamic data identifier (UDS 0x2C 0x02).
+    ///
+    /// Wire shape: `POST /components/{id}/operations/define-data/executions`
+    /// (ISO 17978-3 §7.14). Returns 201 with the resulting data-list href.
     #[instrument(skip(self))]
     pub async fn create_data_definition(
         &self,
@@ -1302,7 +1306,7 @@ impl SovdClient {
         source_dids: Vec<DataDefinitionSource>,
     ) -> Result<DataDefinitionResponse> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/data-definitions",
+            "/vehicle/v1/components/{}/operations/define-data/executions",
             component_id
         ))?;
 
@@ -1315,12 +1319,20 @@ impl SovdClient {
         self.handle_response(response).await
     }
 
-    /// Delete a dynamic data identifier
+    /// Clear a dynamic data identifier (UDS 0x2C 0x03).
+    ///
+    /// Wire shape: `DELETE /components/{id}/data-lists/{list_id}` where
+    /// `list_id` is the DDID hex (e.g. "F200"). The `0x` prefix is stripped
+    /// so existing callers passing "0xF200" continue to work.
     #[instrument(skip(self))]
     pub async fn delete_data_definition(&self, component_id: &str, ddid: &str) -> Result<()> {
+        let list_id = ddid
+            .trim_start_matches("0x")
+            .trim_start_matches("0X")
+            .to_uppercase();
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/data-definitions/{}",
-            component_id, ddid
+            "/vehicle/v1/components/{}/data-lists/{}",
+            component_id, list_id
         ))?;
 
         let response = self.client.delete(url).send().await?;

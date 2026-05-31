@@ -716,16 +716,15 @@ sequenceDiagram
 | GET | `/vehicle/v1/components` | `list_components` | — | List all ECU components |
 | GET | `/vehicle/v1/components/:id` | `get_component` | — | Get component details |
 | GET | `/vehicle/v1/components/:id/data` | `list_parameters` | — | List data parameters |
-| GET | `/vehicle/v1/components/:id/data/:param` | `read_parameter` | 0x22 | Read parameter value |
-| PUT | `/vehicle/v1/components/:id/data/:param` | `write_parameter` | 0x2E | Write parameter value |
-| GET | `/vehicle/v1/components/:id/did/:did` | `read_did` | 0x22 | Read raw DID |
-| PUT | `/vehicle/v1/components/:id/did/:did` | `write_did` | 0x2E | Write raw DID |
-| GET | `/vehicle/v1/components/:id/faults` | `list_faults` | 0x19 | List DTCs |
+| GET | `/vehicle/v1/components/:id/data/:param` | `read_parameter` | 0x22 | Read parameter value (DID hex like `F405` also accepted as param; `?raw=true` skips conversion) |
+| PUT | `/vehicle/v1/components/:id/data/:param` | `write_parameter` | 0x2E | Write parameter value (DID hex accepted) |
+| GET | `/vehicle/v1/components/:id/faults` | `list_faults` | 0x19 | List DTCs (`?active_only=true` for currently-failing) |
 | DELETE | `/vehicle/v1/components/:id/faults` | `clear_faults` | 0x14 | Clear DTCs |
 | GET | `/vehicle/v1/components/:id/faults/:fid` | `get_fault` | 0x19 | Get fault detail |
-| GET | `/vehicle/v1/components/:id/dtcs` | `list_active_dtcs` | 0x19 | Active DTCs only |
-| POST | `/vehicle/v1/components/:id/data-definitions` | `create_data_definition` | 0x2C | Define DDID |
-| DELETE | `/vehicle/v1/components/:id/data-definitions/:ddid` | `delete_data_definition` | 0x2C | Clear DDID |
+| POST | `/vehicle/v1/components/:id/operations/define-data/executions` | `define_data` | 0x2C | Define DDID — spec executions form |
+| GET | `/vehicle/v1/components/:id/data-lists` | `list_data_lists` | — | List defined DDIDs |
+| GET | `/vehicle/v1/components/:id/data-lists/:list_id` | `read_data_list` | 0x22 | Read DDID value |
+| DELETE | `/vehicle/v1/components/:id/data-lists/:list_id` | `clear_data_list` | 0x2C | Clear DDID |
 | GET | `/vehicle/v1/components/:id/operations` | `list_operations` | — | List routines |
 | POST | `/vehicle/v1/components/:id/operations/:op` | `execute_operation` | 0x31 | Start routine |
 | GET | `/vehicle/v1/components/:id/outputs` | `list_outputs` | — | List I/O controls |

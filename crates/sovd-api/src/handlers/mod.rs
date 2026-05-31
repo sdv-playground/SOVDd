@@ -5,7 +5,7 @@
 pub mod apps;
 pub mod components;
 pub mod data;
-pub mod data_definitions;
+pub mod data_lists;
 pub mod definitions;
 pub mod discovery;
 pub mod faults;

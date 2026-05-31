@@ -2243,26 +2243,25 @@ async fn test_clear_faults() {
     );
 }
 
-/// Test listing active DTCs only
+/// Test listing active DTCs only — uses the spec-conforming
+/// `GET /faults?active_only=true` filter (ISO 17978-3 §7.11). The
+/// non-spec `/dtcs` route was removed in the Phase C migration.
 #[tokio::test]
 #[serial_test::serial]
 async fn test_list_active_dtcs() {
-    eprintln!("\n=== Testing GET /dtcs (Active DTCs Only) ===");
+    eprintln!("\n=== Testing GET /faults?active_only=true (Active DTCs Only) ===");
 
     let harness = TestHarness::new()
         .await
         .expect("Failed to create test harness");
 
-    // Get active DTCs only - using /dtcs endpoint which filters for active only
-    // Note: This test uses raw HTTP call because /dtcs is a separate endpoint from /faults
     let json = harness
-        .get("/vehicle/v1/components/vtx_ecm/dtcs")
+        .get("/vehicle/v1/components/vtx_ecm/faults?active_only=true")
         .await
-        .expect("GET dtcs failed");
+        .expect("GET faults?active_only=true failed");
 
     eprintln!("Response: {}", serde_json::to_string_pretty(&json).unwrap());
 
-    // Verify response structure
     assert!(json["items"].is_array(), "Expected items array");
     assert!(json["total_count"].is_number(), "Expected total_count");
 
@@ -2275,8 +2274,6 @@ async fn test_list_active_dtcs() {
         "items.len() should match total_count"
     );
 
-    // Verify all returned DTCs are active (test_failed=true per SOVD standard)
-    // SOVD "active" means the test is currently failing, regardless of confirmation status
     for item in items {
         let status = &item["status"];
         let test_failed = status["test_failed"].as_bool().unwrap_or(false);
@@ -2288,7 +2285,6 @@ async fn test_list_active_dtcs() {
             test_failed
         );
 
-        // Active per SOVD = test_failed is true (currently failing)
         assert!(
             test_failed,
             "Active DTC {} should have test_failed=true",
@@ -2647,7 +2643,7 @@ async fn test_routine_not_found() {
 async fn test_define_ddid() {
     use sovd_client::DataDefinitionSource;
 
-    eprintln!("\n=== Testing POST /data-definitions (Define DDID) ===");
+    eprintln!("\n=== Testing POST /operations/define-data/executions (Define DDID) ===");
 
     let harness = TestHarness::new()
         .await
@@ -2686,7 +2682,7 @@ async fn test_define_ddid() {
 async fn test_clear_ddid() {
     use sovd_client::DataDefinitionSource;
 
-    eprintln!("\n=== Testing DELETE /data-definitions/{{ddid}} (Clear DDID) ===");
+    eprintln!("\n=== Testing DELETE /data-lists/{{list_id}} (Clear DDID) ===");
 
     let harness = TestHarness::new()
         .await

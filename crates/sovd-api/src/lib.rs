@@ -25,7 +25,7 @@ pub use state::AppState;
 pub use sovd_conv::{DataType, DidDefinition, DidStore};
 
 use axum::extract::DefaultBodyLimit;
-use axum::routing::{delete, get, post, put};
+use axum::routing::{get, post, put};
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
@@ -70,11 +70,10 @@ pub fn create_router(state: AppState) -> Router {
             get(handlers::data::read_deep_gateway_parameter)
                 .put(handlers::data::write_deep_gateway_parameter),
         )
-        // Raw DID access (reads any DID, applies conversion if registered)
-        .route(
-            "/vehicle/v1/components/{component_id}/did/{did}",
-            get(handlers::data::read_did).put(handlers::data::write_did),
-        )
+        // Raw DID access via the spec `?raw=true` query on the standard
+        // data parameter route (ISO 17978-3 §7.10). Hex DID strings like
+        // "F405" resolve through DidStore the same as semantic names; raw
+        // bytes come back when the caller passes `?raw=true`.
         // Fault routes
         .route(
             "/vehicle/v1/components/{component_id}/faults",
@@ -84,19 +83,29 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/faults/{fault_id}",
             get(handlers::faults::get_fault),
         )
-        // Active DTCs only (convenience endpoint)
+        // Active-only DTCs are exposed via the spec faults filter:
+        //   GET /faults?active_only=true
+        // No dedicated /dtcs route — kept the codebase one collection
+        // shorter (ISO 17978-3 §5.3.6).
+        // Dynamic data lists — ISO 17978-3 §5.3.6 (`data-lists` collection)
+        // + §7.14 (`operations.executions` for defining new lists). The UDS
+        // 0x2C define/clear flow maps onto:
+        //   POST /operations/define-data/executions  → 0x2C 0x02 (define)
+        //   GET  /data-lists                         → list defined DDIDs
+        //   GET  /data-lists/{list_id}               → 0x22 read of DDID
+        //   DELETE /data-lists/{list_id}             → 0x2C 0x03 (clear)
         .route(
-            "/vehicle/v1/components/{component_id}/dtcs",
-            get(handlers::faults::list_active_dtcs),
+            "/vehicle/v1/components/{component_id}/operations/define-data/executions",
+            post(handlers::data_lists::define_data),
         )
-        // Data definition routes (DDID)
         .route(
-            "/vehicle/v1/components/{component_id}/data-definitions",
-            post(handlers::data_definitions::create_data_definition),
+            "/vehicle/v1/components/{component_id}/data-lists",
+            get(handlers::data_lists::list_data_lists),
         )
         .route(
-            "/vehicle/v1/components/{component_id}/data-definitions/{ddid}",
-            delete(handlers::data_definitions::delete_data_definition),
+            "/vehicle/v1/components/{component_id}/data-lists/{list_id}",
+            get(handlers::data_lists::read_data_list)
+                .delete(handlers::data_lists::clear_data_list),
         )
         // Log routes (primarily for HPC and message passing)
         .route(

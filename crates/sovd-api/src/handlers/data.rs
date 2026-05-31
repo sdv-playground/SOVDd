@@ -266,26 +266,6 @@ pub async fn write_deep_gateway_parameter(
     write_did_internal(&state, &component_id, &prefixed_param, request).await
 }
 
-/// GET /vehicle/v1/components/:component_id/did/:did
-/// Read a DID value (alias for /data/:did)
-pub async fn read_did(
-    State(state): State<AppState>,
-    Path((component_id, did)): Path<(String, String)>,
-    Query(query): Query<ReadQuery>,
-) -> Result<Json<DidResponse>, ApiError> {
-    read_did_internal(&state, &component_id, &did, query.raw).await
-}
-
-/// PUT /vehicle/v1/components/:component_id/did/:did
-/// Write to a DID (alias for /data/:did)
-pub async fn write_did(
-    State(state): State<AppState>,
-    Path((component_id, did)): Path<(String, String)>,
-    Json(request): Json<WriteDidRequest>,
-) -> Result<Json<DidResponse>, ApiError> {
-    write_did_internal(&state, &component_id, &did, request).await
-}
-
 // =============================================================================
 // Internal Implementation
 // =============================================================================
