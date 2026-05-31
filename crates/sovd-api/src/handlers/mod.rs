@@ -21,5 +21,6 @@ pub mod outputs;
 pub mod reset;
 pub mod software;
 pub mod streams;
+pub mod stubs;
 pub mod sub_entity;
 pub mod subscriptions;

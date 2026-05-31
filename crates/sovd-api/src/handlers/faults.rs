@@ -122,3 +122,19 @@ pub async fn clear_faults(
     let _ = backend.clear_faults(None).await?;
     Ok(StatusCode::NO_CONTENT)
 }
+
+/// DELETE /vehicle/v1/components/:component_id/faults/:fault_id
+///
+/// Spec §7.8 fault.delete — clear a single DTC.  Today the UDS
+/// backend only supports clear-all (UDS 0x14 with `FFFFFF`); this
+/// stub routes back to clear_faults() so the API surface exists.
+/// A real per-DTC mask filter lands when sovd-uds gets the
+/// extra ClearDiagnosticInformation parameters.
+pub async fn delete_fault(
+    State(state): State<AppState>,
+    Path((component_id, _fault_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let backend = state.get_backend(&component_id)?;
+    let _ = backend.clear_faults(None).await?;
+    Ok(StatusCode::NO_CONTENT)
+}

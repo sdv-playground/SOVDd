@@ -92,7 +92,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/vehicle/v1/components/{component_id}/faults/{fault_id}",
-            get(handlers::faults::get_fault),
+            get(handlers::faults::get_fault).delete(handlers::faults::delete_fault),
         )
         // Active-only DTCs are exposed via the spec faults filter:
         //   GET /faults?active_only=true
@@ -136,6 +136,86 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/vehicle/v1/components/{component_id}/logs/{log_id}",
             get(handlers::logs::get_log).delete(handlers::logs::delete_log),
+        )
+        // -----------------------------------------------------------------
+        // F.5 stub collections (spec presence, backend wiring TODO).
+        // -----------------------------------------------------------------
+        // §7.12 configurations
+        .route(
+            "/vehicle/v1/components/{component_id}/configurations",
+            get(handlers::stubs::list_configurations)
+                .post(handlers::stubs::create_configuration)
+                .delete(handlers::stubs::reset_configurations),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/configurations/{configuration_id}",
+            get(handlers::stubs::read_configuration)
+                .put(handlers::stubs::write_configuration)
+                .delete(handlers::stubs::delete_configuration_one),
+        )
+        // §7.17 locks
+        .route(
+            "/vehicle/v1/components/{component_id}/locks",
+            get(handlers::stubs::list_locks).post(handlers::stubs::acquire_lock),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/locks/{lock_id}",
+            get(handlers::stubs::read_lock)
+                .put(handlers::stubs::extend_or_break_lock)
+                .delete(handlers::stubs::release_lock),
+        )
+        // §7.11 triggers
+        .route(
+            "/vehicle/v1/components/{component_id}/triggers",
+            get(handlers::stubs::list_triggers).post(handlers::stubs::create_trigger),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/triggers/{trigger_id}",
+            get(handlers::stubs::read_trigger).delete(handlers::stubs::delete_trigger),
+        )
+        // §7.22 communication-logs
+        .route(
+            "/vehicle/v1/components/{component_id}/communication-logs",
+            get(handlers::stubs::list_communication_logs)
+                .post(handlers::stubs::create_communication_log),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/communication-logs/{communication_log_id}",
+            get(handlers::stubs::read_communication_log)
+                .put(handlers::stubs::control_communication_log)
+                .delete(handlers::stubs::delete_communication_log),
+        )
+        // §7.15 scripts
+        .route(
+            "/vehicle/v1/components/{component_id}/scripts",
+            get(handlers::stubs::list_scripts),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/scripts/{script_id}",
+            get(handlers::stubs::read_script),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/scripts/{script_id}/executions",
+            post(handlers::stubs::execute_script),
+        )
+        // Table 9 data-categories + data-groups
+        .route(
+            "/vehicle/v1/components/{component_id}/data-categories",
+            get(handlers::stubs::list_data_categories),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/data-groups",
+            get(handlers::stubs::list_data_groups),
+        )
+        // §7.16 modes/communication-control + modes/dtc-setting
+        .route(
+            "/vehicle/v1/components/{component_id}/modes/communication-control",
+            get(handlers::stubs::get_comm_control_mode)
+                .put(handlers::stubs::put_comm_control_mode),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/modes/dtc-setting",
+            get(handlers::stubs::get_dtc_setting_mode).put(handlers::stubs::put_dtc_setting_mode),
         )
         // Spec §7.13 clear-data collection — stub today.
         .route(
