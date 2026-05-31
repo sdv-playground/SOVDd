@@ -32,17 +32,22 @@ pub struct StreamQuery {
     pub rate_hz: u32,
 }
 
-/// SSE event format expected by tests
-/// Contains seq, ts, and flattened parameter values
+/// SSE EventEnvelope — ISO 17978-3 §5.6 Table 5.
+///
+/// Each event SHALL carry one envelope via the SSE `data:` line.
+/// `payload` is the success payload (`AnyValue`); `error` is mutually
+/// exclusive and carries a `GenericError` if the publisher hit a
+/// transient producer error.
 #[derive(Debug, Serialize)]
 struct StreamEvent {
-    /// RFC 3339 timestamp (ISO 17978-3 C-050).
-    ts: String,
-    /// Sequence number
-    seq: u64,
-    /// Flattened parameter values
-    #[serde(flatten)]
-    values: HashMap<String, serde_json::Value>,
+    /// RFC 3339 UTC time the server emitted this event (C-050).
+    timestamp: String,
+    /// Conditional success payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payload: Option<serde_json::Value>,
+    /// Conditional error payload (mutually exclusive with `payload`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<sovd_core::GenericError>,
 }
 
 /// GET /vehicle/v1/components/:component_id/streams/:subscription_id
@@ -107,7 +112,7 @@ pub async fn stream_subscription(
         match result {
             Ok(data_point) => {
                 let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
-                let ts = Utc::now().to_rfc3339();
+                let timestamp = Utc::now().to_rfc3339();
 
                 // Look up parameter name and DID from the data point ID
                 let (param_name, did) = did_to_info
@@ -130,10 +135,16 @@ pub async fn stream_subscription(
                     data_point.value
                 };
 
-                let mut values = HashMap::new();
-                values.insert(param_name, converted_value);
-
-                let event = StreamEvent { ts, seq, values };
+                // EventEnvelope.payload: {seq, values{<param>: <val>}}
+                let payload = serde_json::json!({
+                    "seq": seq,
+                    "values": { param_name: converted_value },
+                });
+                let event = StreamEvent {
+                    timestamp,
+                    payload: Some(payload),
+                    error: None,
+                };
 
                 Some(Ok::<_, Infallible>(
                     Event::default().data(serde_json::to_string(&event).unwrap_or_default()),
@@ -258,7 +269,7 @@ fn create_sse_stream(
         match result {
             Ok(data_point) => {
                 let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
-                let ts = Utc::now().to_rfc3339();
+                let timestamp = Utc::now().to_rfc3339();
 
                 // Look up parameter name and DID from the data point ID
                 let (param_name, did) = did_to_info
@@ -281,10 +292,15 @@ fn create_sse_stream(
                     data_point.value
                 };
 
-                let mut values = HashMap::new();
-                values.insert(param_name, converted_value);
-
-                let event = StreamEvent { ts, seq, values };
+                let payload = serde_json::json!({
+                    "seq": seq,
+                    "values": { param_name: converted_value },
+                });
+                let event = StreamEvent {
+                    timestamp,
+                    payload: Some(payload),
+                    error: None,
+                };
 
                 Some(Ok::<_, Infallible>(
                     Event::default().data(serde_json::to_string(&event).unwrap_or_default()),

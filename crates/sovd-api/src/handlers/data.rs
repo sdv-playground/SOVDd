@@ -210,14 +210,14 @@ pub async fn read_parameter(
     read_did_internal(&state, &component_id, &did, query.raw).await
 }
 
-/// PUT /vehicle/v1/components/:component_id/data/:did
-/// Write to a DID (applies conversion if registered)
+/// PUT /vehicle/v1/components/:component_id/data/:did — 204 No Content per spec.
 pub async fn write_parameter(
     State(state): State<AppState>,
     Path((component_id, did)): Path<(String, String)>,
     Json(request): Json<WriteDidRequest>,
-) -> Result<Json<DidResponse>, ApiError> {
-    write_did_internal(&state, &component_id, &did, request).await
+) -> Result<axum::http::StatusCode, ApiError> {
+    let _ = write_did_internal(&state, &component_id, &did, request).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 /// GET /vehicle/v1/components/:component_id/data/:child_id/:child_param_id
@@ -232,16 +232,15 @@ pub async fn read_gateway_parameter(
     read_did_internal(&state, &component_id, &prefixed_param, query.raw).await
 }
 
-/// PUT /vehicle/v1/components/:component_id/data/:child_id/:child_param_id
-/// Write a parameter through a gateway (handles nested path)
+/// PUT /vehicle/v1/components/:component_id/data/:child_id/:child_param_id — 204.
 pub async fn write_gateway_parameter(
     State(state): State<AppState>,
     Path((component_id, child_id, child_param_id)): Path<(String, String, String)>,
     Json(request): Json<WriteDidRequest>,
-) -> Result<Json<DidResponse>, ApiError> {
-    // Combine into prefixed format and delegate to internal handler
+) -> Result<axum::http::StatusCode, ApiError> {
     let prefixed_param = format!("{}/{}", child_id, child_param_id);
-    write_did_internal(&state, &component_id, &prefixed_param, request).await
+    let _ = write_did_internal(&state, &component_id, &prefixed_param, request).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 /// GET /vehicle/v1/components/:component_id/data/:gw_id/:child_id/:param_id
@@ -255,15 +254,15 @@ pub async fn read_deep_gateway_parameter(
     read_did_internal(&state, &component_id, &prefixed_param, query.raw).await
 }
 
-/// PUT /vehicle/v1/components/:component_id/data/:gw_id/:child_id/:param_id
-/// Write a parameter through a deeply nested gateway
+/// PUT /vehicle/v1/components/:component_id/data/:gw_id/:child_id/:param_id — 204.
 pub async fn write_deep_gateway_parameter(
     State(state): State<AppState>,
     Path((component_id, gw_id, child_id, child_param_id)): Path<(String, String, String, String)>,
     Json(request): Json<WriteDidRequest>,
-) -> Result<Json<DidResponse>, ApiError> {
+) -> Result<axum::http::StatusCode, ApiError> {
     let prefixed_param = format!("{}/{}/{}", gw_id, child_id, child_param_id);
-    write_did_internal(&state, &component_id, &prefixed_param, request).await
+    let _ = write_did_internal(&state, &component_id, &prefixed_param, request).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 // =============================================================================

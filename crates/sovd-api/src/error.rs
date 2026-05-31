@@ -1,4 +1,12 @@
-//! API error types and conversions — ISO 17978-3 §5.8.3 GenericError.
+//! API error types and conversions — ISO 17978-3 §5.8.3 GenericError
+//! + Table 18 ErrorCode vocabulary.
+//!
+//! `error_code` MUST be one of the spec-defined tokens (Table 18); HTTP-
+//! status-only mappings (e.g. "bad-request", "not-found") were rejected
+//! in conformance review — they're not in Table 18.  Where the spec
+//! doesn't cover an HTTP-tier issue, fall back to `vendor-specific`
+//! with a `vendor_code` and surface the underlying HTTP status via
+//! `parameters.http_code`.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -8,29 +16,38 @@ use sovd_core::{error_code, BackendError, GenericError};
 /// API error type that converts to HTTP responses.
 #[derive(Debug)]
 pub enum ApiError {
-    /// 400 Bad Request
+    /// 400 Bad Request — `incomplete-request`
     BadRequest(String),
-    /// 404 Not Found
+    /// 404 Not Found — `incomplete-request` (caller referenced a
+    /// non-existent resource path; spec has no dedicated "not-found"
+    /// enum value, treat as a malformed request)
     NotFound(String),
-    /// 403 Forbidden
+    /// 403 Forbidden — `insufficient-access-rights`
     Forbidden(String),
-    /// 409 Conflict
+    /// 409 Conflict — `precondition-not-fulfilled` (generic resource
+    /// busy / state-machine conflict).  For lock-broken specifically
+    /// use the dedicated `LockBroken` variant; for in-progress flash
+    /// use `UpdateInProgress`.
     Conflict(String),
-    /// 412 Precondition Failed (session/mode requirements not met)
+    /// 409 Conflict — `lock-broken`.
+    LockBroken(String),
+    /// 409 Conflict — `update-process-in-progress`.
+    UpdateInProgress(String),
+    /// 412 Precondition Failed — `precondition-not-fulfilled`
     PreconditionFailed(String),
-    /// 429 Too Many Requests (rate limited)
+    /// 429 Too Many Requests — `vendor-specific` (no Table 18 mapping)
     TooManyRequests(String),
-    /// 501 Not Implemented
+    /// 501 Not Implemented — `sovd-server-misconfigured`
     NotImplemented(String),
-    /// 502 Bad Gateway (backend protocol error)
+    /// 502 Bad Gateway — `not-responding` (upstream protocol error)
     BadGateway(String),
-    /// 502 Bad Gateway — ECU returned a negative response (UDS NRC).
+    /// 502 Bad Gateway — `error-response` (UDS NRC).
     EcuErrorResponse { message: String, nrc: u8, sid: u8 },
-    /// 503 Service Unavailable
+    /// 503 Service Unavailable — `not-responding` (transport unavailable).
     ServiceUnavailable(String),
-    /// 504 Gateway Timeout
+    /// 504 Gateway Timeout — `not-responding`.
     GatewayTimeout(String),
-    /// 500 Internal Server Error
+    /// 500 Internal Server Error — `sovd-server-failure`.
     Internal(String),
 }
 
@@ -46,47 +63,58 @@ impl IntoResponse for ApiError {
             }
             ApiError::BadRequest(msg) => (
                 StatusCode::BAD_REQUEST,
-                GenericError::new(error_code::BAD_REQUEST, msg),
+                GenericError::new(error_code::INCOMPLETE_REQUEST, msg),
             ),
             ApiError::NotFound(msg) => (
                 StatusCode::NOT_FOUND,
-                GenericError::new(error_code::NOT_FOUND, msg),
+                GenericError::new(error_code::INCOMPLETE_REQUEST, msg)
+                    .with_param("http_code", "404"),
             ),
             ApiError::Forbidden(msg) => (
                 StatusCode::FORBIDDEN,
-                GenericError::new(error_code::FORBIDDEN, msg),
+                GenericError::new(error_code::INSUFFICIENT_ACCESS_RIGHTS, msg),
             ),
             ApiError::Conflict(msg) => (
                 StatusCode::CONFLICT,
-                GenericError::new(error_code::CONFLICT, msg),
+                GenericError::new(error_code::PRECONDITION_NOT_FULFILLED, msg)
+                    .with_param("http_code", "409"),
+            ),
+            ApiError::LockBroken(msg) => (
+                StatusCode::CONFLICT,
+                GenericError::new(error_code::LOCK_BROKEN, msg),
+            ),
+            ApiError::UpdateInProgress(msg) => (
+                StatusCode::CONFLICT,
+                GenericError::new(error_code::UPDATE_PROCESS_IN_PROGRESS, msg),
             ),
             ApiError::PreconditionFailed(msg) => (
                 StatusCode::PRECONDITION_FAILED,
-                GenericError::new(error_code::PRECONDITION_FAILED, msg),
+                GenericError::new(error_code::PRECONDITION_NOT_FULFILLED, msg),
             ),
             ApiError::TooManyRequests(msg) => (
                 StatusCode::TOO_MANY_REQUESTS,
-                GenericError::new(error_code::TOO_MANY_REQUESTS, msg),
+                GenericError::vendor("rate-limited", msg).with_param("http_code", "429"),
             ),
             ApiError::NotImplemented(msg) => (
                 StatusCode::NOT_IMPLEMENTED,
-                GenericError::new(error_code::NOT_IMPLEMENTED, msg),
+                GenericError::new(error_code::SOVD_SERVER_MISCONFIGURED, msg)
+                    .with_param("http_code", "501"),
             ),
             ApiError::BadGateway(msg) => (
                 StatusCode::BAD_GATEWAY,
-                GenericError::new(error_code::BAD_GATEWAY, msg),
+                GenericError::new(error_code::NOT_RESPONDING, msg).with_param("http_code", "502"),
             ),
             ApiError::ServiceUnavailable(msg) => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                GenericError::new(error_code::SERVICE_UNAVAILABLE, msg),
+                GenericError::new(error_code::NOT_RESPONDING, msg).with_param("http_code", "503"),
             ),
             ApiError::GatewayTimeout(msg) => (
                 StatusCode::GATEWAY_TIMEOUT,
-                GenericError::new(error_code::GATEWAY_TIMEOUT, msg),
+                GenericError::new(error_code::NOT_RESPONDING, msg).with_param("http_code", "504"),
             ),
             ApiError::Internal(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                GenericError::new(error_code::INTERNAL_ERROR, msg),
+                GenericError::new(error_code::SOVD_SERVER_FAILURE, msg),
             ),
         };
 

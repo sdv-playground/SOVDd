@@ -1268,7 +1268,10 @@ impl DiagnosticBackend for UdsBackend {
                         | FlashState::Validated
                         | FlashState::Verifying
                 ) {
-                    return Err(BackendError::InvalidRequest(format!(
+                    // Spec C-111: in-progress conflicts return 409
+                    // (precondition-not-fulfilled → update-process-in-progress
+                    // once the /updates collection lands in Phase D1).
+                    return Err(BackendError::Busy(format!(
                         "Flash transfer already in progress: {}",
                         transfer.id
                     )));

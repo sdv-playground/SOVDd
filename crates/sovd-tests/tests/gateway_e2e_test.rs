@@ -1068,8 +1068,8 @@ async fn test_streaming_via_sse() {
             "  [{}] ts={}, seq={}, values={:?}",
             i + 1,
             event.timestamp,
-            event.sequence,
-            event.values
+            event.sequence().unwrap_or(0),
+            event.values()
         );
     }
     if events.len() > 5 {
@@ -1146,8 +1146,8 @@ async fn test_streaming_through_gateway() {
                 "  [{}] ts={}, seq={}, values={:?}",
                 i + 1,
                 event.timestamp,
-                event.sequence,
-                event.values
+                event.sequence().unwrap_or(0),
+                event.values()
             );
         }
         eprintln!("\nGateway streaming successful!");

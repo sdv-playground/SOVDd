@@ -1185,18 +1185,24 @@ async fn test_sse_stream_periodic_data() {
 
                                 // Parse and verify data format
                                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                    // Log every 5th event to avoid spam
+                                    // EventEnvelope wire: {timestamp, payload: {seq, values: {...}}}
+                                    let payload = &json["payload"];
+                                    let values = &payload["values"];
                                     if events_received % 5 == 1 || events_received <= 3 {
                                         eprintln!("SSE Event #{}: seq={}, vehicle_speed={}, coolant_temp={}, engine_load={}",
                                             events_received,
-                                            json["seq"],
-                                            json.get("vehicle_speed").unwrap_or(&serde_json::Value::Null),
-                                            json.get("coolant_temp").unwrap_or(&serde_json::Value::Null),
-                                            json.get("engine_load").unwrap_or(&serde_json::Value::Null)
+                                            payload["seq"],
+                                            values.get("vehicle_speed").unwrap_or(&serde_json::Value::Null),
+                                            values.get("coolant_temp").unwrap_or(&serde_json::Value::Null),
+                                            values.get("engine_load").unwrap_or(&serde_json::Value::Null)
                                         );
                                     }
-                                    assert!(json["seq"].is_number(), "Expected sequence number");
-                                    assert!(json["ts"].is_string(), "Expected RFC 3339 timestamp");
+                                    assert!(
+                                        json["timestamp"].is_string(),
+                                        "Expected RFC 3339 timestamp"
+                                    );
+                                    assert!(payload["seq"].is_number(), "Expected payload.seq");
+                                    assert!(values.is_object(), "Expected payload.values");
                                 }
                             }
                         }
@@ -1655,13 +1661,14 @@ async fn test_sse_stream_mixed_access_levels() {
                                 events_received += 1;
 
                                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                    // Check for each parameter in the event
+                                    // EventEnvelope: payload.values.<param>
+                                    let values = &json["payload"]["values"];
                                     for param in &expected_params {
-                                        if json[*param].is_number() {
-                                            if !received_params.contains(*param) {
-                                                eprintln!("  Received {}: {}", param, json[*param]);
-                                                received_params.insert(param.to_string());
-                                            }
+                                        if values[*param].is_number()
+                                            && !received_params.contains(*param)
+                                        {
+                                            eprintln!("  Received {}: {}", param, values[*param]);
+                                            received_params.insert(param.to_string());
                                         }
                                     }
                                 }
@@ -3186,8 +3193,8 @@ async fn test_flash_invalid_file_id() {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     assert_eq!(
-        err, "bad-request",
-        "expected error_code=bad-request, got {err}"
+        err, "incomplete-request",
+        "expected error_code=incomplete-request (Table 18), got {err}"
     );
 
     eprintln!("=== Test PASSED: flash/transfer rejected without verified package ===");

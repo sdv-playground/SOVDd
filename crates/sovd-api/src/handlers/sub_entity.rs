@@ -27,7 +27,7 @@ use crate::state::AppState;
 
 // Re-use response types from sibling handler modules.
 use super::data::{DidInfoResponse, DidListResponse, DidResponse, ReadQuery};
-use super::faults::{ClearFaultsResponse, FaultFilterQuery, FaultInfoResponse, FaultsResponse};
+use super::faults::{FaultFilterQuery, FaultInfoResponse, FaultsResponse};
 use super::files::{FileInfo, ListFilesResponse, UploadFileResponse};
 use super::flash::{
     ActivationStateResponse, CommitRollbackResponse, ListTransfersResponse, StartFlashRequest,
@@ -721,26 +721,20 @@ pub async fn read_sub_entity_parameter(
     }))
 }
 
-/// PUT .../apps/:app_id/data/:param_id
+/// PUT .../apps/:app_id/data/:param_id — 204 No Content per spec.
 pub async fn write_sub_entity_parameter(
     State(state): State<AppState>,
     Path((component_id, app_id, param_id)): Path<(String, String, String)>,
     Json(request): Json<super::data::WriteDidRequest>,
-) -> Result<Json<DidResponse>, ApiError> {
+) -> Result<StatusCode, ApiError> {
     let backend = resolve(&state, &component_id, &app_id).await?;
     let sub_entity_id = backend.entity_info().id.clone();
     let did_store = state.did_store();
 
-    // Resolve DID and write via DidStore when component-specific definitions exist
     let has_local_dids = did_store.has_component_specific_dids(&sub_entity_id);
     if has_local_dids {
         if let Some(did_u16) = did_store.resolve_did(&param_id) {
             let component_def = did_store.get_for_component(did_u16, &sub_entity_id);
-            let semantic_id = component_def
-                .as_ref()
-                .and_then(|def| def.id.clone())
-                .unwrap_or_else(|| param_id.clone());
-
             let data = if component_def.is_some() {
                 match did_store.encode(did_u16, &request.value) {
                     Ok(bytes) => bytes,
@@ -749,45 +743,15 @@ pub async fn write_sub_entity_parameter(
             } else {
                 super::data::convert_value_to_bytes(&request)?
             };
-
             backend.write_raw_did(did_u16, &data).await?;
-
-            let (value, unit, converted) = if let Some(def) = component_def {
-                match did_store.decode(did_u16, &data) {
-                    Ok(decoded) => (decoded, def.unit, true),
-                    Err(_) => (serde_json::json!(hex::encode(&data)), None, false),
-                }
-            } else {
-                (serde_json::json!(hex::encode(&data)), None, false)
-            };
-
-            return Ok(Json(DidResponse {
-                id: semantic_id,
-                did: sovd_conv::format_did(did_u16),
-                value,
-                unit,
-                raw: hex::encode(&data),
-                length: data.len(),
-                converted,
-                timestamp: Utc::now().to_rfc3339(),
-            }));
+            return Ok(StatusCode::NO_CONTENT);
         }
     }
 
     // Fall back to backend.write_data() for proxy backends
     let data = super::data::convert_value_to_bytes(&request)?;
     backend.write_data(&param_id, &data).await?;
-
-    Ok(Json(DidResponse {
-        id: param_id,
-        did: String::new(),
-        value: request.value,
-        unit: None,
-        raw: hex::encode(&data),
-        length: data.len(),
-        converted: false,
-        timestamp: Utc::now().to_rfc3339(),
-    }))
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // =========================================================================
@@ -865,18 +829,14 @@ pub async fn get_sub_entity_fault(
     }))
 }
 
-/// DELETE .../apps/:app_id/faults
+/// DELETE .../apps/:app_id/faults — 204 No Content per spec.
 pub async fn clear_sub_entity_faults(
     State(state): State<AppState>,
     Path((component_id, app_id)): Path<(String, String)>,
-) -> Result<Json<ClearFaultsResponse>, ApiError> {
+) -> Result<StatusCode, ApiError> {
     let backend = resolve(&state, &component_id, &app_id).await?;
-    let result = backend.clear_faults(None).await.map_err(ApiError::from)?;
-    Ok(Json(ClearFaultsResponse {
-        success: result.success,
-        cleared_count: result.cleared_count,
-        message: result.message,
-    }))
+    let _ = backend.clear_faults(None).await.map_err(ApiError::from)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // =========================================================================

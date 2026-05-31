@@ -83,14 +83,20 @@ pub async fn monitor(
 
 /// Print a stream event in the appropriate format
 fn print_stream_event(event: &sovd_client::StreamEvent, params: &[String], ctx: &OutputContext) {
+    // EventEnvelope: skip events with no success payload (error-only).
+    let Some(values) = event.values() else {
+        return;
+    };
+    let sequence = event.sequence().unwrap_or(0);
+
     match ctx.format {
         OutputFormat::Table => {
             // Print each parameter value on its own line
             for param in params {
-                if let Some(value) = event.values.get(param) {
+                if let Some(value) = values.get(param) {
                     let row = StreamRow {
                         timestamp: event.timestamp.to_string(),
-                        sequence: event.sequence.to_string(),
+                        sequence: sequence.to_string(),
                         parameter: param.clone(),
                         value: format_json_value(value),
                     };
@@ -111,14 +117,12 @@ fn print_stream_event(event: &sovd_client::StreamEvent, params: &[String], ctx: 
         OutputFormat::Csv => {
             // Print as CSV row
             let values: Vec<String> = std::iter::once(event.timestamp.to_string())
-                .chain(std::iter::once(event.sequence.to_string()))
-                .chain(params.iter().map(|p| {
-                    event
-                        .values
-                        .get(p)
-                        .map(format_json_value)
-                        .unwrap_or_default()
-                }))
+                .chain(std::iter::once(sequence.to_string()))
+                .chain(
+                    params
+                        .iter()
+                        .map(|p| values.get(p).map(format_json_value).unwrap_or_default()),
+                )
                 .collect();
             println!("{}", values.join(","));
         }

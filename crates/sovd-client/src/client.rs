@@ -471,7 +471,12 @@ impl SovdClient {
         self.handle_response(response).await
     }
 
-    /// Clear all faults/DTCs from a component
+    /// Clear all faults/DTCs from a component.
+    ///
+    /// Wire: `DELETE /components/{id}/faults` → **204 No Content** per
+    /// spec.  The returned `ClearFaultsResponse` is a courtesy
+    /// success-shape derived from the status code; the server no
+    /// longer emits a body for collection deletes.
     #[instrument(skip(self))]
     pub async fn clear_faults(&self, component_id: &str) -> Result<ClearFaultsResponse> {
         let url = self
@@ -479,7 +484,15 @@ impl SovdClient {
             .join(&format!("/vehicle/v1/components/{}/faults", component_id))?;
 
         let response = self.client.delete(url).send().await?;
-        self.handle_response(response).await
+        if response.status().is_success() {
+            Ok(ClearFaultsResponse {
+                success: true,
+                cleared_count: None,
+                message: None,
+            })
+        } else {
+            Err(self.extract_error(response).await)
+        }
     }
 
     // =========================================================================

@@ -1,6 +1,7 @@
 //! Fault/DTC handlers — ISO 17978-3 §7.8
 
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use sovd_core::{Fault, FaultFilter, FaultSeverity};
@@ -109,17 +110,15 @@ pub async fn get_fault(
 }
 
 /// DELETE /vehicle/v1/components/:component_id/faults
-/// Clear all faults
+///
+/// Spec mandates 204 No Content for DELETE on a collection (no body).
+/// `ClearFaultsResponse` kept in the codebase for the typed-client
+/// shape but no longer serialized to the wire.
 pub async fn clear_faults(
     State(state): State<AppState>,
     Path(component_id): Path<String>,
-) -> Result<Json<ClearFaultsResponse>, ApiError> {
+) -> Result<StatusCode, ApiError> {
     let backend = state.get_backend(&component_id)?;
-    let result = backend.clear_faults(None).await?;
-
-    Ok(Json(ClearFaultsResponse {
-        success: result.success,
-        cleared_count: result.cleared_count,
-        message: result.message,
-    }))
+    let _ = backend.clear_faults(None).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
