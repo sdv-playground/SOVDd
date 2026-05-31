@@ -1,16 +1,17 @@
 //! `logs/entries` + `logs/config` sub-resources — ISO 17978-3 §7.21.
 //!
-//! `logs` (the parent collection) is already served by `handlers/logs.rs`.
-//! This module adds the spec-mandated sub-resources as stubs:
+//! `logs` (the parent collection) is served by `handlers/logs.rs`.
+//! This module adds the spec-mandated sub-resources:
 //!
 //! * `GET .../logs/entries`   — list of log entries with links to bulk-data
 //! * `GET .../logs/config`    — current log configuration
 //! * `PUT .../logs/config`    — set log configuration (204 on accept)
 //! * `DELETE .../logs/config` — reset to default (204)
 //!
-//! Backend wiring is TODO; for now we expose the routes with
-//! defensible empty / default responses so the spec audit doesn't
-//! flag them as missing.
+//! Config persists in-memory in `AppState::log_config` (lost on
+//! restart).  Backend wiring (per-component logger reconfigure) is
+//! a TODO — the config is stored and returned faithfully, but no
+//! downstream component reads it yet.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -46,6 +47,16 @@ pub struct LogConfig {
     pub source: Option<String>,
 }
 
+impl LogConfig {
+    fn defaults() -> Self {
+        Self {
+            context: default_context(),
+            min_severity: default_min_severity(),
+            source: None,
+        }
+    }
+}
+
 fn default_context() -> String {
     "rfc5424".to_string()
 }
@@ -69,22 +80,27 @@ pub async fn get_log_config(
     Path(component_id): Path<String>,
 ) -> Result<Json<LogConfig>, ApiError> {
     let _ = state.get_backend(&component_id)?;
-    Ok(Json(LogConfig {
-        context: default_context(),
-        min_severity: default_min_severity(),
-        source: None,
-    }))
+    let stored = state.log_config.0.lock().get(&component_id).cloned();
+    match stored {
+        Some(v) => {
+            let cfg: LogConfig = serde_json::from_value(v)
+                .map_err(|e| ApiError::Internal(format!("corrupted log_config state: {e}")))?;
+            Ok(Json(cfg))
+        }
+        None => Ok(Json(LogConfig::defaults())),
+    }
 }
 
 /// PUT /vehicle/v1/components/:component_id/logs/config
 pub async fn put_log_config(
     State(state): State<AppState>,
     Path(component_id): Path<String>,
-    Json(_config): Json<LogConfig>,
+    Json(config): Json<LogConfig>,
 ) -> Result<StatusCode, ApiError> {
     let _ = state.get_backend(&component_id)?;
-    // Stub: accept the configuration but don't persist it yet —
-    // backend wiring lands with the per-backend logger refactor.
+    let value = serde_json::to_value(&config)
+        .map_err(|e| ApiError::Internal(format!("log_config serde: {e}")))?;
+    state.log_config.0.lock().insert(component_id, value);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -94,5 +110,6 @@ pub async fn reset_log_config(
     Path(component_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let _ = state.get_backend(&component_id)?;
+    state.log_config.0.lock().remove(&component_id);
     Ok(StatusCode::NO_CONTENT)
 }

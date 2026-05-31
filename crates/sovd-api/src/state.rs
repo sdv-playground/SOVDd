@@ -63,6 +63,20 @@ impl OperationExecutionCache {
     }
 }
 
+/// Per-component log configuration — Spec §7.21 `logs/config`.
+///
+/// Initialised on first read with server defaults; mutated by
+/// `PUT .../logs/config`; cleared by `DELETE .../logs/config`.  Held
+/// in-memory only — restart drops it back to defaults.
+#[derive(Clone, Debug, Default)]
+pub struct LogConfigStore(pub Arc<Mutex<HashMap<String, serde_json::Value>>>);
+
+/// Per-component clear-data activity tracker.  Each entry is the
+/// most-recently issued clear-data action's status (`idle`, `running`,
+/// `completed`, `failed`).
+#[derive(Clone, Debug, Default)]
+pub struct ClearDataStatusStore(pub Arc<Mutex<HashMap<String, String>>>);
+
 /// Application state shared across all handlers
 #[derive(Clone)]
 pub struct AppState {
@@ -76,6 +90,10 @@ pub struct AppState {
     output_configs: Arc<HashMap<String, Vec<OutputConfig>>>,
     /// Bounded cache of recent operation executions for `GET ../executions/{id}`.
     pub operation_executions: Arc<OperationExecutionCache>,
+    /// Per-component logs/config persistence.
+    pub log_config: LogConfigStore,
+    /// Per-component clear-data activity status.
+    pub clear_data_status: ClearDataStatusStore,
 }
 
 impl AppState {
@@ -87,6 +105,8 @@ impl AppState {
             subscription_manager: Arc::new(SubscriptionManager::new()),
             output_configs: Arc::new(HashMap::new()),
             operation_executions: Arc::new(OperationExecutionCache::default()),
+            log_config: LogConfigStore::default(),
+            clear_data_status: ClearDataStatusStore::default(),
         }
     }
 
@@ -101,6 +121,8 @@ impl AppState {
             subscription_manager: Arc::new(SubscriptionManager::new()),
             output_configs: Arc::new(HashMap::new()),
             operation_executions: Arc::new(OperationExecutionCache::default()),
+            log_config: LogConfigStore::default(),
+            clear_data_status: ClearDataStatusStore::default(),
         }
     }
 
@@ -116,6 +138,8 @@ impl AppState {
             subscription_manager: Arc::new(SubscriptionManager::new()),
             output_configs: Arc::new(output_configs),
             operation_executions: Arc::new(OperationExecutionCache::default()),
+            log_config: LogConfigStore::default(),
+            clear_data_status: ClearDataStatusStore::default(),
         }
     }
 
