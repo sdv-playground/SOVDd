@@ -96,8 +96,9 @@ pub mod error_code {
     pub const INVALID_RESPONSE_CONTENT: &str = "invalid-response-content";
     /// Payload signature invalid.
     pub const INVALID_SIGNATURE: &str = "invalid-signature";
-    /// Client's lock was broken by another client (server returns 409).
-    pub const LOCK_BROKEN: &str = "lock-broken";
+    // `lock-broken` (Table 18) intentionally absent — no live lock
+    // implementation maps to it.  Re-introduce when /locks gains real
+    // acquire/release semantics.
     /// Underlying component queried but did not respond.
     pub const NOT_RESPONDING: &str = "not-responding";
     /// Preconditions to execute the method not met.

@@ -18,6 +18,7 @@ pub struct VersionEntry {
     /// Base path this version serves at, e.g. `"/vehicle/v1"`.
     pub base_path: String,
     /// Spec edition / x-sovd-version this maps to.
+    #[serde(rename = "x-sovd-version")]
     pub x_sovd_version: String,
 }
 
@@ -374,13 +375,16 @@ pub async fn capability_description() -> Json<serde_json::Value> {
                 },
                 "Fault": {
                     "type": "object",
-                    "required": ["id", "code", "fault_name", "severity"],
+                    "required": ["code", "fault_name", "severity", "href"],
                     "properties": {
-                        "id": { "type": "string" },
                         "code": { "type": "string" },
                         "fault_name": { "type": "string" },
                         "severity": { "type": "integer", "minimum": 1, "maximum": 4, "description": "1=FATAL, 2=ERROR, 3=WARN, 4=INFO." },
-                        "active": { "type": "boolean" },
+                        "scope": { "type": "string" },
+                        "display_code": { "type": "string" },
+                        "symptom": { "type": "string" },
+                        "fault_translation_id": { "type": "string" },
+                        "symptom_translation_id": { "type": "string" },
                         "status": { "type": "object" },
                         "href": { "type": "string", "format": "uri-reference" }
                     }

@@ -346,21 +346,19 @@ pub async fn list_data_groups(
 // modes/communication-control + modes/dtc-setting — §7.16
 // =============================================================================
 
-#[derive(Debug, Serialize)]
-pub struct CommControlMode {
-    pub id: String,
-    pub value: String,
-}
+// modes/communication-control and modes/dtc-setting return 501 on both
+// verbs until the backend exposes UDS 0x28 / 0x85.  Returning a
+// fabricated GET value would be worse than 501 — conformance checkers
+// would treat the cached "normal"/"on" as a real ECU read.
 
 pub async fn get_comm_control_mode(
     State(state): State<AppState>,
     Path(component_id): Path<String>,
-) -> Result<Json<CommControlMode>, ApiError> {
+) -> Result<StatusCode, ApiError> {
     require_component(&state, &component_id)?;
-    Ok(Json(CommControlMode {
-        id: "communication-control".into(),
-        value: "normal".into(),
-    }))
+    Err(ApiError::NotImplemented(
+        "modes/communication-control not yet wired (UDS 0x28)".into(),
+    ))
 }
 
 pub async fn put_comm_control_mode(
@@ -374,21 +372,14 @@ pub async fn put_comm_control_mode(
     ))
 }
 
-#[derive(Debug, Serialize)]
-pub struct DtcSettingMode {
-    pub id: String,
-    pub value: String,
-}
-
 pub async fn get_dtc_setting_mode(
     State(state): State<AppState>,
     Path(component_id): Path<String>,
-) -> Result<Json<DtcSettingMode>, ApiError> {
+) -> Result<StatusCode, ApiError> {
     require_component(&state, &component_id)?;
-    Ok(Json(DtcSettingMode {
-        id: "dtc-setting".into(),
-        value: "on".into(),
-    }))
+    Err(ApiError::NotImplemented(
+        "modes/dtc-setting not yet wired (UDS 0x85)".into(),
+    ))
 }
 
 pub async fn put_dtc_setting_mode(

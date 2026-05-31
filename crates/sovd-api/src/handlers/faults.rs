@@ -139,16 +139,27 @@ pub async fn clear_faults(
 
 /// DELETE /vehicle/v1/components/:component_id/faults/:fault_id
 ///
-/// Spec §7.8 fault.delete — clear a single DTC.  Today the UDS
-/// backend only supports clear-all (UDS 0x14 with `FFFFFF`); this
-/// stub routes back to clear_faults() so the API surface exists.
-/// A real per-DTC mask filter lands when sovd-uds gets the
-/// extra ClearDiagnosticInformation parameters.
+/// Spec §7.8 fault.delete — clear a single DTC.  UDS 0x14
+/// (ClearDiagnosticInformation) takes a 3-byte groupOfDTC; we parse
+/// the path's `fault_id` as hex and pass it through.  We deliberately
+/// refuse the clear-all sentinel (`0xFFFFFF`) here — that belongs to
+/// `DELETE /faults`, not the per-fault path — and unparseable ids get
+/// 501 rather than silently wiping the whole DTC store.
 pub async fn delete_fault(
     State(state): State<AppState>,
-    Path((component_id, _fault_id)): Path<(String, String)>,
+    Path((component_id, fault_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     let backend = state.get_backend(&component_id)?;
-    let _ = backend.clear_faults(None).await?;
+    let code = u32::from_str_radix(fault_id.trim_start_matches("0x"), 16).map_err(|_| {
+        ApiError::NotImplemented(format!(
+            "single-DTC delete requires a hex fault id (got {fault_id:?})"
+        ))
+    })?;
+    if code == 0xFF_FFFF {
+        return Err(ApiError::BadRequest(
+            "clear-all not allowed on single-fault path; use DELETE /faults".into(),
+        ));
+    }
+    let _ = backend.clear_faults(Some(code)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
