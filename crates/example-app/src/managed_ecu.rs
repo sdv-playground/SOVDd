@@ -8,7 +8,6 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use sovd_client::flash::TransferState;
 use sovd_client::FlashClient;
 use sovd_core::{
     ActivationState, BackendError, BackendResult, Capabilities, ClearFaultsResult, DataValue,
@@ -625,93 +624,90 @@ impl DiagnosticBackend for ManagedEcuBackend {
             "Uploading verified package to upstream ECU"
         );
 
-        let upload_resp = self
-            .flash_client
-            .upload_file(&pkg.data)
-            .await
-            .map_err(|e| BackendError::Transport(format!("Upstream upload failed: {}", e)))?;
-
-        let verify_resp = self
-            .flash_client
-            .verify_file(&upload_resp.upload_id)
-            .await
-            .map_err(|e| BackendError::Transport(format!("Upstream verify failed: {}", e)))?;
-
-        if !verify_resp.valid {
-            return Err(BackendError::InvalidRequest(format!(
-                "Upstream package verification failed: {}",
-                verify_resp.error.unwrap_or_default()
-            )));
-        }
-
-        let flash_resp =
-            self.flash_client.start_flash().await.map_err(|e| {
-                BackendError::Transport(format!("Upstream flash start failed: {}", e))
+        // F.D8b /updates-native flow: open session → upload as a
+        // single "manifest" part → return the update_id as the
+        // legacy `transfer_id` for the rest of the DiagnosticBackend
+        // contract.
+        let opened =
+            self.flash_client.open_update().await.map_err(|e| {
+                BackendError::Transport(format!("Upstream open_update failed: {e}"))
             })?;
+        self.flash_client
+            .upload_part("manifest", &pkg.data)
+            .await
+            .map_err(|e| BackendError::Transport(format!("Upstream upload failed: {e}")))?;
 
-        tracing::info!(
-            transfer_id = %flash_resp.transfer_id,
-            "Flash started on upstream ECU"
-        );
-
-        Ok(flash_resp.transfer_id)
+        tracing::info!(update_id = %opened.update_id, "upstream upload complete");
+        Ok(opened.update_id)
     }
 
-    async fn get_flash_status(&self, transfer_id: &str) -> BackendResult<FlashStatus> {
+    async fn get_flash_status(&self, _transfer_id: &str) -> BackendResult<FlashStatus> {
         let status = self
             .flash_client
-            .get_flash_status(transfer_id)
+            .status()
             .await
-            .map_err(|e| BackendError::Transport(format!("Upstream flash status failed: {}", e)))?;
-
+            .map_err(|e| BackendError::Transport(format!("Upstream status failed: {e}")))?;
         Ok(FlashStatus {
-            transfer_id: status.id,
-            package_id: status.file_id.unwrap_or_default(),
-            state: convert_transfer_state(status.state),
-            progress: status.progress.map(|p| sovd_core::FlashProgress {
-                bytes_transferred: p.bytes_acknowledged.unwrap_or(0),
-                bytes_total: (p.blocks_total as u64) * 1024,
-                blocks_transferred: p.blocks_transferred,
-                blocks_total: p.blocks_total,
-                percent: p.percent.unwrap_or(0.0),
-            }),
-            error: status.error.map(|e| e.message),
+            transfer_id: status.update_id,
+            package_id: status
+                .parts
+                .first()
+                .map(|p| p.part_id.clone())
+                .unwrap_or_default(),
+            state: map_update_state(&status.state),
+            progress: None,
+            error: None,
         })
     }
 
     async fn list_flash_transfers(&self) -> BackendResult<Vec<FlashStatus>> {
-        let resp = self.flash_client.list_transfers().await.map_err(|e| {
-            BackendError::Transport(format!("Upstream list transfers failed: {}", e))
-        })?;
-
-        Ok(resp
-            .transfers
-            .into_iter()
-            .map(|t| FlashStatus {
-                transfer_id: t.transfer_id,
-                package_id: t.package_id.unwrap_or_default(),
-                state: convert_transfer_state(t.state),
+        // /updates doesn't (yet) expose a "list active updates" API
+        // through the typed client.  Surface the current session if
+        // any; the gateway / app-mgr managed-ecu proxy isn't expected
+        // to enumerate multiple concurrent transfers.
+        match self.flash_client.status().await {
+            Ok(status) => Ok(vec![FlashStatus {
+                transfer_id: status.update_id,
+                package_id: status
+                    .parts
+                    .first()
+                    .map(|p| p.part_id.clone())
+                    .unwrap_or_default(),
+                state: map_update_state(&status.state),
                 progress: None,
-                error: t.error.map(|e| e.message),
-            })
-            .collect())
+                error: None,
+            }]),
+            Err(sovd_client::flash::FlashError::NoSession) => Ok(vec![]),
+            Err(e) => Err(BackendError::Transport(format!(
+                "Upstream list transfers failed: {e}"
+            ))),
+        }
     }
 
-    async fn abort_flash(&self, transfer_id: &str) -> BackendResult<()> {
+    async fn abort_flash(&self, _transfer_id: &str) -> BackendResult<()> {
         self.flash_client
-            .abort_flash(transfer_id)
+            .abort()
             .await
-            .map_err(|e| BackendError::Transport(format!("Upstream abort failed: {}", e)))
+            .map_err(|e| BackendError::Transport(format!("Upstream abort failed: {e}")))?;
+        Ok(())
     }
 
     async fn finalize_flash(&self) -> BackendResult<()> {
         self.require_programming_session().await?;
 
-        tracing::info!("Sending transfer exit to upstream ECU");
-        self.flash_client.transfer_exit().await.map_err(|e| {
-            BackendError::Transport(format!("Upstream transfer exit failed: {}", e))
-        })?;
-
+        // Legacy "finalize" maps to the /updates verify+finalize
+        // pair: verify runs the SUIT chain + opens backend flash;
+        // finalize closes the flash session and activates.
+        tracing::info!("running /executions{{verify}} on upstream");
+        self.flash_client
+            .verify()
+            .await
+            .map_err(|e| BackendError::Transport(format!("Upstream verify failed: {e}")))?;
+        tracing::info!("running /executions{{finalize}} on upstream");
+        self.flash_client
+            .finalize()
+            .await
+            .map_err(|e| BackendError::Transport(format!("Upstream finalize failed: {e}")))?;
         Ok(())
     }
 
@@ -730,17 +726,13 @@ impl DiagnosticBackend for ManagedEcuBackend {
         }
 
         self.flash_client
-            .commit_flash()
+            .commit()
             .await
-            .map_err(|e| BackendError::Transport(format!("Upstream commit failed: {}", e)))?;
+            .map_err(|e| BackendError::Transport(format!("Upstream commit failed: {e}")))?;
         Ok(())
     }
 
     async fn rollback_flash(&self) -> BackendResult<()> {
-        // After ECU reset, the inner session reverts to default and security
-        // re-locks. The rollback routine requires extended session + security,
-        // so we must set those up — same pattern as start_flash() for
-        // programming session.
         tracing::info!("Setting ECU extended session for rollback (inner session)");
         self.proxy.set_session_mode("extended").await?;
 
@@ -751,59 +743,45 @@ impl DiagnosticBackend for ManagedEcuBackend {
         }
 
         self.flash_client
-            .rollback_flash()
+            .rollback()
             .await
-            .map_err(|e| BackendError::Transport(format!("Upstream rollback failed: {}", e)))?;
+            .map_err(|e| BackendError::Transport(format!("Upstream rollback failed: {e}")))?;
         Ok(())
     }
 
     async fn get_activation_state(&self) -> BackendResult<ActivationState> {
-        let resp = self
-            .flash_client
-            .get_activation_state()
-            .await
-            .map_err(|e| {
-                BackendError::Transport(format!("Upstream activation state failed: {}", e))
-            })?;
-
-        let state = resp.state.parse::<FlashState>().unwrap_or_else(|_| {
-            tracing::error!(
-                raw_state = %resp.state,
-                "Unknown flash state from upstream — defaulting to Failed"
-            );
-            FlashState::Failed
-        });
-
+        // Synthesise a legacy ActivationState from the /updates state
+        // string.  /updates "finalized" maps to legacy "Activated"
+        // (because /executions{finalize} bundles finalize + validate +
+        // activate on the server).
+        let status = self.flash_client.status().await.map_err(|e| {
+            BackendError::Transport(format!("Upstream activation state failed: {e}"))
+        })?;
+        let state = map_update_state(&status.state);
         Ok(ActivationState {
-            supports_rollback: resp.supports_rollback,
+            supports_rollback: true,
             state,
-            active_version: resp.active_version,
-            previous_version: resp.previous_version,
-            // Forward the upstream ECU's reset_kind as-is.
-            reset_kind: resp.reset_kind,
+            active_version: None,
+            previous_version: None,
+            reset_kind: sovd_core::ResetKind::default(),
         })
     }
 }
 
-/// Convert a sovd-client TransferState into a sovd-core FlashState
-fn convert_transfer_state(s: TransferState) -> FlashState {
+/// Map an /updates state string to a sovd-core FlashState.
+fn map_update_state(s: &str) -> FlashState {
     match s {
-        TransferState::Queued | TransferState::Pending => FlashState::Queued,
-        TransferState::Preparing => FlashState::Preparing,
-        TransferState::Transferring | TransferState::Running => FlashState::Transferring,
-        TransferState::AwaitingActivation => FlashState::AwaitingActivation,
-        TransferState::Validated => FlashState::Validated,
-        TransferState::AwaitingReboot => FlashState::AwaitingReboot,
-        TransferState::Verifying => FlashState::Verifying,
-        TransferState::Complete | TransferState::Finished | TransferState::Verified => {
-            FlashState::Complete
-        }
-        TransferState::Failed
-        | TransferState::Error
-        | TransferState::Aborted
-        | TransferState::Invalid => FlashState::Failed,
-        TransferState::Activated => FlashState::Activated,
-        TransferState::Committed => FlashState::Committed,
-        TransferState::RolledBack => FlashState::RolledBack,
+        "registered" | "uploading" => FlashState::Preparing,
+        "verified" => FlashState::AwaitingActivation,
+        "finalized" => FlashState::Activated,
+        "committed" => FlashState::Committed,
+        "rolledback" => FlashState::RolledBack,
+        "aborted" => FlashState::Failed,
+        "failed" => FlashState::Failed,
+        _ => FlashState::Failed,
     }
 }
+
+// F.D8b: convert_transfer_state was the legacy TransferState →
+// FlashState bridge; with FlashClient migrated to /updates strings,
+// `map_update_state` above replaces it.
