@@ -6334,6 +6334,76 @@ async fn test_campaigns_register_rejects_cross_component() {
         .await;
 }
 
+/// F.D8a: every /flash + /files response carries deprecation
+/// headers (RFC 8594 + RFC 9745) pointing at the /updates successor.
+#[tokio::test]
+#[serial_test::serial]
+async fn test_legacy_flash_files_carry_deprecation_headers() {
+    eprintln!("\n=== F.D8a: deprecation headers on /flash + /files ===");
+    let harness = TestHarness::new()
+        .await
+        .expect("Failed to create test harness");
+
+    // Probe the simplest /files endpoint (GET list) — no setup needed.
+    let resp = harness
+        .client
+        .get(format!(
+            "{}/vehicle/v1/components/vtx_ecm/files",
+            harness.base_url
+        ))
+        .send()
+        .await
+        .expect("GET /files");
+    assert_eq!(resp.status(), 200);
+    let h = resp.headers();
+    assert_eq!(
+        h.get("deprecation").and_then(|v| v.to_str().ok()),
+        Some("true"),
+        "/files responses must carry Deprecation: true",
+    );
+    assert!(
+        h.get("sunset").is_some(),
+        "/files responses must carry a Sunset header (RFC 8594)",
+    );
+    let link = h
+        .get("link")
+        .and_then(|v| v.to_str().ok())
+        .expect("/files must carry a Link header");
+    assert!(
+        link.contains("rel=\"successor-version\""),
+        "Link header should advertise the /updates successor: got {link:?}",
+    );
+    assert!(
+        link.contains("/updates"),
+        "Successor URI should point at /updates: got {link:?}",
+    );
+
+    // Same check on /flash — pick GET /flash/activation which is the
+    // simplest read endpoint.  Backend may 404 if no flash has run,
+    // but the deprecation headers should still be present.
+    let resp = harness
+        .client
+        .get(format!(
+            "{}/vehicle/v1/components/vtx_ecm/flash/activation",
+            harness.base_url
+        ))
+        .send()
+        .await
+        .expect("GET /flash/activation");
+    let h = resp.headers();
+    assert_eq!(
+        h.get("deprecation").and_then(|v| v.to_str().ok()),
+        Some("true"),
+        "/flash responses must carry Deprecation: true",
+    );
+    assert!(
+        h.get("sunset").is_some(),
+        "/flash responses must carry a Sunset header",
+    );
+
+    eprintln!("=== F.D8a deprecation headers test PASSED ===");
+}
+
 /// Unknown executions action returns 400 with the spec error code.
 #[tokio::test]
 #[serial_test::serial]

@@ -25,9 +25,11 @@ pub use state::AppState;
 pub use sovd_conv::{DataType, DidDefinition, DidStore};
 
 use axum::extract::DefaultBodyLimit;
+use axum::http::HeaderValue;
 use axum::routing::{get, post, put};
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 /// Create the SOVD REST API router with the given application state
@@ -426,58 +428,14 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/discovery",
             post(handlers::discovery::discover_ecus),
         )
-        // File (package) management routes - async flash flow
-        .route(
-            "/vehicle/v1/components/{component_id}/files",
-            post(handlers::files::upload_file).get(handlers::files::list_files),
-        )
-        .route(
-            "/vehicle/v1/components/{component_id}/files/{file_id}",
-            get(handlers::files::get_file).delete(handlers::files::delete_file),
-        )
-        .route(
-            "/vehicle/v1/components/{component_id}/files/{file_id}/verify",
-            post(handlers::files::verify_file),
-        )
-        // Flash transfer routes - async flash flow
-        .route(
-            "/vehicle/v1/components/{component_id}/flash/transfer",
-            post(handlers::flash::start_flash).get(handlers::flash::list_transfers),
-        )
-        .route(
-            "/vehicle/v1/components/{component_id}/flash/transfer/{transfer_id}",
-            get(handlers::flash::get_transfer).delete(handlers::flash::abort_transfer),
-        )
-        .route(
-            "/vehicle/v1/components/{component_id}/flash/transferexit",
-            put(handlers::flash::transfer_exit),
-        )
-        // Flash validate/activate routes (orchestrator-driven multi-cycle flow)
-        .route(
-            "/vehicle/v1/components/{component_id}/flash/validate",
-            post(handlers::flash::validate_flash),
-        )
-        .route(
-            "/vehicle/v1/components/{component_id}/flash/invalidate",
-            post(handlers::flash::invalidate_flash),
-        )
-        .route(
-            "/vehicle/v1/components/{component_id}/flash/activate",
-            post(handlers::flash::activate_flash),
-        )
-        // Flash commit/rollback routes
-        .route(
-            "/vehicle/v1/components/{component_id}/flash/commit",
-            post(handlers::flash::commit_flash),
-        )
-        .route(
-            "/vehicle/v1/components/{component_id}/flash/rollback",
-            post(handlers::flash::rollback_flash),
-        )
-        .route(
-            "/vehicle/v1/components/{component_id}/flash/activation",
-            get(handlers::flash::get_activation_state),
-        )
+        // Deprecated legacy `/flash` + `/files` collections — F.D8a.
+        // Routes still respond so existing callers (sovd-client::FlashClient,
+        // sovd-cli, SOVD-explorer) keep working.  Every response carries
+        // `Deprecation: true` + `Sunset` + `Link: rel="successor-version"`
+        // pointing at the spec-compliant `/updates` collection per
+        // RFC 8594 / RFC 9745.  F.D8b deletes these routes once
+        // sovd-client::FlashClient has migrated its internals to /updates.
+        .merge(legacy_flash_files_router(state.clone()))
         // Spec-compliant `/updates` collection — F.D2 thin alias over
         // the existing flash backend.  ISO 17978-3 §7.13.  Multipart-
         // inline transport (§3.1 of the SW-update design doc).
@@ -541,5 +499,88 @@ pub fn create_router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::disable()) // SOVD streaming uploads (ASAM SOVD chunked transfer)
         .layer(TraceLayer::new_for_http())
         .layer(cors)
+        .with_state(state)
+}
+
+/// Build the deprecated `/flash` + `/files` route set with response
+/// headers (Deprecation / Sunset / Link → successor) layered on.
+///
+/// F.D8a: these routes still respond so existing callers keep
+/// working; the headers signal retirement to operators and tooling.
+/// F.D8b drops this function and removes the routes outright.
+fn legacy_flash_files_router(state: AppState) -> Router<AppState> {
+    Router::new()
+        // File (package) management routes — superseded by
+        // `PUT /vehicle/v1/components/{id}/updates/{update_id}/bulk-data/{part_id}`.
+        .route(
+            "/vehicle/v1/components/{component_id}/files",
+            post(handlers::files::upload_file).get(handlers::files::list_files),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/files/{file_id}",
+            get(handlers::files::get_file).delete(handlers::files::delete_file),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/files/{file_id}/verify",
+            post(handlers::files::verify_file),
+        )
+        // Flash transfer routes — superseded by
+        // `POST /vehicle/v1/components/{id}/updates/{update_id}/executions`.
+        .route(
+            "/vehicle/v1/components/{component_id}/flash/transfer",
+            post(handlers::flash::start_flash).get(handlers::flash::list_transfers),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/flash/transfer/{transfer_id}",
+            get(handlers::flash::get_transfer).delete(handlers::flash::abort_transfer),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/flash/transferexit",
+            put(handlers::flash::transfer_exit),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/flash/validate",
+            post(handlers::flash::validate_flash),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/flash/invalidate",
+            post(handlers::flash::invalidate_flash),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/flash/activate",
+            post(handlers::flash::activate_flash),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/flash/commit",
+            post(handlers::flash::commit_flash),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/flash/rollback",
+            post(handlers::flash::rollback_flash),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/flash/activation",
+            get(handlers::flash::get_activation_state),
+        )
+        // Deprecation headers per RFC 8594 + RFC 9745.  Same triple
+        // applied to every response in this sub-router.
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::HeaderName::from_static("deprecation"),
+            HeaderValue::from_static("true"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::HeaderName::from_static("sunset"),
+            // Far-future sentinel until F.D8b lands a concrete window.
+            HeaderValue::from_static("Wed, 31 Dec 2099 23:59:59 GMT"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::header::LINK,
+            // Successor link points at the spec-compliant /updates
+            // collection.  Per-resource successor URIs aren't expressible
+            // in a static header, so the pointer is collection-level.
+            HeaderValue::from_static(
+                "</vehicle/v1/components/{component_id}/updates>; rel=\"successor-version\"",
+            ),
+        ))
         .with_state(state)
 }

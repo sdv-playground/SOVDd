@@ -1,7 +1,20 @@
-//! File (package) management handlers for async flash flow
+//! File (package) management handlers — **DEPRECATED, slated for
+//! retire in F.D8b.**
 //!
-//! Provides endpoints for uploading, listing, verifying, and deleting software packages.
-//! Supports streaming uploads via HTTP/1.1 chunked transfer encoding per ASAM SOVD.
+//! Originally the primary SOVDd wire for uploading software packages.
+//! The spec-compliant path is now
+//! `PUT /vehicle/v1/components/{id}/updates/{update_id}/bulk-data/{part_id}`
+//! (F.D2) — see `tasks/sw-update-architecture.md` §3.1.
+//!
+//! See [`crate::handlers::flash`] for the F.D8 staged retirement plan
+//! (this file follows the same staging).  These handlers continue to
+//! respond with `Deprecation: true` + `Sunset` + `Link: rel="successor-
+//! version"` headers per RFC 8594 / RFC 9745 throughout F.D8a; F.D8b
+//! deletes the routes and this file together.
+//!
+//! The handlers call the same `DiagnosticBackend` methods as the
+//! /updates handlers, so the backend code path is already unified —
+//! F.D8b is purely a wire-shape cleanup.
 
 use axum::body::Body;
 use axum::extract::{Path, State};

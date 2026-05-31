@@ -1,6 +1,30 @@
-//! Flash transfer handlers for async flash flow
+//! Flash transfer handlers — **DEPRECATED, slated for retire in F.D8b.**
 //!
-//! Provides endpoints for starting, monitoring, and finalizing flash transfers.
+//! Provides endpoints for starting, monitoring, and finalizing flash
+//! transfers.  Originally the primary SOVDd wire for software updates;
+//! the spec-compliant path is now `/vehicle/v1/components/{id}/updates`
+//! (F.D2) plus `/vehicle/v1/campaigns` (F.D4) — see
+//! `tasks/sw-update-architecture.md`.
+//!
+//! ## Retirement plan (F.D8 staged)
+//!
+//! - **F.D8a (this slice):** these handlers still respond on the wire
+//!   so existing callers (sovd-client::FlashClient, sovd-cli,
+//!   SOVD-explorer) keep working.  Responses now carry `Deprecation:
+//!   true` + `Sunset` + `Link: rel="successor-version"` headers
+//!   (RFC 8594 / RFC 9745) pointing at the `/updates` equivalent so
+//!   callers can plan migration.
+//! - **F.D8b (follow-up):** after `sovd-client::FlashClient` migrates
+//!   its internals to `/updates`, the route registrations + this file
+//!   get deleted in one commit and the spec-conformance row flips.
+//!
+//! Behavioural notes for the F.D8a deprecation window:
+//!
+//! - The deprecation headers are advisory.  Callers that ignore them
+//!   keep working until F.D8b.
+//! - These handlers continue to call the same `DiagnosticBackend`
+//!   methods as the /updates handlers, so the *backend* code path is
+//!   already unified — F.D8b is purely a wire-shape cleanup.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -10,6 +34,10 @@ use sovd_core::FlashStatus;
 
 use crate::error::ApiError;
 use crate::state::AppState;
+
+// Deprecation signalling (RFC 8594 + RFC 9745) is applied uniformly to
+// every /flash + /files response via a `SetResponseHeader` tower-http
+// layer in `lib.rs`; nothing to do per handler.
 
 /// Request to start a flash transfer session.
 ///
