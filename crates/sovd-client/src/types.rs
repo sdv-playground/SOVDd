@@ -474,14 +474,17 @@ pub struct UploadDefinitionsResponse {
 // Error Types
 // =============================================================================
 
-/// Error response from server
+/// Error response from server — ISO 17978-3 §5.8.3 (`GenericError`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
-    pub error: String,
+    pub error_code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation_id: Option<String>,
     #[serde(default)]
-    pub code: Option<String>,
-    #[serde(default)]
-    pub details: Option<serde_json::Value>,
+    pub parameters: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 // =============================================================================

@@ -1,12 +1,11 @@
-//! API error types and conversions
+//! API error types and conversions — ISO 17978-3 §5.8.3 GenericError.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde::Serialize;
-use sovd_core::BackendError;
+use sovd_core::{error_code, BackendError, GenericError};
 
-/// API error type that converts to HTTP responses
+/// API error type that converts to HTTP responses.
 #[derive(Debug)]
 pub enum ApiError {
     /// 400 Bad Request
@@ -25,7 +24,7 @@ pub enum ApiError {
     NotImplemented(String),
     /// 502 Bad Gateway (backend protocol error)
     BadGateway(String),
-    /// 502 Bad Gateway - ECU returned negative response (SOVD compliant format)
+    /// 502 Bad Gateway — ECU returned a negative response (UDS NRC).
     EcuErrorResponse { message: String, nrc: u8, sid: u8 },
     /// 503 Service Unavailable
     ServiceUnavailable(String),
@@ -35,81 +34,77 @@ pub enum ApiError {
     Internal(String),
 }
 
-/// Standard error response format
-#[derive(Serialize)]
-struct ErrorResponse {
-    error: String,
-    message: String,
-}
-
-/// SOVD-compliant ECU error response format
-#[derive(Serialize)]
-struct SovdErrorResponse {
-    error_code: String,
-    message: String,
-    parameters: SovdErrorParameters,
-    #[serde(rename = "x-errorsource")]
-    error_source: String,
-}
-
-#[derive(Serialize)]
-struct SovdErrorParameters {
-    #[serde(rename = "NRC")]
-    nrc: u8,
-    #[serde(rename = "SID")]
-    sid: u8,
-}
-
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        // Handle ECU error response with SOVD-compliant format
-        if let ApiError::EcuErrorResponse { message, nrc, sid } = self {
-            tracing::debug!(nrc = nrc, sid = sid, %message, "ECU error response");
-
-            let body = Json(SovdErrorResponse {
-                error_code: "error-response".to_string(),
-                message,
-                parameters: SovdErrorParameters { nrc, sid },
-                error_source: "ECU".to_string(),
-            });
-
-            return (StatusCode::BAD_GATEWAY, body).into_response();
-        }
-
-        let (status, error_type, message) = match self {
-            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
-            ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", msg),
-            ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, "forbidden", msg),
-            ApiError::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg),
-            ApiError::PreconditionFailed(msg) => {
-                (StatusCode::PRECONDITION_FAILED, "precondition_failed", msg)
+        let (status, body) = match self {
+            ApiError::EcuErrorResponse { message, nrc, sid } => {
+                tracing::debug!(nrc, sid, %message, "ECU error response");
+                let body = GenericError::new(error_code::ERROR_RESPONSE, message)
+                    .with_param("service", format!("0x{:02X}", sid))
+                    .with_param("nrc", format!("0x{:02X}", nrc));
+                (StatusCode::BAD_GATEWAY, body)
             }
-            ApiError::TooManyRequests(msg) => {
-                (StatusCode::TOO_MANY_REQUESTS, "too_many_requests", msg)
-            }
-            ApiError::NotImplemented(msg) => (StatusCode::NOT_IMPLEMENTED, "not_implemented", msg),
-            ApiError::BadGateway(msg) => (StatusCode::BAD_GATEWAY, "bad_gateway", msg),
-            ApiError::EcuErrorResponse { .. } => unreachable!(), // Handled above
-            ApiError::ServiceUnavailable(msg) => {
-                (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable", msg)
-            }
-            ApiError::GatewayTimeout(msg) => (StatusCode::GATEWAY_TIMEOUT, "gateway_timeout", msg),
-            ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", msg),
+            ApiError::BadRequest(msg) => (
+                StatusCode::BAD_REQUEST,
+                GenericError::new(error_code::BAD_REQUEST, msg),
+            ),
+            ApiError::NotFound(msg) => (
+                StatusCode::NOT_FOUND,
+                GenericError::new(error_code::NOT_FOUND, msg),
+            ),
+            ApiError::Forbidden(msg) => (
+                StatusCode::FORBIDDEN,
+                GenericError::new(error_code::FORBIDDEN, msg),
+            ),
+            ApiError::Conflict(msg) => (
+                StatusCode::CONFLICT,
+                GenericError::new(error_code::CONFLICT, msg),
+            ),
+            ApiError::PreconditionFailed(msg) => (
+                StatusCode::PRECONDITION_FAILED,
+                GenericError::new(error_code::PRECONDITION_FAILED, msg),
+            ),
+            ApiError::TooManyRequests(msg) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                GenericError::new(error_code::TOO_MANY_REQUESTS, msg),
+            ),
+            ApiError::NotImplemented(msg) => (
+                StatusCode::NOT_IMPLEMENTED,
+                GenericError::new(error_code::NOT_IMPLEMENTED, msg),
+            ),
+            ApiError::BadGateway(msg) => (
+                StatusCode::BAD_GATEWAY,
+                GenericError::new(error_code::BAD_GATEWAY, msg),
+            ),
+            ApiError::ServiceUnavailable(msg) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                GenericError::new(error_code::SERVICE_UNAVAILABLE, msg),
+            ),
+            ApiError::GatewayTimeout(msg) => (
+                StatusCode::GATEWAY_TIMEOUT,
+                GenericError::new(error_code::GATEWAY_TIMEOUT, msg),
+            ),
+            ApiError::Internal(msg) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                GenericError::new(error_code::INTERNAL_ERROR, msg),
+            ),
         };
 
-        // Log errors at appropriate levels
         if status.is_server_error() {
-            tracing::error!(error = error_type, %message, "API error");
+            tracing::error!(
+                error_code = %body.error_code,
+                message = %body.message,
+                "API error"
+            );
         } else if status.is_client_error() {
-            tracing::debug!(error = error_type, %message, "API client error");
+            tracing::debug!(
+                error_code = %body.error_code,
+                message = %body.message,
+                "API client error"
+            );
         }
 
-        let body = Json(ErrorResponse {
-            error: error_type.to_string(),
-            message,
-        });
-
-        (status, body).into_response()
+        (status, Json(body)).into_response()
     }
 }
 

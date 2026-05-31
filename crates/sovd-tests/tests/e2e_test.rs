@@ -1575,7 +1575,10 @@ async fn test_security_access_failure_wrong_key() {
         status,
         json
     );
-    assert!(json["error"].is_string(), "Expected error in response");
+    assert!(
+        json["error_code"].is_string(),
+        "Expected GenericError.error_code in response"
+    );
 
     eprintln!(
         "Security access correctly rejected with wrong key: {}",
@@ -3236,9 +3239,12 @@ async fn test_flash_invalid_file_id() {
 
     eprintln!("Response: status={}, body={}", status, json);
 
-    assert_eq!(status, 400, "Expected 400 Bad Request when no package is verified");
-    let err = json.get("error").and_then(|v| v.as_str()).unwrap_or("");
-    assert_eq!(err, "bad_request", "expected error=bad_request, got {err}");
+    assert_eq!(
+        status, 400,
+        "Expected 400 Bad Request when no package is verified"
+    );
+    let err = json.get("error_code").and_then(|v| v.as_str()).unwrap_or("");
+    assert_eq!(err, "bad-request", "expected error_code=bad-request, got {err}");
 
     eprintln!("=== Test PASSED: flash/transfer rejected without verified package ===");
 }

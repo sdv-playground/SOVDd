@@ -1518,9 +1518,11 @@ impl SovdClient {
         response: reqwest::Response,
         status: StatusCode,
     ) -> SovdClientError {
-        // Try to parse error response body
+        // Parse the spec-defined GenericError body (ISO 17978-3 §5.8.3).
+        // Older servers that haven't migrated may still send ad-hoc shapes;
+        // fall back to the HTTP status line in that case.
         let message = match response.json::<ErrorResponse>().await {
-            Ok(err) => err.error,
+            Ok(err) => err.message,
             Err(_) => format!("HTTP {}", status),
         };
 
