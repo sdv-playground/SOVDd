@@ -463,30 +463,57 @@ pub async fn post_execution(
                     current_state.as_str()
                 )));
             }
-            // Legacy lifecycle is finalize_flash → validate → activate.
-            // The dual-bank backend rejects `activate()` when called
-            // directly from `AwaitingActivation` — it needs `Validated`
-            // first.  /updates {finalize} chains all three so callers
-            // see the same end state regardless of which intermediate
-            // step the backend is in.
+            // `finalize` writes the staged image to its final home:
+            //   - Banked backends: stages the next-boot bank pointer
+            //     (FlashState → AwaitingReboot).  The orchestrator then
+            //     drives ecu_reset and reads back the post-reset state.
+            //   - Singleshot backends: writes the artifact live
+            //     (FlashState → Activated).  No reset needed.
+            //
+            // `validate` and `activate` are exposed as separate
+            // /executions actions for orchestrators that want to drive
+            // the FSM step-by-step with observable state in between.
+            // This handler does NOT auto-chain them — the orchestrator
+            // is in charge of the lifecycle ordering.
             backend.finalize_flash().await?;
-            // `validate()` is allowed from AwaitingActivation/Validated/
-            // AwaitingReboot; second call is idempotent.  Single-bank
-            // backends return NotSupported here — swallow it.
-            match backend.validate().await {
-                Ok(()) => {}
-                Err(sovd_core::BackendError::NotSupported(_)) => {}
-                Err(e) => return Err(e.into()),
-            }
-            // `activate()` may already be the terminal state for
-            // single-bank backends; swallow NotSupported.
-            match backend.activate().await {
-                Ok(()) => {}
-                Err(sovd_core::BackendError::NotSupported(_)) => {}
-                Err(e) => return Err(e.into()),
-            }
             (
                 UpdateState::Finalized,
+                transfer_id.clone(),
+                Some("finalized".to_string()),
+            )
+        }
+        "validate" => {
+            // Pre-finalize checkpoint: re-verify the staged image and
+            // move FlashState to Validated. Orchestrators use this to
+            // pause the lifecycle for a re-verification window before
+            // committing to a reset.
+            backend.validate().await?;
+            (
+                current_state,
+                transfer_id.clone(),
+                Some("validated".to_string()),
+            )
+        }
+        "invalidate" => {
+            // Demote a Validated transfer back to AwaitingActivation.
+            // Used when the bank can't be hardware-sealed and a power
+            // cycle could have introduced drift since validate().
+            backend.invalidate().await?;
+            (
+                current_state,
+                transfer_id.clone(),
+                Some("invalidated".to_string()),
+            )
+        }
+        "activate" => {
+            // Banked: stages the bank pointer flip (FlashState →
+            // AwaitingReboot — orchestrator must follow with
+            // ecu_reset).  Singleshot: writes live (FlashState →
+            // Activated).  Requires a prior validate() to land in
+            // Validated.
+            backend.activate().await?;
+            (
+                current_state,
                 transfer_id.clone(),
                 Some("activated".to_string()),
             )

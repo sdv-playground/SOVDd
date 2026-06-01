@@ -309,11 +309,41 @@ impl FlashClient {
     }
 
     /// `POST /executions {action: "finalize"}`.  Server-side:
-    /// `finalize_flash` + `validate` + `activate`.  Requires
-    /// `verify` to have succeeded first.
+    /// `finalize_flash` only.  For banked backends this lands the
+    /// staged bank pointer and ends at `AwaitingReboot`; for
+    /// singleshot backends it writes through and ends at
+    /// `Activated`.  Orchestrators that want to observe the
+    /// intermediate `Validated` checkpoint should call `validate` /
+    /// `activate` separately before `finalize`.
     #[instrument(skip(self))]
     pub async fn finalize(&self) -> Result<UpdateExecution> {
         self.run_execution("finalize").await
+    }
+
+    /// `POST /executions {action: "validate"}`.  Pre-finalize
+    /// checkpoint: re-verify the staged image and move FlashState to
+    /// `Validated`.  Idempotent.  Banked backends only — singleshot
+    /// returns an error from this state.
+    #[instrument(skip(self))]
+    pub async fn validate(&self) -> Result<UpdateExecution> {
+        self.run_execution("validate").await
+    }
+
+    /// `POST /executions {action: "invalidate"}`.  Demote a
+    /// `Validated` transfer back to `AwaitingActivation` so the
+    /// orchestrator can re-validate after a power cycle.
+    #[instrument(skip(self))]
+    pub async fn invalidate(&self) -> Result<UpdateExecution> {
+        self.run_execution("invalidate").await
+    }
+
+    /// `POST /executions {action: "activate"}`.  Banked: stages the
+    /// bank pointer (FlashState → `AwaitingReboot`).  Singleshot:
+    /// writes live (FlashState → `Activated`).  Requires a prior
+    /// `validate` to land in `Validated`.
+    #[instrument(skip(self))]
+    pub async fn activate(&self) -> Result<UpdateExecution> {
+        self.run_execution("activate").await
     }
 
     /// `POST /executions {action: "commit"}`.  Clears the local
@@ -351,11 +381,7 @@ impl FlashClient {
     #[instrument(skip(self))]
     pub async fn attach_to_latest(&self) -> Result<String> {
         let list = self.list_updates().await?;
-        let summary = list
-            .items
-            .into_iter()
-            .last()
-            .ok_or(FlashError::NoSession)?;
+        let summary = list.items.into_iter().last().ok_or(FlashError::NoSession)?;
         *self.update_id.lock().await = Some(summary.update_id.clone());
         Ok(summary.update_id)
     }
