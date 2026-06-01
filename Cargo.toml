@@ -69,6 +69,7 @@ hex = "0.4"
 sha2 = "0.10"
 crc = "3"
 url = "2"
+percent-encoding = "2"
 
 # Logging
 tracing = "0.1"

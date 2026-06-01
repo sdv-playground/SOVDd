@@ -21,11 +21,31 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use tokio::sync::Mutex;
 use tracing::{debug, info, instrument};
 use url::Url;
+
+/// Characters that must be percent-encoded inside a URL path segment.
+/// Matches RFC 3986 §3.3 `pchar` exclusions plus `/`, `?`, `#` which
+/// are reserved as path/query/fragment delimiters.  SUIT component
+/// URIs frequently start with `#` (fragment-style identifiers like
+/// `#kernel`) — without encoding, `Url::join` chops the path at the
+/// `#` and the server sees an empty part_id.
+const PART_SEGMENT_ENCODE: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}')
+    .add(b'/')
+    .add(b'%');
 
 use super::config::FlashConfig;
 use super::types::*;
@@ -270,7 +290,8 @@ impl FlashClient {
     #[instrument(skip(self, data))]
     pub async fn upload_part(&self, part_id: &str, data: &[u8]) -> Result<PartUploadResponse> {
         let update_id = self.ensure_session().await?;
-        let url = self.build_url(&self.config.updates_part_path(&update_id, part_id))?;
+        let encoded_part = utf8_percent_encode(part_id, PART_SEGMENT_ENCODE).to_string();
+        let url = self.build_url(&self.config.updates_part_path(&update_id, &encoded_part))?;
         let bytes = data.len();
         info!("PUT {} ({bytes} bytes)", url);
         let started = std::time::Instant::now();
