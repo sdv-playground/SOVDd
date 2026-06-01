@@ -154,6 +154,42 @@ pub struct PartStatusEntry {
     pub href: String,
 }
 
+/// ISO 17978-3 §7.18.7 Table 270 — body of `GET /updates/{id}/status`.
+/// Returned by the spec verbs (`prepare` / `execute` / `automated`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateStatusBody {
+    pub phase: String,
+    pub status: String,
+    #[serde(default)]
+    pub progress: Option<u8>,
+    #[serde(default)]
+    pub step: Option<String>,
+    #[serde(default)]
+    pub error: Option<UpdateStatusError>,
+    /// Vendor extension (Phase B): present when execute is running
+    /// in orchestrated mode.  Values: `awaiting-verdict`, `committing`,
+    /// `rolling-back`.
+    #[serde(default, rename = "x-sumo-substate")]
+    pub substate: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateStatusError {
+    pub error_code: String,
+    pub message: String,
+    #[serde(default)]
+    pub parameters: Option<serde_json::Value>,
+}
+
+impl UpdateStatusBody {
+    pub fn is_terminal(&self) -> bool {
+        matches!(self.status.as_str(), "completed" | "failed")
+    }
+    pub fn is_awaiting_verdict(&self) -> bool {
+        self.substate.as_deref() == Some("awaiting-verdict")
+    }
+}
+
 /// Reply from `GET /updates`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdatesList {
@@ -321,54 +357,82 @@ impl FlashClient {
         Ok(body)
     }
 
-    /// `POST /executions {action: "verify"}`.  Server-side: runs
-    /// `verify_package` per part, opens the backend flash session,
-    /// and waits for it to settle.
+    /// `POST /executions {action: "verify"}`.  Legacy
+    /// vendor-extension wire.
+    ///
+    /// **Deprecated:** use [`prepare`](Self::prepare) — the spec
+    /// verb (ISO 17978-3 §7.18.5) is async (202+poll) and uses
+    /// `PUT /updates/{id}/prepare` instead.  Server still accepts
+    /// `/executions{verify}` with a `Deprecation: true` header
+    /// during the migration window.
+    #[deprecated(
+        note = "use FlashClient::prepare (PUT /updates/{id}/prepare, ISO 17978-3 §7.18.5)"
+    )]
     #[instrument(skip(self))]
     pub async fn verify(&self) -> Result<UpdateExecution> {
         self.run_execution("verify").await
     }
 
-    /// `POST /executions {action: "finalize"}`.  Server-side:
-    /// `finalize_flash` only.  For banked backends this lands the
-    /// staged bank pointer and ends at `AwaitingReboot`; for
-    /// singleshot backends it writes through and ends at
-    /// `Activated`.  Orchestrators that want to observe the
-    /// intermediate `Validated` checkpoint should call `validate` /
-    /// `activate` separately before `finalize`.
+    /// `POST /executions {action: "finalize"}`.  Legacy
+    /// vendor-extension wire.
+    ///
+    /// **Deprecated:** use [`execute`](Self::execute) — the spec
+    /// verb (ISO 17978-3 §7.18.6) bundles finalize + activate behind
+    /// `PUT /updates/{id}/execute` with async 202+poll.
+    #[deprecated(
+        note = "use FlashClient::execute (PUT /updates/{id}/execute, ISO 17978-3 §7.18.6)"
+    )]
     #[instrument(skip(self))]
     pub async fn finalize(&self) -> Result<UpdateExecution> {
         self.run_execution("finalize").await
     }
 
-    /// `POST /executions {action: "validate"}`.  Pre-finalize
-    /// checkpoint: re-verify the staged image and move FlashState to
-    /// `Validated`.  Idempotent.  Banked backends only — singleshot
-    /// returns an error from this state.
+    /// `POST /executions {action: "validate"}`.  Legacy
+    /// vendor-extension wire.
+    ///
+    /// **Deprecated:** the spec doesn't expose `validate` as a
+    /// client-visible step; it's folded into [`prepare`](Self::prepare).
+    /// Kept for the migration window.
+    #[deprecated(note = "validate is folded into FlashClient::prepare in the spec wire")]
     #[instrument(skip(self))]
     pub async fn validate(&self) -> Result<UpdateExecution> {
         self.run_execution("validate").await
     }
 
-    /// `POST /executions {action: "invalidate"}`.  Demote a
-    /// `Validated` transfer back to `AwaitingActivation` so the
-    /// orchestrator can re-validate after a power cycle.
+    /// `POST /executions {action: "invalidate"}`.  Legacy
+    /// vendor-extension wire.
+    ///
+    /// **Deprecated:** no spec equivalent; the orchestrator-driven
+    /// re-validation case is handled by re-issuing `prepare()` after
+    /// a state change.
+    #[deprecated(
+        note = "no spec equivalent — re-issue FlashClient::prepare if re-validation is needed"
+    )]
     #[instrument(skip(self))]
     pub async fn invalidate(&self) -> Result<UpdateExecution> {
         self.run_execution("invalidate").await
     }
 
-    /// `POST /executions {action: "activate"}`.  Banked: stages the
-    /// bank pointer (FlashState → `AwaitingReboot`).  Singleshot:
-    /// writes live (FlashState → `Activated`).  Requires a prior
-    /// `validate` to land in `Validated`.
+    /// `POST /executions {action: "activate"}`.  Legacy
+    /// vendor-extension wire.
+    ///
+    /// **Deprecated:** activate is folded into
+    /// [`execute`](Self::execute) on the spec wire.
+    #[deprecated(note = "activate is folded into FlashClient::execute")]
     #[instrument(skip(self))]
     pub async fn activate(&self) -> Result<UpdateExecution> {
         self.run_execution("activate").await
     }
 
-    /// `POST /executions {action: "commit"}`.  Clears the local
-    /// session id on success.
+    /// `POST /executions {action: "commit"}`.  Legacy
+    /// vendor-extension wire.  Clears the local session id on success.
+    ///
+    /// **Deprecated:** use [`spec_commit`](Self::spec_commit) (or
+    /// [`automated`](Self::automated) for server-driven flows) — the
+    /// spec wire's verdict is the `PUT /updates/{id}/x-sumo-commit`
+    /// vendor verb (Phase B) and applies only after an orchestrated
+    /// `execute`.
+    #[deprecated(note = "use FlashClient::spec_commit (PUT /updates/{id}/x-sumo-commit)")]
     #[instrument(skip(self))]
     pub async fn commit(&self) -> Result<UpdateExecution> {
         let exec = self.run_execution("commit").await?;
@@ -376,8 +440,13 @@ impl FlashClient {
         Ok(exec)
     }
 
-    /// `POST /executions {action: "rollback"}`.  Clears the local
-    /// session id on success.
+    /// `POST /executions {action: "rollback"}`.  Legacy
+    /// vendor-extension wire.  Clears the local session id on success.
+    ///
+    /// **Deprecated:** use [`spec_rollback`](Self::spec_rollback) —
+    /// the spec wire's verdict is the
+    /// `PUT /updates/{id}/x-sumo-rollback` vendor verb (Phase B).
+    #[deprecated(note = "use FlashClient::spec_rollback (PUT /updates/{id}/x-sumo-rollback)")]
     #[instrument(skip(self))]
     pub async fn rollback(&self) -> Result<UpdateExecution> {
         let exec = self.run_execution("rollback").await?;
@@ -385,8 +454,15 @@ impl FlashClient {
         Ok(exec)
     }
 
-    /// `POST /executions {action: "abort"}`.  Clears the local
-    /// session id; idempotent if no session is open.
+    /// `POST /executions {action: "abort"}`.  Legacy
+    /// vendor-extension wire.  Clears the local session id; idempotent
+    /// if no session is open.
+    ///
+    /// **Deprecated:** the spec equivalent is
+    /// `DELETE /updates/{id}` (handled by the FlashClient internally
+    /// — call `commit`/`rollback` for the orchestrated path or
+    /// release the FlashClient handle directly).
+    #[deprecated(note = "use DELETE /updates/{id} instead; abort isn't a spec verb")]
     #[instrument(skip(self))]
     pub async fn abort(&self) -> Result<UpdateExecution> {
         let exec = self.run_execution("abort").await?;
@@ -458,6 +534,220 @@ impl FlashClient {
 }
 
 // ---------------------------------------------------------------------------
+// ISO 17978-3 §7.18 spec lifecycle — PUT prepare / execute / automated +
+// GET /status.  Async on the wire (PUT returns 202; client polls /status
+// until terminal).  Replaces the F.D8b /executions{action} verb-bag.
+// See `tasks/spec-aligned-updates-wire.md` UPDATE-WIRE-001.
+// ---------------------------------------------------------------------------
+
+impl FlashClient {
+    /// `GET /vehicle/v1/components/{id}/updates/{update_id}/status` — returns
+    /// the Table 270 `UpdateStatusBody`.  Distinct from the legacy
+    /// `status()` which hits `GET /updates/{id}` and returns the
+    /// vendor-extension shape.
+    #[instrument(skip(self))]
+    pub async fn spec_status(&self) -> Result<UpdateStatusBody> {
+        let update_id = self
+            .current_update_id()
+            .await
+            .ok_or(FlashError::NoSession)?;
+        let url = self.build_url(&self.config.updates_spec_status_path(&update_id))?;
+        let resp = self.request_get(url).await?;
+        self.handle_response(resp).await
+    }
+
+    /// `PUT /vehicle/v1/components/{id}/updates/{update_id}/prepare`.
+    ///
+    /// Issues the async PUT (server returns 202 + `Location: .../status`),
+    /// then polls `/status` until `phase=prepare, status ∈ {completed,
+    /// failed}` or the prepare budget elapses.  Returns the final
+    /// `UpdateStatusBody`.
+    #[instrument(skip(self))]
+    pub async fn prepare(&self) -> Result<UpdateStatusBody> {
+        let update_id = self
+            .current_update_id()
+            .await
+            .ok_or(FlashError::NoSession)?;
+        let url = self.build_url(&self.config.updates_prepare_path(&update_id))?;
+        let mut req = self.client.put(url);
+        req = self.add_auth(req);
+        let resp = req.send().await?;
+        if resp.status() != StatusCode::ACCEPTED {
+            return Err(FlashError::Server {
+                status: resp.status().as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+        self.poll_status_until(
+            "prepare",
+            Duration::from_millis(self.config.timeouts.prepare_budget_ms),
+        )
+        .await
+    }
+
+    /// `PUT /vehicle/v1/components/{id}/updates/{update_id}/execute`.
+    ///
+    /// When `orchestrated == true`, sends
+    /// `?x-sumo-control=orchestrated` and returns once the entry hits
+    /// `substate=awaiting-verdict` — the caller is expected to follow
+    /// up with [`commit`](Self::commit) or [`rollback`](Self::rollback)
+    /// (Phase B).  When `false`, polls until the standard terminal
+    /// (`status=completed|failed`).
+    #[instrument(skip(self))]
+    pub async fn execute(&self, orchestrated: bool) -> Result<UpdateStatusBody> {
+        let update_id = self
+            .current_update_id()
+            .await
+            .ok_or(FlashError::NoSession)?;
+        let mut url = self.build_url(&self.config.updates_execute_path(&update_id))?;
+        if orchestrated {
+            url.query_pairs_mut()
+                .append_pair("x-sumo-control", "orchestrated");
+        }
+        let mut req = self.client.put(url);
+        req = self.add_auth(req);
+        let resp = req.send().await?;
+        if resp.status() != StatusCode::ACCEPTED {
+            return Err(FlashError::Server {
+                status: resp.status().as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+        let budget = Duration::from_millis(self.config.timeouts.execute_budget_ms);
+        if orchestrated {
+            self.poll_status_until_awaiting_verdict(budget).await
+        } else {
+            self.poll_status_until("execute", budget).await
+        }
+    }
+
+    /// `PUT /vehicle/v1/components/{id}/updates/{update_id}/automated`.
+    /// Server-driven prepare → execute chain.  Polls until terminal.
+    #[instrument(skip(self))]
+    pub async fn automated(&self) -> Result<UpdateStatusBody> {
+        let update_id = self
+            .current_update_id()
+            .await
+            .ok_or(FlashError::NoSession)?;
+        let url = self.build_url(&self.config.updates_automated_path(&update_id))?;
+        let mut req = self.client.put(url);
+        req = self.add_auth(req);
+        let resp = req.send().await?;
+        if resp.status() != StatusCode::ACCEPTED {
+            return Err(FlashError::Server {
+                status: resp.status().as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+        let budget = Duration::from_millis(
+            self.config.timeouts.prepare_budget_ms + self.config.timeouts.execute_budget_ms,
+        );
+        // We don't filter on phase here — automated runs both, terminal
+        // status is what counts.
+        self.poll_status_until("execute", budget).await
+    }
+
+    /// `PUT /updates/{update_id}/x-sumo-commit` — Phase B vendor verb.
+    /// Posts the `Commit` verdict, then polls until terminal.
+    #[instrument(skip(self))]
+    pub async fn spec_commit(&self) -> Result<UpdateStatusBody> {
+        self.post_verdict_and_wait("x-sumo-commit").await
+    }
+
+    /// `PUT /updates/{update_id}/x-sumo-rollback` — Phase B vendor verb.
+    /// Posts the `Rollback` verdict, then polls until terminal.
+    #[instrument(skip(self))]
+    pub async fn spec_rollback(&self) -> Result<UpdateStatusBody> {
+        self.post_verdict_and_wait("x-sumo-rollback").await
+    }
+
+    async fn post_verdict_and_wait(&self, verb: &str) -> Result<UpdateStatusBody> {
+        let update_id = self
+            .current_update_id()
+            .await
+            .ok_or(FlashError::NoSession)?;
+        let path = match verb {
+            "x-sumo-commit" => self.config.updates_x_sumo_commit_path(&update_id),
+            "x-sumo-rollback" => self.config.updates_x_sumo_rollback_path(&update_id),
+            _ => unreachable!("post_verdict_and_wait called with non-verdict verb"),
+        };
+        let url = self.build_url(&path)?;
+        let mut req = self.client.put(url);
+        req = self.add_auth(req);
+        let resp = req.send().await?;
+        if resp.status() != StatusCode::ACCEPTED {
+            return Err(FlashError::Server {
+                status: resp.status().as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+        let final_status = self
+            .poll_status_until(
+                "execute",
+                Duration::from_millis(self.config.timeouts.execute_budget_ms),
+            )
+            .await?;
+        // The verdict landed; clear our in-process session id so a
+        // subsequent open_update can allocate a fresh one.
+        *self.update_id.lock().await = None;
+        Ok(final_status)
+    }
+
+    /// Poll `GET /status` until the body's `(phase, status)` matches
+    /// `(expected_phase, terminal)` or `budget` elapses.  Returns the
+    /// final status body.
+    async fn poll_status_until(
+        &self,
+        expected_phase: &str,
+        budget: Duration,
+    ) -> Result<UpdateStatusBody> {
+        let interval = Duration::from_millis(self.config.timeouts.flash_poll_ms);
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            let body = self.spec_status().await?;
+            if body.phase == expected_phase && body.is_terminal() {
+                return Ok(body);
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(FlashError::Timeout {
+                    operation: format!(
+                        "{} phase: still {}/{} after {:?}",
+                        expected_phase, body.phase, body.status, budget
+                    ),
+                });
+            }
+            tokio::time::sleep(interval).await;
+        }
+    }
+
+    /// Orchestrated-mode helper: poll until execute is paused at
+    /// `awaiting-verdict` (or terminal, if the server rejected the
+    /// flow before getting there).
+    async fn poll_status_until_awaiting_verdict(
+        &self,
+        budget: Duration,
+    ) -> Result<UpdateStatusBody> {
+        let interval = Duration::from_millis(self.config.timeouts.flash_poll_ms);
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            let body = self.spec_status().await?;
+            if body.phase == "execute" && (body.is_awaiting_verdict() || body.is_terminal()) {
+                return Ok(body);
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(FlashError::Timeout {
+                    operation: format!(
+                        "execute orchestrated: still {}/{} substate={:?} after {:?}",
+                        body.phase, body.status, body.substate, budget
+                    ),
+                });
+            }
+            tokio::time::sleep(interval).await;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // High-level helper: one-shot flash through the full lifecycle.
 // ---------------------------------------------------------------------------
 
@@ -489,6 +779,13 @@ impl FlashClient {
     /// One-shot single-part flash + reset + commit.  Useful for
     /// simple binary-blob flashes (sovd-cli).  Multi-part flows
     /// (manifest + payloads) compose the primitives directly.
+    ///
+    /// Internally still uses the deprecated `/executions{action}`
+    /// wire so a single one-shot helper exists for callers that
+    /// haven't migrated.  The spec-wire equivalent is
+    /// `open_update + upload_part + prepare + execute(false)` driven
+    /// directly by the caller.
+    #[allow(deprecated)]
     #[instrument(skip(self, data, progress))]
     pub async fn flash_update<F>(
         &self,

@@ -684,7 +684,10 @@ impl DiagnosticBackend for ManagedEcuBackend {
         }
     }
 
+    #[allow(deprecated)]
     async fn abort_flash(&self, _transfer_id: &str) -> BackendResult<()> {
+        // Still on the /executions wire; Phase D migration switches
+        // this whole supplier-app shim to prepare/execute/spec_commit.
         self.flash_client
             .abort()
             .await
@@ -692,6 +695,7 @@ impl DiagnosticBackend for ManagedEcuBackend {
         Ok(())
     }
 
+    #[allow(deprecated)]
     async fn finalize_flash(&self) -> BackendResult<()> {
         self.require_programming_session().await?;
 
@@ -711,6 +715,7 @@ impl DiagnosticBackend for ManagedEcuBackend {
         Ok(())
     }
 
+    #[allow(deprecated)]
     async fn commit_flash(&self) -> BackendResult<()> {
         // After ECU reset, the inner session reverts to default and security
         // re-locks. The commit routine requires extended session + security,
@@ -732,6 +737,7 @@ impl DiagnosticBackend for ManagedEcuBackend {
         Ok(())
     }
 
+    #[allow(deprecated)]
     async fn rollback_flash(&self) -> BackendResult<()> {
         tracing::info!("Setting ECU extended session for rollback (inner session)");
         self.proxy.set_session_mode("extended").await?;

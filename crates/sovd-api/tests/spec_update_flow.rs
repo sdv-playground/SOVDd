@@ -582,6 +582,133 @@ async fn discovery_endpoint_lists_x_sumo_extensions() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Phase C — FlashClient driving the spec wire end-to-end
+// ---------------------------------------------------------------------------
+
+fn flash_client_for(server: &TestServer) -> sovd_client::FlashClient {
+    let cfg = sovd_client::flash::FlashConfig::builder(&server.base_url())
+        .component_id("dev1")
+        // Tight polling so the test isn't dominated by sleeps.
+        .flash_poll_ms(25)
+        .build();
+    sovd_client::FlashClient::new(cfg).expect("flash client")
+}
+
+#[tokio::test]
+async fn flash_client_drives_singleshot_via_prepare_execute() {
+    let (server, _backend) = spawn_with("singleshot").await;
+    let client = flash_client_for(&server);
+    client.open_update().await.expect("open_update");
+    client
+        .upload_part("manifest", b"hsm-bytes")
+        .await
+        .expect("upload_part");
+    let prepared = client.prepare().await.expect("prepare");
+    assert_eq!(prepared.status, "completed");
+    let executed = client.execute(false).await.expect("execute");
+    assert_eq!(executed.phase, "execute");
+    assert_eq!(executed.status, "completed");
+}
+
+#[tokio::test]
+async fn flash_client_drives_banked_orchestrated_then_spec_commit() {
+    let (server, backend) = spawn_with("banked").await;
+    let client = flash_client_for(&server);
+    client.open_update().await.expect("open_update");
+    client
+        .upload_part("manifest", b"banked")
+        .await
+        .expect("manifest");
+    client
+        .upload_part("#kernel", b"\xCAkern")
+        .await
+        .expect("payload");
+
+    let prepared = client.prepare().await.expect("prepare");
+    assert_eq!(prepared.status, "completed");
+
+    let paused = client.execute(true).await.expect("execute(orchestrated)");
+    assert_eq!(paused.phase, "execute");
+    assert_eq!(paused.status, "inProgress");
+    assert_eq!(paused.substate.as_deref(), Some("awaiting-verdict"));
+
+    let committed = client.spec_commit().await.expect("spec_commit");
+    assert_eq!(committed.status, "completed");
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::Committed);
+    assert!(
+        client.current_update_id().await.is_none(),
+        "spec_commit should clear the local update_id"
+    );
+}
+
+#[tokio::test]
+async fn flash_client_drives_banked_orchestrated_then_spec_rollback() {
+    let (server, backend) = spawn_with("banked").await;
+    let client = flash_client_for(&server);
+    client.open_update().await.expect("open_update");
+    client
+        .upload_part("manifest", b"banked")
+        .await
+        .expect("manifest");
+    client
+        .upload_part("#kernel", b"\xCAkern")
+        .await
+        .expect("payload");
+    client.prepare().await.expect("prepare");
+    client.execute(true).await.expect("execute(orchestrated)");
+
+    let rolled_back = client.spec_rollback().await.expect("spec_rollback");
+    assert_eq!(rolled_back.status, "failed");
+    assert_eq!(
+        rolled_back.error.as_ref().unwrap().error_code,
+        "x-sumo-verdict-rollback"
+    );
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
+}
+
+#[tokio::test]
+async fn flash_client_automated_runs_prepare_then_execute() {
+    let (server, _backend) = spawn_with("singleshot").await;
+    let client = flash_client_for(&server);
+    client.open_update().await.expect("open_update");
+    client.upload_part("manifest", b"x").await.expect("upload");
+
+    let final_status = client.automated().await.expect("automated");
+    assert_eq!(final_status.phase, "execute");
+    assert_eq!(final_status.status, "completed");
+}
+
+#[tokio::test]
+async fn flash_client_propagates_prepare_failure() {
+    let (server, backend) = spawn_with("singleshot").await;
+    let client = flash_client_for(&server);
+    *backend.fail_verify.lock() = true;
+    client.open_update().await.expect("open_update");
+    client
+        .upload_part("manifest", b"will-fail")
+        .await
+        .expect("upload");
+    let prepared = client.prepare().await.expect("prepare polls to terminal");
+    assert_eq!(prepared.status, "failed");
+    assert_eq!(
+        prepared.error.as_ref().unwrap().error_code,
+        "update-preparation-failed"
+    );
+}
+
+#[tokio::test]
+async fn flash_client_spec_status_carries_table_270_shape() {
+    let (server, _backend) = spawn_with("singleshot").await;
+    let client = flash_client_for(&server);
+    client.open_update().await.expect("open_update");
+    let body = client.spec_status().await.expect("spec_status");
+    assert_eq!(body.phase, "prepare");
+    assert_eq!(body.status, "pending");
+    assert!(body.error.is_none());
+    assert!(body.substate.is_none());
+}
+
 #[tokio::test]
 async fn executions_wire_carries_deprecation_header() {
     let (server, _backend) = spawn_with("singleshot").await;

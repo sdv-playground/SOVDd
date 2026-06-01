@@ -142,6 +142,19 @@ pub struct TimeoutsConfig {
     #[serde(default = "default_execution_timeout")]
     pub execution_ms: u64,
 
+    /// Wall-clock budget for `prepare()` to reach a terminal status,
+    /// in milliseconds (default: 10 minutes).  The 202-issuing PUT
+    /// returns instantly; this caps how long the client will poll
+    /// `GET /status` for `phase=prepare, status ∈ {completed,failed}`.
+    #[serde(default = "default_prepare_budget")]
+    pub prepare_budget_ms: u64,
+
+    /// Wall-clock budget for `execute()` to reach a terminal status,
+    /// in milliseconds (default: 30 minutes — banked OTA includes
+    /// reset + trial boot in the orchestrated flow).
+    #[serde(default = "default_execute_budget")]
+    pub execute_budget_ms: u64,
+
     /// Connect timeout in milliseconds (default: 10s)
     #[serde(default = "default_connect_timeout")]
     pub connect_ms: u64,
@@ -154,6 +167,8 @@ impl Default for TimeoutsConfig {
             flash_poll_ms: default_poll_interval(),
             request_ms: default_request_timeout(),
             execution_ms: default_execution_timeout(),
+            prepare_budget_ms: default_prepare_budget(),
+            execute_budget_ms: default_execute_budget(),
             connect_ms: default_connect_timeout(),
         }
     }
@@ -173,6 +188,14 @@ fn default_request_timeout() -> u64 {
 
 fn default_execution_timeout() -> u64 {
     300_000 // 5 minutes — matches upload_ms; verify/finalize on real ECUs is slow
+}
+
+fn default_prepare_budget() -> u64 {
+    600_000 // 10 minutes
+}
+
+fn default_execute_budget() -> u64 {
+    1_800_000 // 30 minutes — covers banked reset + trial + commit
 }
 
 fn default_connect_timeout() -> u64 {
@@ -397,6 +420,37 @@ impl FlashConfig {
     /// `{base_prefix}/updates/{update_id}/executions` — lifecycle verb POST.
     pub fn updates_executions_path(&self, update_id: &str) -> String {
         format!("{}/updates/{}/executions", self.base_prefix(), update_id)
+    }
+
+    /// ISO 17978-3 §7.18 spec verbs.  These land at the update root
+    /// as `PUT` (not the vendor-extension `POST /executions{action}`)
+    /// and are async — return 202 + `Location: .../status`.
+    pub fn updates_prepare_path(&self, update_id: &str) -> String {
+        format!("{}/updates/{}/prepare", self.base_prefix(), update_id)
+    }
+    pub fn updates_execute_path(&self, update_id: &str) -> String {
+        format!("{}/updates/{}/execute", self.base_prefix(), update_id)
+    }
+    pub fn updates_automated_path(&self, update_id: &str) -> String {
+        format!("{}/updates/{}/automated", self.base_prefix(), update_id)
+    }
+    /// `GET` — returns the Table 270 `UpdateStatusBody`
+    /// (`{phase, status, progress?, step?, error?}`).
+    pub fn updates_spec_status_path(&self, update_id: &str) -> String {
+        format!("{}/updates/{}/status", self.base_prefix(), update_id)
+    }
+
+    /// Vendor extension verbs (Phase B — orchestrated mode).  Land at
+    /// `/x-sumo-commit` / `/x-sumo-rollback` on the update resource.
+    pub fn updates_x_sumo_commit_path(&self, update_id: &str) -> String {
+        format!("{}/updates/{}/x-sumo-commit", self.base_prefix(), update_id)
+    }
+    pub fn updates_x_sumo_rollback_path(&self, update_id: &str) -> String {
+        format!(
+            "{}/updates/{}/x-sumo-rollback",
+            self.base_prefix(),
+            update_id
+        )
     }
 }
 
