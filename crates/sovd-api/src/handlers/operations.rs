@@ -1,24 +1,22 @@
 //! Operation handlers — ISO 17978-3 §7.14 executions sub-resource.
 //!
-//! Wire shape:
+//! Wire shape (Phase E — C-080):
 //!
 //!   `POST /vehicle/v1/components/{id}/operations/{op_id}/executions`
-//!     body: `{parameters?: "<hex>"}`
-//!     → 200 (or 202 if still running) + `Location` header to the
-//!       newly-created execution sub-resource + `OperationExecution`
-//!       body.
+//!     body: `{parameters?: "<hex>" | <io-control-object>}`
+//!     → `202 Accepted` + `Location: .../executions/{exec_id}` +
+//!       placeholder `OperationExecution { status: running }` body.
+//!       The backend call runs in a tokio task; clients poll
+//!       `GET .../executions/{exec_id}` until terminal.
 //!
 //!   `GET /vehicle/v1/components/{id}/operations/{op_id}/executions/{exec_id}`
-//!     → `OperationExecution` (current backend state — UDS RoutineControl
-//!       0x31 0x03 result).
+//!     → `OperationExecution` with current `status` (running /
+//!       completed / failed / stopped per C-081).  Reads the cached
+//!       state captured by the spawned task; `?refresh=true` re-polls
+//!       the backend live.
 //!
 //!   `DELETE /vehicle/v1/components/{id}/operations/{op_id}/executions/{exec_id}`
 //!     → 204 No Content (UDS RoutineControl 0x31 0x02 stop).
-//!
-//! `exec_id` is a server-allocated UUID returned on POST.  The handler
-//! does not persist per-`exec_id` state — UDS RoutineControl is
-//! single-operation-at-a-time, so polling any well-formed `exec_id`
-//! returns the *current* backend state for the operation.
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -262,33 +260,56 @@ pub async fn get_operation(
 
 /// POST /vehicle/v1/components/:component_id/operations/:operation_id/executions
 ///
-/// Start a fresh execution of the operation.
-/// Returns 200 if the backend already has a terminal state, otherwise
-/// 202 with a `Location` header pointing at the executions sub-resource.
+/// ISO 17978-3 §7.14.6 / C-080.  Returns `202 Accepted` immediately
+/// with a `Location` header pointing at the newly-created execution
+/// sub-resource, and runs the operation in a background task.  The
+/// backend's `start_operation` (or `control_output`) call may itself
+/// be synchronous (UDS RoutineControl completes in ms) — spawning
+/// keeps the HTTP request short regardless of how slow the backend
+/// is, which matters when the client sits behind proxies with
+/// 30-second timeouts.
+///
+/// `GET .../executions/{exec_id}` reads the captured terminal state
+/// from the cache once the task completes (or `?refresh=true` to
+/// re-poll the backend live).
 pub async fn start_operation_execution(
     State(state): State<AppState>,
     Path((component_id, operation_id)): Path<(String, String)>,
     Json(request): Json<StartExecutionRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let backend = state.get_backend(&component_id)?;
+    let backend = state.get_backend(&component_id)?.clone();
 
-    // Decide between RoutineControl (0x31) and InputOutputControl (0x2F).
-    // Heuristic: if the operation_id matches an output, dispatch to
-    // control_output; else fall through to start_operation.  Output
-    // lookups are cheap (small list) and we avoid an explicit "type"
-    // hint in the wire body.
+    // Decide between RoutineControl (0x31) and InputOutputControl (0x2F)
+    // up-front so we can fail-fast on argument errors before spawning.
     let outputs = backend.list_outputs().await.unwrap_or_default();
     let is_output = outputs.iter().any(|o| o.id == operation_id);
 
-    let mut execution = if is_output {
-        // IO control path — parse the structured parameters body.
+    // Validate the operation_id exists before allocating an exec_id +
+    // returning 202.  Otherwise a typo'd op would 202-then-fail-async,
+    // which is harder to debug than an immediate 404.  IO-controlled
+    // outputs are validated above; only RoutineControl ops need the
+    // list_operations lookup.
+    if !is_output {
+        let ops = backend.list_operations().await.unwrap_or_default();
+        if !ops.iter().any(|o| o.id == operation_id) {
+            return Err(ApiError::NotFound(format!(
+                "operation '{operation_id}' not found"
+            )));
+        }
+    }
+
+    enum Dispatch {
+        IoControl {
+            action: IoControlAction,
+            value: Option<serde_json::Value>,
+        },
+        Routine {
+            params: Vec<u8>,
+        },
+    }
+    let dispatch = if is_output {
         let (action, value) = parse_io_control_params(request.parameters.as_ref())?;
-        let result = backend.control_output(&operation_id, action, value).await?;
-        sovd_core::OperationExecution::completed(
-            String::new(),
-            operation_id.clone(),
-            serde_json::to_value(result).unwrap_or(serde_json::Value::Null),
-        )
+        Dispatch::IoControl { action, value }
     } else {
         let params: Vec<u8> = match request.parameters.as_ref() {
             Some(serde_json::Value::String(hex)) => hex::decode(hex)
@@ -301,17 +322,76 @@ pub async fn start_operation_execution(
                 )));
             }
         };
-        backend.start_operation(&operation_id, &params).await?
+        Dispatch::Routine { params }
     };
-    let exec_id = Uuid::new_v4().to_string();
-    execution.execution_id = exec_id.clone();
 
-    // Cache the final execution so GET .../executions/{exec_id} can serve
-    // the captured state without re-querying the backend (UDS
-    // RoutineControl is synchronous; the backend has nothing else to say).
+    // Allocate exec_id + seed the cache with a Running placeholder so
+    // GET .../executions/{exec_id} returns running/completed/failed/
+    // stopped — never 404 for the exec_id we just handed out.
+    let exec_id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now();
+    let initial = OperationExecution {
+        execution_id: exec_id.clone(),
+        operation_id: operation_id.clone(),
+        status: OperationStatus::Running,
+        result: None,
+        started_at: now,
+        completed_at: None,
+        error: None,
+    };
     state
         .operation_executions
-        .record(&component_id, &operation_id, execution.clone());
+        .record(&component_id, &operation_id, initial);
+
+    let task_state = state.clone();
+    let task_component_id = component_id.clone();
+    let task_operation_id = operation_id.clone();
+    let task_exec_id = exec_id.clone();
+    tokio::spawn(async move {
+        let result = match dispatch {
+            Dispatch::IoControl { action, value } => {
+                match backend
+                    .control_output(&task_operation_id, action, value)
+                    .await
+                {
+                    Ok(out) => OperationExecution::completed(
+                        task_exec_id.clone(),
+                        task_operation_id.clone(),
+                        serde_json::to_value(out).unwrap_or(serde_json::Value::Null),
+                    ),
+                    Err(e) => OperationExecution {
+                        execution_id: task_exec_id.clone(),
+                        operation_id: task_operation_id.clone(),
+                        status: OperationStatus::Failed,
+                        result: None,
+                        started_at: now,
+                        completed_at: Some(chrono::Utc::now()),
+                        error: Some(format!("{e:?}")),
+                    },
+                }
+            }
+            Dispatch::Routine { params } => {
+                match backend.start_operation(&task_operation_id, &params).await {
+                    Ok(mut exec) => {
+                        exec.execution_id = task_exec_id.clone();
+                        exec
+                    }
+                    Err(e) => OperationExecution {
+                        execution_id: task_exec_id.clone(),
+                        operation_id: task_operation_id.clone(),
+                        status: OperationStatus::Failed,
+                        result: None,
+                        started_at: now,
+                        completed_at: Some(chrono::Utc::now()),
+                        error: Some(format!("{e:?}")),
+                    },
+                }
+            }
+        };
+        task_state
+            .operation_executions
+            .record(&task_component_id, &task_operation_id, result);
+    });
 
     let href = format!(
         "/vehicle/v1/components/{}/operations/{}/executions/{}",
@@ -323,13 +403,23 @@ pub async fn start_operation_execution(
         HeaderValue::from_str(&href)
             .map_err(|e| ApiError::Internal(format!("bad Location header: {e}")))?,
     );
-
-    let status_code = match execution.status {
-        OperationStatus::Running => StatusCode::ACCEPTED,
-        _ => StatusCode::OK,
-    };
-
-    Ok((status_code, headers, Json(execution)))
+    // Return the placeholder OperationExecution body (status=Running)
+    // so existing clients parsing the response shape don't break.
+    // The Location header is the canonical pointer for poll-based
+    // status retrieval.
+    Ok((
+        StatusCode::ACCEPTED,
+        headers,
+        Json(OperationExecution {
+            execution_id: exec_id,
+            operation_id,
+            status: OperationStatus::Running,
+            result: None,
+            started_at: now,
+            completed_at: None,
+            error: None,
+        }),
+    ))
 }
 
 /// GET /vehicle/v1/components/:component_id/operations/:operation_id/executions/:exec_id
