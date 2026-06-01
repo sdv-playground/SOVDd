@@ -632,6 +632,26 @@ pub trait DiagnosticBackend: Send + Sync {
         ))
     }
 
+    /// Re-verify a single uploaded part by its file_id (returned from
+    /// `receive_package_stream`) against the SHA-256 the wire recorded
+    /// at upload time.
+    ///
+    /// Used by `/updates /executions{verify}` to confirm that every
+    /// uploaded part (manifest plus any detached payloads) still
+    /// matches what was streamed in — re-read from disk for payloads,
+    /// re-hashed from in-memory for the manifest.  Catches on-disk
+    /// corruption between upload and finalize.
+    ///
+    /// Returns Ok if the recomputed hash matches.  Default impl is
+    /// `NotSupported`; backends that route detached payloads through
+    /// streaming should override.
+    async fn verify_part(&self, file_id: &str, expected_sha256: &str) -> BackendResult<()> {
+        let _ = (file_id, expected_sha256);
+        Err(crate::error::BackendError::NotSupported(
+            "verify_part".to_string(),
+        ))
+    }
+
     /// Delete a stored package
     async fn delete_package(&self, package_id: &str) -> BackendResult<()> {
         let _ = package_id;

@@ -424,7 +424,7 @@ pub async fn post_execution(
             entry
                 .parts
                 .iter()
-                .map(|p| (p.part_id.clone(), p.file_id.clone()))
+                .map(|p| (p.part_id.clone(), p.file_id.clone(), p.sha256.clone()))
                 .collect::<Vec<_>>(),
             entry.transfer_id.clone(),
         )
@@ -440,20 +440,34 @@ pub async fn post_execution(
                     "verify called before any /bulk-data part uploaded".into(),
                 ));
             }
-            // The manifest part is the only one that maps to a
-            // backend-tracked "package" — detached payloads are
-            // validated inline by the streaming pipeline during upload
-            // (hash + decrypt + decompress against the manifest's
-            // declared digest) and never enter the `packages` map.
-            // Verify the manifest part by name ("manifest" by
-            // convention); fall back to the first uploaded part for
-            // legacy single-part flows.
-            let manifest_fid = parts
-                .iter()
-                .find(|(pid, _)| pid == "manifest")
-                .map(|(_, fid)| fid)
-                .unwrap_or(&parts[0].1);
-            backend.verify_package(manifest_fid).await?;
+            // Re-verify every uploaded part against the SHA-256 the
+            // server recorded at upload time.  Backends that route
+            // detached payloads through streaming (VmBackend) override
+            // `verify_part` to re-read from disk and re-hash; backends
+            // without that surface area get a fallback to the
+            // legacy single-package `verify_package` on the manifest
+            // part (singleshot integrated-envelope flows).
+            let mut verified_any = false;
+            for (part_id, file_id, sha256) in &parts {
+                match backend.verify_part(file_id, sha256).await {
+                    Ok(()) => verified_any = true,
+                    Err(sovd_core::BackendError::NotSupported(_)) => {
+                        // Fall back to verify_package for the manifest
+                        // part only — singleshot integrated-envelope
+                        // backends know how to re-verify it.
+                        if part_id == "manifest" {
+                            backend.verify_package(file_id).await?;
+                            verified_any = true;
+                        }
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            if !verified_any {
+                return Err(ApiError::Conflict(
+                    "verify: backend supports neither verify_part nor verify_package".into(),
+                ));
+            }
             // start_flash already ran in register_update (POST
             // /updates).  For backends that surface a transfer_id,
             // wait here for the staging pipeline to settle before
