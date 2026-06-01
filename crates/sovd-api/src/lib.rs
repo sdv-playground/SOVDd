@@ -410,6 +410,26 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/updates/{update_id}/executions",
             post(handlers::updates::post_execution),
         )
+        // ISO 17978-3 §7.18 spec verbs — async 202 + Location :: /status.
+        // The /executions wire above is the F.D8b vendor-extension form
+        // and stays alive (Deprecation header) for the migration window.
+        // tasks/spec-aligned-updates-wire.md UPDATE-WIRE-001.
+        .route(
+            "/vehicle/v1/components/{component_id}/updates/{update_id}/prepare",
+            put(handlers::updates::put_prepare),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/updates/{update_id}/execute",
+            put(handlers::updates::put_execute),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/updates/{update_id}/automated",
+            put(handlers::updates::put_automated),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/updates/{update_id}/status",
+            get(handlers::updates::get_status),
+        )
         // Heterogeneous campaigns — F.D4.  Top-level collection (not
         // under /components) because a campaign spans several.
         .route(

@@ -35,7 +35,7 @@ use sovd_core::{OperationStatus, PackageStream};
 use uuid::Uuid;
 
 use crate::error::ApiError;
-use crate::state::{AppState, UpdatePart, UpdateState, UpdatesEntry};
+use crate::state::{AppState, Phase, Status, UpdatePart, UpdateState, UpdatesEntry};
 
 // ---------------------------------------------------------------------------
 // Wire types
@@ -97,6 +97,23 @@ pub struct UpdateStatusResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transfer_id: Option<String>,
     pub href: String,
+}
+
+/// ISO 17978-3 §7.18.7 Table 270 — body of `GET /updates/{id}/status`.
+#[derive(Debug, Serialize)]
+pub struct UpdateStatusBody {
+    pub phase: &'static str,
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<crate::state::UpdateError>,
+    /// Vendor extension; populated only when control mode is
+    /// orchestrated (Phase B).
+    #[serde(rename = "x-sumo-substate", skip_serializing_if = "Option::is_none")]
+    pub substate: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -181,12 +198,16 @@ pub async fn register_update(
     // doesn't run the staging pipeline. Calling start_flash here
     // mirrors the legacy /flash wire's ordering (start_flash →
     // upload → finalize) while keeping /updates' separate endpoints.
-    // Backends that don't need preallocation return NotSupported,
-    // which we swallow.
+    //
+    // Best-effort: backends that don't preallocate (`NotSupported`) or
+    // that require an already-verified package (tier-1 supplier
+    // pattern in `ManagedEcuBackend`, errors with `InvalidRequest`)
+    // simply skip this step. The actual flash session will be opened
+    // later when the package is ready (during the /executions wire's
+    // `verify` action or at `PUT /prepare`).
     let transfer_id = match backend.start_flash().await {
         Ok(id) => Some(id),
-        Err(sovd_core::BackendError::NotSupported(_)) => None,
-        Err(e) => return Err(e.into()),
+        Err(_) => None,
     };
 
     {
@@ -198,7 +219,14 @@ pub async fn register_update(
                 parts: Vec::new(),
                 manifest,
                 state: UpdateState::Registered,
+                phase: Phase::default(),
+                status: Status::default(),
+                progress: None,
+                step: None,
+                error: None,
+                substate: None,
                 transfer_id,
+                task_handle: None,
             },
         );
     }
@@ -279,19 +307,488 @@ pub async fn delete_update(
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     let backend = state.get_backend(&component_id)?;
-    let transfer_id = {
+    let (transfer_id, abort_handle) = {
         let store = state.updates.0.lock();
         let entry = store
             .get(&update_id)
             .filter(|e| e.component_id == component_id)
             .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
-        entry.transfer_id.clone()
+        (entry.transfer_id.clone(), entry.task_handle.clone())
     };
+    if let Some(handle) = abort_handle {
+        handle.abort();
+    }
     if let Some(tid) = transfer_id {
         let _ = backend.abort_flash(&tid).await;
     }
     state.updates.0.lock().remove(&update_id);
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// ISO 17978-3 §7.18 spec-conformant lifecycle: PUT prepare / execute /
+// automated + GET status.  Async (202 + Location → poll /status).  See
+// `tasks/spec-aligned-updates-wire.md` UPDATE-WIRE-001.
+// ---------------------------------------------------------------------------
+
+/// Common 202-response shape for all three lifecycle PUTs.
+fn accepted_with_status_location(
+    component_id: &str,
+    update_id: &str,
+) -> Result<(StatusCode, HeaderMap), ApiError> {
+    let location = format!(
+        "/vehicle/v1/components/{}/updates/{}/status",
+        component_id, update_id
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::LOCATION,
+        HeaderValue::from_str(&location)
+            .map_err(|e| ApiError::Internal(format!("bad Location header: {e}")))?,
+    );
+    Ok((StatusCode::ACCEPTED, headers))
+}
+
+/// Update the entry's wire-state, holding the lock for as short as
+/// possible.  Returns Err if the entry has been deleted out from under
+/// us (which the spawned task should treat as a cancellation).
+fn mutate_entry<F>(state: &AppState, update_id: &str, f: F) -> Result<(), &'static str>
+where
+    F: FnOnce(&mut UpdatesEntry),
+{
+    let mut store = state.updates.0.lock();
+    match store.get_mut(update_id) {
+        Some(entry) => {
+            f(entry);
+            Ok(())
+        }
+        None => Err("update entry vanished mid-task"),
+    }
+}
+
+/// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/prepare`
+/// — ISO 17978-3 §7.18.5.  Spawns a background task that re-verifies
+/// every uploaded part against its recorded SHA-256 and waits for the
+/// backend's staging pipeline to settle.  Returns immediately with
+/// `202 Accepted` + `Location: .../status`.
+pub async fn put_prepare(
+    State(state): State<AppState>,
+    Path((component_id, update_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    // Validate component exists up-front; the actual backend handle
+    // is re-acquired inside the spawned task.
+    let _ = state.get_backend(&component_id)?;
+
+    // Snapshot the parts list + transfer_id under the lock; bail if
+    // the entry isn't in a startable phase/status.
+    let (parts, transfer_id) = {
+        let mut store = state.updates.0.lock();
+        let entry = store
+            .get_mut(&update_id)
+            .filter(|e| e.component_id == component_id)
+            .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+        if matches!(entry.status, Status::InProgress) {
+            return Err(ApiError::Conflict(format!(
+                "update {update_id} is already in {} phase, status inProgress",
+                entry.phase.as_str()
+            )));
+        }
+        if entry.parts.is_empty() {
+            return Err(ApiError::BadRequest(
+                "prepare called before any /bulk-data part uploaded".into(),
+            ));
+        }
+        entry.phase = Phase::Prepare;
+        entry.status = Status::InProgress;
+        entry.progress = Some(0);
+        entry.step = Some("starting prepare".into());
+        entry.error = None;
+        let parts = entry
+            .parts
+            .iter()
+            .map(|p| (p.part_id.clone(), p.file_id.clone(), p.sha256.clone()))
+            .collect::<Vec<_>>();
+        (parts, entry.transfer_id.clone())
+    };
+
+    // Spawn the prepare task. Use AbortHandle so DELETE can cancel.
+    let task_state = state.clone();
+    let task_update_id = update_id.clone();
+    let task_component_id = component_id.clone();
+    let join = tokio::spawn(async move {
+        let backend = match task_state.get_backend(&task_component_id) {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                    entry.status = Status::Failed;
+                    entry.step = Some("backend missing".into());
+                    entry.error = Some(crate::state::UpdateError {
+                        error_code: "internal-server-error".into(),
+                        message: format!("{e:?}"),
+                        parameters: None,
+                    });
+                    entry.task_handle = None;
+                });
+                return;
+            }
+        };
+
+        let total = parts.len() as u64;
+        for (idx, (part_id, file_id, sha256)) in parts.iter().enumerate() {
+            let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                entry.step = Some(format!("verifying part {part_id}"));
+                entry.progress = Some(((idx as u64 * 100) / total) as u8);
+            });
+            let verify = match backend.verify_part(file_id, sha256).await {
+                Ok(()) => Ok(()),
+                Err(sovd_core::BackendError::NotSupported(_)) => {
+                    if part_id == "manifest" {
+                        backend.verify_package(file_id).await.map(|_| ())
+                    } else {
+                        Ok(())
+                    }
+                }
+                Err(e) => Err(e),
+            };
+            if let Err(e) = verify {
+                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                    entry.status = Status::Failed;
+                    entry.step = Some(format!("part {part_id} verify failed"));
+                    entry.error = Some(crate::state::UpdateError {
+                        error_code: "update-preparation-failed".into(),
+                        message: format!("verify part {part_id}: {e}"),
+                        parameters: None,
+                    });
+                    entry.task_handle = None;
+                });
+                return;
+            }
+        }
+
+        if let Some(tid) = transfer_id.as_deref() {
+            let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                entry.step = Some("waiting for staging pipeline".into());
+                entry.progress = Some(80);
+            });
+            if let Err(e) = await_flash_settled(backend.as_ref(), tid).await {
+                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                    entry.status = Status::Failed;
+                    entry.step = Some("staging pipeline failed".into());
+                    entry.error = Some(crate::state::UpdateError {
+                        error_code: "update-preparation-failed".into(),
+                        message: format!("settle: {e:?}"),
+                        parameters: None,
+                    });
+                    entry.task_handle = None;
+                });
+                return;
+            }
+        }
+
+        let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+            entry.status = Status::Completed;
+            entry.progress = Some(100);
+            entry.step = Some("prepared".into());
+            entry.state = UpdateState::Verified; // legacy wire alignment
+            entry.task_handle = None;
+        });
+    });
+
+    let abort = join.abort_handle();
+    {
+        let mut store = state.updates.0.lock();
+        if let Some(entry) = store.get_mut(&update_id) {
+            entry.task_handle = Some(abort);
+        }
+    }
+
+    let (status, headers) = accepted_with_status_location(&component_id, &update_id)?;
+    Ok((status, headers))
+}
+
+/// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/execute`
+/// — ISO 17978-3 §7.18.6.  Phase A: standard mode only (server-driven
+/// finalize → auto-commit for singleshot, finalize → reset → auto-probe →
+/// commit for banked).  Phase B adds `?x-sumo-control=orchestrated`
+/// for orchestrator-driven trial verdict.
+pub async fn put_execute(
+    State(state): State<AppState>,
+    Path((component_id, update_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let backend = state.get_backend(&component_id)?;
+    let is_singleshot = backend.update_shape() == "singleshot";
+
+    let prior_phase = {
+        let mut store = state.updates.0.lock();
+        let entry = store
+            .get_mut(&update_id)
+            .filter(|e| e.component_id == component_id)
+            .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+        if matches!(entry.status, Status::InProgress) {
+            return Err(ApiError::Conflict(format!(
+                "update {update_id} is already in {} phase, status inProgress",
+                entry.phase.as_str()
+            )));
+        }
+        // Spec §7.18.6: execute requires prepare to have completed.
+        if !(entry.phase == Phase::Prepare && entry.status == Status::Completed
+            || entry.phase == Phase::Execute && entry.status == Status::Failed)
+        {
+            return Err(ApiError::Conflict(format!(
+                "execute requires prepare/completed, got {}/{}",
+                entry.phase.as_str(),
+                entry.status.as_str()
+            )));
+        }
+        let prior = entry.phase;
+        entry.phase = Phase::Execute;
+        entry.status = Status::InProgress;
+        entry.progress = Some(0);
+        entry.step = Some("starting execute".into());
+        entry.error = None;
+        prior
+    };
+    let _ = prior_phase;
+
+    let task_state = state.clone();
+    let task_update_id = update_id.clone();
+    let task_component_id = component_id.clone();
+    let join = tokio::spawn(async move {
+        let backend = match task_state.get_backend(&task_component_id) {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                    entry.status = Status::Failed;
+                    entry.error = Some(crate::state::UpdateError {
+                        error_code: "internal-server-error".into(),
+                        message: format!("{e:?}"),
+                        parameters: None,
+                    });
+                    entry.task_handle = None;
+                });
+                return;
+            }
+        };
+
+        // finalize_flash: writes live for singleshot, stages bank pointer for banked.
+        let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+            entry.step = Some("finalizing".into());
+            entry.progress = Some(20);
+        });
+        if let Err(e) = backend.finalize_flash().await {
+            let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                entry.status = Status::Failed;
+                entry.step = Some("finalize_flash failed".into());
+                entry.error = Some(crate::state::UpdateError {
+                    error_code: "update-execution-failed".into(),
+                    message: format!("finalize: {e}"),
+                    parameters: None,
+                });
+                entry.task_handle = None;
+            });
+            return;
+        }
+
+        if is_singleshot {
+            // Singleshot: finalize_flash already wrote live and
+            // transitioned the backend to Activated. commit_flash
+            // raises the security floor; failure here is bookkeeping
+            // and should not auto-rollback the install.
+            let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                entry.step = Some("committing".into());
+                entry.progress = Some(90);
+            });
+            if let Err(e) = backend.commit_flash().await {
+                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                    entry.status = Status::Failed;
+                    entry.step = Some("commit_flash failed".into());
+                    entry.error = Some(crate::state::UpdateError {
+                        error_code: "update-execution-failed".into(),
+                        message: format!("commit: {e}"),
+                        parameters: None,
+                    });
+                    entry.task_handle = None;
+                });
+                return;
+            }
+            let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                entry.status = Status::Completed;
+                entry.progress = Some(100);
+                entry.step = Some("completed".into());
+                entry.state = UpdateState::Committed; // legacy wire alignment
+                entry.task_handle = None;
+            });
+            return;
+        }
+
+        // Banked Phase A: validate + activate (legacy state-machine
+        // transitions), then leave the entry at execute/completed
+        // *without* a reset.  The orchestrator still drives the
+        // device reset and post-reset health check via the legacy
+        // /executions wire (or the dedicated entity-restart endpoint)
+        // during the migration window.  Phase B adds the orchestrated
+        // execute flow that handles reset+verdict on the server side.
+        let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+            entry.step = Some("validating".into());
+            entry.progress = Some(50);
+        });
+        match backend.validate().await {
+            Ok(()) => {}
+            Err(sovd_core::BackendError::NotSupported(_)) => {}
+            Err(e) => {
+                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                    entry.status = Status::Failed;
+                    entry.step = Some("validate failed".into());
+                    entry.error = Some(crate::state::UpdateError {
+                        error_code: "update-execution-failed".into(),
+                        message: format!("validate: {e}"),
+                        parameters: None,
+                    });
+                    entry.task_handle = None;
+                });
+                return;
+            }
+        }
+        let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+            entry.step = Some("activating".into());
+            entry.progress = Some(80);
+        });
+        match backend.activate().await {
+            Ok(()) => {}
+            Err(sovd_core::BackendError::NotSupported(_)) => {}
+            Err(e) => {
+                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                    entry.status = Status::Failed;
+                    entry.step = Some("activate failed".into());
+                    entry.error = Some(crate::state::UpdateError {
+                        error_code: "update-execution-failed".into(),
+                        message: format!("activate: {e}"),
+                        parameters: None,
+                    });
+                    entry.task_handle = None;
+                });
+                return;
+            }
+        }
+        let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+            entry.status = Status::Completed;
+            entry.progress = Some(100);
+            entry.step = Some("staged for reset".into());
+            entry.state = UpdateState::Finalized; // legacy wire alignment
+            entry.task_handle = None;
+        });
+    });
+
+    {
+        let mut store = state.updates.0.lock();
+        if let Some(entry) = store.get_mut(&update_id) {
+            entry.task_handle = Some(join.abort_handle());
+        }
+    }
+
+    let (status, headers) = accepted_with_status_location(&component_id, &update_id)?;
+    Ok((status, headers))
+}
+
+/// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/automated`
+/// — ISO 17978-3 §7.18.4.  Server-driven prepare+execute chain.
+/// Phase A: thin wrapper that runs prepare followed by execute when
+/// prepare completes.  Returns `409` if the package isn't marked
+/// `automated`.
+pub async fn put_automated(
+    State(state): State<AppState>,
+    Path((component_id, update_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    // Phase A: only block if the package declared automated=false in
+    // its registration manifest.  Default true unless explicitly
+    // disabled, to match Table 261's default.
+    let allowed = {
+        let store = state.updates.0.lock();
+        let entry = store
+            .get(&update_id)
+            .filter(|e| e.component_id == component_id)
+            .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+        entry
+            .manifest
+            .as_ref()
+            .and_then(|m| m.get("automated"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    };
+    if !allowed {
+        return Err(ApiError::Conflict(
+            "update-automated-not-supported: the package cannot be installed automatically".into(),
+        ));
+    }
+
+    // Run prepare; if it succeeds, chain into execute.  Reuses the
+    // same task machinery so both phases drive the same wire fields.
+    let prepare_resp = put_prepare(
+        State(state.clone()),
+        Path((component_id.clone(), update_id.clone())),
+    )
+    .await?
+    .into_response();
+    if prepare_resp.status() != StatusCode::ACCEPTED {
+        return Ok(prepare_resp);
+    }
+
+    // Chain: wait for prepare to complete, then kick off execute.
+    let task_state = state.clone();
+    let task_update_id = update_id.clone();
+    let task_component_id = component_id.clone();
+    tokio::spawn(async move {
+        // Poll our own store for prepare/completed before invoking execute.
+        loop {
+            let ready = {
+                let store = task_state.updates.0.lock();
+                match store.get(&task_update_id) {
+                    Some(e) => match (e.phase, e.status) {
+                        (Phase::Prepare, Status::Completed) => Some(true),
+                        (Phase::Prepare, Status::Failed) => Some(false),
+                        _ => None,
+                    },
+                    None => Some(false),
+                }
+            };
+            match ready {
+                Some(true) => break,
+                Some(false) => return,
+                None => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+            }
+        }
+        // Kick off execute via the standard handler.
+        let _ = put_execute(State(task_state), Path((task_component_id, task_update_id))).await;
+    });
+
+    let (status, headers) = accepted_with_status_location(&component_id, &update_id)?;
+    Ok((status, headers).into_response())
+}
+
+/// `GET /vehicle/v1/components/{component_id}/updates/{update_id}/status`
+/// — ISO 17978-3 §7.18.7.  Returns Table 270's `UpdateStatusBody`.
+pub async fn get_status(
+    State(state): State<AppState>,
+    Path((component_id, update_id)): Path<(String, String)>,
+) -> Result<Json<UpdateStatusBody>, ApiError> {
+    let _ = state.get_backend(&component_id)?;
+    let store = state.updates.0.lock();
+    let entry = store
+        .get(&update_id)
+        .filter(|e| e.component_id == component_id)
+        .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+    Ok(Json(UpdateStatusBody {
+        phase: entry.phase.as_str(),
+        status: entry.status.as_str(),
+        progress: entry.progress,
+        step: entry.step.clone(),
+        error: if entry.status == Status::Failed {
+            entry.error.clone()
+        } else {
+            None
+        },
+        substate: entry.substate,
+    }))
 }
 
 /// GET /vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data
@@ -606,6 +1103,19 @@ pub async fn post_execution(
         header::LOCATION,
         HeaderValue::from_str(&href)
             .map_err(|e| ApiError::Internal(format!("bad Location header: {e}")))?,
+    );
+    // UPDATE-WIRE-001 (tasks/spec-aligned-updates-wire.md) deprecates
+    // the /executions verb-bag in favour of the spec's PUT prepare /
+    // execute / automated.  RFC 8594 Deprecation + RFC 9745 Sunset
+    // signal to clients to migrate before the deprecation window
+    // closes.
+    headers.insert("deprecation", HeaderValue::from_static("true"));
+    headers.insert(
+        "link",
+        HeaderValue::from_static(
+            "</vehicle/v1/components>; rel=\"successor-version\"; \
+             title=\"Use PUT /updates/{id}/prepare and /execute (ISO 17978-3 sec 7.18)\"",
+        ),
     );
     Ok((StatusCode::OK, headers, Json(execution)))
 }

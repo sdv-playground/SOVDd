@@ -33,3 +33,4 @@ parking_lot.workspace = true
 [dev-dependencies]
 sovd-client.workspace = true
 tokio-test.workspace = true
+reqwest = { workspace = true }

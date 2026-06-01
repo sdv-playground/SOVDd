@@ -100,10 +100,44 @@ pub struct UpdatesEntry {
     pub component_id: String,
     pub parts: Vec<UpdatePart>,
     pub manifest: Option<serde_json::Value>,
-    /// Phase the SOVD wire has reached.
+    /// Legacy `state` field for the /executions wire (kept for the
+    /// deprecation window).  New callers should consult `phase` +
+    /// `status` (ISO 17978-3 §7.18.7 / Table 270).
     pub state: UpdateState,
-    /// Backend's transfer_id, populated once `verify` calls `start_flash`.
+    /// ISO 17978-3 §7.18.7 lifecycle phase. `prepare` and `execute`
+    /// run in sequence; status transitions within each phase.
+    pub phase: Phase,
+    /// ISO 17978-3 §7.18.7 status within the current phase.
+    pub status: Status,
+    /// Optional progress 0..100, populated by long-running tasks
+    /// (prepare's bulk-data verify loop, execute's bank installation).
+    pub progress: Option<u8>,
+    /// Optional free-form description of the current step; intended
+    /// for UI ("validating manifest", "writing bank_b/kernel", ...).
+    pub step: Option<String>,
+    /// Populated only when `status == Failed` per Table 270.  Carries
+    /// the GenericError the originating task hit.
+    pub error: Option<UpdateError>,
+    /// Vendor-extension fine-grained execute-phase substate, used
+    /// when control mode is orchestrated.  See
+    /// `tasks/spec-aligned-updates-wire.md` §2.2.
+    pub substate: Option<&'static str>,
+    /// Backend's transfer_id, populated once `start_flash` runs.
     pub transfer_id: Option<String>,
+    /// Abort handle for the in-flight prepare/execute task, so
+    /// `DELETE /updates/{id}` can cancel it.  `None` when no task
+    /// is running; cleared when a task completes.
+    pub task_handle: Option<tokio::task::AbortHandle>,
+}
+
+/// Subset of `GenericError` (sovd-core) carried in `UpdatesEntry.error`.
+/// Wire shape matches Table 16's `GenericError`.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct UpdateError {
+    pub error_code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -192,6 +226,51 @@ impl UpdateState {
             Self::Committed => "committed",
             Self::RolledBack => "rolledback",
             Self::Aborted => "aborted",
+        }
+    }
+}
+
+/// ISO 17978-3 §7.18.7 Table 271 `Phase` enum.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Phase {
+    /// Default — no phase started yet. Wire emits this until the
+    /// first `PUT /prepare` or `PUT /automated`.
+    #[default]
+    Prepare,
+    Execute,
+}
+
+impl Phase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Prepare => "prepare",
+            Self::Execute => "execute",
+        }
+    }
+}
+
+/// ISO 17978-3 §7.18.7 Table 273 `Status` enum.  Same four values for
+/// both phases; semantics shift per phase per Table 273.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Status {
+    /// Phase hasn't started yet (initial state after register or
+    /// transition into a new phase).
+    #[default]
+    Pending,
+    InProgress,
+    Failed,
+    Completed,
+}
+
+impl Status {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InProgress => "inProgress",
+            Self::Failed => "failed",
+            Self::Completed => "completed",
         }
     }
 }
