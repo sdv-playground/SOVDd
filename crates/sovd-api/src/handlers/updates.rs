@@ -27,11 +27,10 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use chrono::Utc;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sovd_core::{OperationStatus, PackageStream};
+use sovd_core::PackageStream;
 use uuid::Uuid;
 
 use crate::error::ApiError;
@@ -135,29 +134,6 @@ pub struct PartUploadResponse {
     pub size: u64,
     pub sha256: String,
     pub href: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ExecutionRequest {
-    pub action: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct UpdateExecution {
-    pub execution_id: String,
-    pub update_id: String,
-    pub action: String,
-    pub status: OperationStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    pub started_at: String,
-    pub completed_at: String,
-}
-
-#[derive(Debug, Deserialize, Default)]
-pub struct ExecutionQuery {
-    #[serde(default)]
-    pub refresh: bool,
 }
 
 /// `PUT /updates/{id}/execute` query parameters.
@@ -977,6 +953,29 @@ pub async fn put_x_sumo_rollback(
     Ok((status, headers))
 }
 
+/// `PUT /vehicle/v1/components/{component_id}/x-sumo-force-rollback`
+///
+/// Vendor extension for the trial-recovery edge case: a previous flash
+/// session left the backend in trial state (post-finalize, uncommitted)
+/// without leaving any SOVDd-side `/updates` entry at
+/// `awaiting-verdict`.  Calls `backend.rollback_flash()`
+/// unconditionally so the next `start_flash` won't 409 with "trial
+/// mode".  Idempotent.  Returns 204.
+///
+/// Distinct from `x-sumo-rollback` which posts a verdict to an active
+/// execute task — `force-rollback` doesn't care about any task and
+/// just clears whatever backend trial state is stuck on this
+/// component.  Lives at the component root (not under `/updates/{id}`)
+/// because by definition there may be no in-flight update_id.
+pub async fn put_x_sumo_force_rollback(
+    State(state): State<AppState>,
+    Path(component_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let backend = state.get_backend(&component_id)?;
+    backend.rollback_flash().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Common verdict-posting path for the two x-sumo verbs.  Validates
 /// that the entry is paused at `substate=awaiting-verdict` and posts
 /// the new verdict via the entry's watch channel.
@@ -1145,227 +1144,6 @@ pub async fn put_bulk_data_part(
         href,
     };
     Ok((StatusCode::CREATED, response_headers, Json(resp)))
-}
-
-/// POST /vehicle/v1/components/{component_id}/updates/{update_id}/executions
-pub async fn post_execution(
-    State(state): State<AppState>,
-    Path((component_id, update_id)): Path<(String, String)>,
-    Query(_query): Query<ExecutionQuery>,
-    Json(request): Json<ExecutionRequest>,
-) -> Result<impl IntoResponse, ApiError> {
-    let backend = state.get_backend(&component_id)?;
-
-    // Snapshot the entry we need under the lock without keeping it
-    // held across awaits.
-    let (current_state, parts, transfer_id) = {
-        let store = state.updates.0.lock();
-        let entry = store
-            .get(&update_id)
-            .filter(|e| e.component_id == component_id)
-            .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
-        (
-            entry.state,
-            entry
-                .parts
-                .iter()
-                .map(|p| (p.part_id.clone(), p.file_id.clone(), p.sha256.clone()))
-                .collect::<Vec<_>>(),
-            entry.transfer_id.clone(),
-        )
-    };
-
-    let started_at = Utc::now();
-    let exec_id = Uuid::new_v4().to_string();
-
-    let (next_state, new_transfer_id, message) = match request.action.as_str() {
-        "verify" => {
-            if parts.is_empty() {
-                return Err(ApiError::BadRequest(
-                    "verify called before any /bulk-data part uploaded".into(),
-                ));
-            }
-            // Re-verify every uploaded part against the SHA-256 the
-            // server recorded at upload time.  Backends that route
-            // detached payloads through streaming (VmBackend) override
-            // `verify_part` to re-read from disk and re-hash; backends
-            // without that surface area get a fallback to the
-            // legacy single-package `verify_package` on the manifest
-            // part (singleshot integrated-envelope flows).
-            let mut verified_any = false;
-            for (part_id, file_id, sha256) in &parts {
-                match backend.verify_part(file_id, sha256).await {
-                    Ok(()) => verified_any = true,
-                    Err(sovd_core::BackendError::NotSupported(_)) => {
-                        // Fall back to verify_package for the manifest
-                        // part only — singleshot integrated-envelope
-                        // backends know how to re-verify it.
-                        if part_id == "manifest" {
-                            backend.verify_package(file_id).await?;
-                            verified_any = true;
-                        }
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            }
-            if !verified_any {
-                return Err(ApiError::Conflict(
-                    "verify: backend supports neither verify_part nor verify_package".into(),
-                ));
-            }
-            // start_flash already ran in register_update (POST
-            // /updates).  For backends that surface a transfer_id,
-            // wait here for the staging pipeline to settle before
-            // declaring the update verified.
-            if let Some(tid) = &transfer_id {
-                await_flash_settled(backend.as_ref(), tid).await?;
-            }
-            (
-                UpdateState::Verified,
-                transfer_id.clone(),
-                Some("verified".to_string()),
-            )
-        }
-        "finalize" => {
-            if current_state != UpdateState::Verified {
-                return Err(ApiError::Conflict(format!(
-                    "finalize requires state=verified, got {}",
-                    current_state.as_str()
-                )));
-            }
-            // `finalize` writes the staged image to its final home:
-            //   - Banked backends: stages the next-boot bank pointer
-            //     (FlashState → AwaitingReboot).  The orchestrator then
-            //     drives ecu_reset and reads back the post-reset state.
-            //   - Singleshot backends: writes the artifact live
-            //     (FlashState → Activated).  No reset needed.
-            //
-            // `validate` and `activate` are exposed as separate
-            // /executions actions for orchestrators that want to drive
-            // the FSM step-by-step with observable state in between.
-            // This handler does NOT auto-chain them — the orchestrator
-            // is in charge of the lifecycle ordering.
-            backend.finalize_flash().await?;
-            (
-                UpdateState::Finalized,
-                transfer_id.clone(),
-                Some("finalized".to_string()),
-            )
-        }
-        "validate" => {
-            // Pre-finalize checkpoint: re-verify the staged image and
-            // move FlashState to Validated. Orchestrators use this to
-            // pause the lifecycle for a re-verification window before
-            // committing to a reset.
-            backend.validate().await?;
-            (
-                current_state,
-                transfer_id.clone(),
-                Some("validated".to_string()),
-            )
-        }
-        "invalidate" => {
-            // Demote a Validated transfer back to AwaitingActivation.
-            // Used when the bank can't be hardware-sealed and a power
-            // cycle could have introduced drift since validate().
-            backend.invalidate().await?;
-            (
-                current_state,
-                transfer_id.clone(),
-                Some("invalidated".to_string()),
-            )
-        }
-        "activate" => {
-            // Banked: stages the bank pointer flip (FlashState →
-            // AwaitingReboot — orchestrator must follow with
-            // ecu_reset).  Singleshot: writes live (FlashState →
-            // Activated).  Requires a prior validate() to land in
-            // Validated.
-            backend.activate().await?;
-            (
-                current_state,
-                transfer_id.clone(),
-                Some("activated".to_string()),
-            )
-        }
-        "commit" => {
-            backend.commit_flash().await?;
-            (
-                UpdateState::Committed,
-                transfer_id.clone(),
-                Some("committed".to_string()),
-            )
-        }
-        "rollback" => {
-            backend.rollback_flash().await?;
-            (
-                UpdateState::RolledBack,
-                transfer_id.clone(),
-                Some("rolled back".to_string()),
-            )
-        }
-        "abort" => {
-            if let Some(tid) = &transfer_id {
-                backend.abort_flash(tid).await?;
-            }
-            (
-                UpdateState::Aborted,
-                transfer_id.clone(),
-                Some("aborted".to_string()),
-            )
-        }
-        other => {
-            return Err(ApiError::BadRequest(format!(
-                "unknown action {other:?}; want one of verify|finalize|commit|rollback|abort"
-            )));
-        }
-    };
-
-    {
-        let mut store = state.updates.0.lock();
-        if let Some(entry) = store.get_mut(&update_id) {
-            entry.state = next_state;
-            if let Some(tid) = new_transfer_id {
-                entry.transfer_id = Some(tid);
-            }
-        }
-    }
-
-    let completed_at = Utc::now();
-    let execution = UpdateExecution {
-        execution_id: exec_id.clone(),
-        update_id: update_id.clone(),
-        action: request.action,
-        status: OperationStatus::Completed,
-        message,
-        started_at: started_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        completed_at: completed_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-    };
-
-    let href = format!(
-        "/vehicle/v1/components/{}/updates/{}/executions/{}",
-        component_id, update_id, exec_id
-    );
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::LOCATION,
-        HeaderValue::from_str(&href)
-            .map_err(|e| ApiError::Internal(format!("bad Location header: {e}")))?,
-    );
-    // UPDATE-WIRE-001 (tasks/spec-aligned-updates-wire.md) deprecates
-    // the /executions verb-bag in favour of the spec's PUT prepare /
-    // execute / automated.  RFC 8594 Deprecation + RFC 9745 Sunset
-    // signal to clients to migrate before the deprecation window
-    // closes.
-    headers.insert("deprecation", HeaderValue::from_static("true"));
-    headers.insert(
-        "link",
-        HeaderValue::from_static(
-            "</vehicle/v1/components>; rel=\"successor-version\"; \
-             title=\"Use PUT /updates/{id}/prepare and /execute (ISO 17978-3 sec 7.18)\"",
-        ),
-    );
-    Ok((StatusCode::OK, headers, Json(execution)))
 }
 
 // ---------------------------------------------------------------------------

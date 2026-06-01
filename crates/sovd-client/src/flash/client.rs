@@ -1,17 +1,17 @@
-//! SOVD update client — ISO 17978-3 `/updates` collection.
+//! SOVD update client — ISO 17978-3 §7.18 `/updates` lifecycle.
 //!
 //! Thin wrapper over the spec-compliant
-//! `/vehicle/v1/components/{id}/updates` and `/campaigns` wire
-//! (F.D2 + F.D4).  No legacy `/flash` + `/files` semantics, no shape
-//! synthesis.  Just the /updates lifecycle:
+//! `/vehicle/v1/components/{id}/updates` wire.  Lifecycle:
 //!
 //! ```text
-//! open_update            (POST /updates)
-//! upload_part × N        (PUT  /updates/{id}/bulk-data/{part_id})
-//! verify                 (POST /executions{verify})
-//! finalize               (POST /executions{finalize})
-//! ecu_reset              (PUT  /components/{id}/status/restart)
-//! commit | rollback      (POST /executions{commit|rollback})
+//! open_update                                 (POST /updates)
+//! upload_part × N                             (PUT  /updates/{id}/bulk-data/{part_id})
+//! prepare                                     (PUT  /updates/{id}/prepare)  — async 202+poll
+//! execute(orchestrated: bool)                 (PUT  /updates/{id}/execute)  — async 202+poll
+//! ecu_reset                                   (PUT  /components/{id}/status/restart)
+//! spec_commit | spec_rollback                 (PUT  /updates/{id}/x-sumo-{commit|rollback})
+//! force_rollback (trial-recovery)             (PUT  /components/{id}/x-sumo-force-rollback)
+//! automated  (server-driven prepare+execute)  (PUT  /updates/{id}/automated)
 //! ```
 //!
 //! Each `FlashClient` instance is bound to one component (top-level via
@@ -25,7 +25,7 @@ use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use tokio::sync::Mutex;
-use tracing::{debug, info, instrument};
+use tracing::{info, instrument};
 use url::Url;
 
 /// Characters that must be percent-encoded inside a URL path segment.
@@ -115,19 +115,6 @@ pub struct PartUploadResponse {
     pub size: u64,
     pub sha256: String,
     pub href: String,
-}
-
-/// Reply from `POST /updates/{id}/executions {action}`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct UpdateExecution {
-    pub execution_id: String,
-    pub update_id: String,
-    pub action: String,
-    pub status: String, // "completed" | "failed" | "running" | "stopped"
-    #[serde(default)]
-    pub message: Option<String>,
-    pub started_at: String,
-    pub completed_at: String,
 }
 
 /// Reply from `GET /updates/{id}`.
@@ -362,112 +349,29 @@ impl FlashClient {
     ///
     /// **Deprecated:** use [`prepare`](Self::prepare) — the spec
     /// verb (ISO 17978-3 §7.18.5) is async (202+poll) and uses
-    /// `PUT /updates/{id}/prepare` instead.  Server still accepts
-    /// `/executions{verify}` with a `Deprecation: true` header
-    /// during the migration window.
-    #[deprecated(
-        note = "use FlashClient::prepare (PUT /updates/{id}/prepare, ISO 17978-3 §7.18.5)"
-    )]
-    #[instrument(skip(self))]
-    pub async fn verify(&self) -> Result<UpdateExecution> {
-        self.run_execution("verify").await
-    }
-
-    /// `POST /executions {action: "finalize"}`.  Legacy
-    /// vendor-extension wire.
+    /// `PUT /components/{id}/x-sumo-force-rollback` — trial-recovery
+    /// vendor verb.  Unconditionally calls `backend.rollback_flash`,
+    /// regardless of whether any execute task is paused or any
+    /// `/updates` entry exists.  Used by orchestrators to unstick a
+    /// previous flash that left the backend in trial state across
+    /// process restart / abandoned session.  Idempotent; returns 204.
     ///
-    /// **Deprecated:** use [`execute`](Self::execute) — the spec
-    /// verb (ISO 17978-3 §7.18.6) bundles finalize + activate behind
-    /// `PUT /updates/{id}/execute` with async 202+poll.
-    #[deprecated(
-        note = "use FlashClient::execute (PUT /updates/{id}/execute, ISO 17978-3 §7.18.6)"
-    )]
+    /// Doesn't need an open session_id (the trial that needs clearing
+    /// by definition isn't tracked by an in-flight FlashClient
+    /// session).
     #[instrument(skip(self))]
-    pub async fn finalize(&self) -> Result<UpdateExecution> {
-        self.run_execution("finalize").await
-    }
-
-    /// `POST /executions {action: "validate"}`.  Legacy
-    /// vendor-extension wire.
-    ///
-    /// **Deprecated:** the spec doesn't expose `validate` as a
-    /// client-visible step; it's folded into [`prepare`](Self::prepare).
-    /// Kept for the migration window.
-    #[deprecated(note = "validate is folded into FlashClient::prepare in the spec wire")]
-    #[instrument(skip(self))]
-    pub async fn validate(&self) -> Result<UpdateExecution> {
-        self.run_execution("validate").await
-    }
-
-    /// `POST /executions {action: "invalidate"}`.  Legacy
-    /// vendor-extension wire.
-    ///
-    /// **Deprecated:** no spec equivalent; the orchestrator-driven
-    /// re-validation case is handled by re-issuing `prepare()` after
-    /// a state change.
-    #[deprecated(
-        note = "no spec equivalent — re-issue FlashClient::prepare if re-validation is needed"
-    )]
-    #[instrument(skip(self))]
-    pub async fn invalidate(&self) -> Result<UpdateExecution> {
-        self.run_execution("invalidate").await
-    }
-
-    /// `POST /executions {action: "activate"}`.  Legacy
-    /// vendor-extension wire.
-    ///
-    /// **Deprecated:** activate is folded into
-    /// [`execute`](Self::execute) on the spec wire.
-    #[deprecated(note = "activate is folded into FlashClient::execute")]
-    #[instrument(skip(self))]
-    pub async fn activate(&self) -> Result<UpdateExecution> {
-        self.run_execution("activate").await
-    }
-
-    /// `POST /executions {action: "commit"}`.  Legacy
-    /// vendor-extension wire.  Clears the local session id on success.
-    ///
-    /// **Deprecated:** use [`spec_commit`](Self::spec_commit) (or
-    /// [`automated`](Self::automated) for server-driven flows) — the
-    /// spec wire's verdict is the `PUT /updates/{id}/x-sumo-commit`
-    /// vendor verb (Phase B) and applies only after an orchestrated
-    /// `execute`.
-    #[deprecated(note = "use FlashClient::spec_commit (PUT /updates/{id}/x-sumo-commit)")]
-    #[instrument(skip(self))]
-    pub async fn commit(&self) -> Result<UpdateExecution> {
-        let exec = self.run_execution("commit").await?;
-        *self.update_id.lock().await = None;
-        Ok(exec)
-    }
-
-    /// `POST /executions {action: "rollback"}`.  Legacy
-    /// vendor-extension wire.  Clears the local session id on success.
-    ///
-    /// **Deprecated:** use [`spec_rollback`](Self::spec_rollback) —
-    /// the spec wire's verdict is the
-    /// `PUT /updates/{id}/x-sumo-rollback` vendor verb (Phase B).
-    #[deprecated(note = "use FlashClient::spec_rollback (PUT /updates/{id}/x-sumo-rollback)")]
-    #[instrument(skip(self))]
-    pub async fn rollback(&self) -> Result<UpdateExecution> {
-        let exec = self.run_execution("rollback").await?;
-        *self.update_id.lock().await = None;
-        Ok(exec)
-    }
-
-    /// `POST /executions {action: "abort"}`.  Legacy
-    /// vendor-extension wire.  Clears the local session id; idempotent
-    /// if no session is open.
-    ///
-    /// **Deprecated:** the spec equivalent is
-    /// `DELETE /updates/{id}` (handled by the FlashClient internally
-    /// — call `commit`/`rollback` for the orchestrated path or
-    /// release the FlashClient handle directly).
-    #[deprecated(note = "use DELETE /updates/{id} instead; abort isn't a spec verb")]
-    #[instrument(skip(self))]
-    pub async fn abort(&self) -> Result<UpdateExecution> {
-        let exec = self.run_execution("abort").await?;
-        *self.update_id.lock().await = None;
-        Ok(exec)
+    pub async fn force_rollback(&self) -> Result<()> {
+        let url = self.build_url(&self.config.x_sumo_force_rollback_path())?;
+        let mut req = self.client.put(url);
+        req = self.add_auth(req);
+        let resp = req.send().await?;
+        if resp.status() != StatusCode::NO_CONTENT {
+            return Err(FlashError::Server {
+                status: resp.status().as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+        Ok(())
     }
 
     /// Attach this client to the most-recent /updates entry on the
@@ -776,22 +680,21 @@ impl std::fmt::Display for FlashUpdatePhase {
 }
 
 impl FlashClient {
-    /// One-shot single-part flash + reset + commit.  Useful for
-    /// simple binary-blob flashes (sovd-cli).  Multi-part flows
-    /// (manifest + payloads) compose the primitives directly.
+    /// One-shot single-part flash on the spec wire.  Useful for
+    /// simple binary-blob flashes (sovd-cli) where the caller doesn't
+    /// want to compose the lifecycle primitives directly.
     ///
-    /// Internally still uses the deprecated `/executions{action}`
-    /// wire so a single one-shot helper exists for callers that
-    /// haven't migrated.  The spec-wire equivalent is
-    /// `open_update + upload_part + prepare + execute(false)` driven
-    /// directly by the caller.
-    #[allow(deprecated)]
+    /// Drives the unorchestrated path (singleshot auto-commits;
+    /// banked auto-commits via server-side standard flow).  Callers
+    /// that need orchestrator-driven commit/rollback over a banked
+    /// trial use the typed primitives (open_update + upload_part +
+    /// prepare + execute(true) + spec_commit / spec_rollback).
     #[instrument(skip(self, data, progress))]
     pub async fn flash_update<F>(
         &self,
         part_id: &str,
         data: &[u8],
-        reset_type: &str,
+        _reset_type: &str,
         mut progress: Option<F>,
     ) -> Result<()>
     where
@@ -806,23 +709,28 @@ impl FlashClient {
         if let Some(ref mut p) = progress {
             p(FlashUpdatePhase::Verifying);
         }
-        self.verify().await?;
+        let prepared = self.prepare().await?;
+        if prepared.status != "completed" {
+            return Err(FlashError::TransferFailed(format!(
+                "prepare ended at {}/{}",
+                prepared.phase, prepared.status
+            )));
+        }
 
         if let Some(ref mut p) = progress {
             p(FlashUpdatePhase::Finalizing);
         }
-        self.finalize().await?;
-
-        if let Some(ref mut p) = progress {
-            p(FlashUpdatePhase::Resetting);
+        let executed = self.execute(false).await?;
+        if executed.status != "completed" {
+            return Err(FlashError::TransferFailed(format!(
+                "execute ended at {}/{}",
+                executed.phase, executed.status
+            )));
         }
-        self.ecu_reset(reset_type).await?;
 
-        if let Some(ref mut p) = progress {
-            p(FlashUpdatePhase::Committing);
-        }
-        self.commit().await?;
-
+        // execute (unorchestrated) already drove the server-side
+        // commit on the standard flow.  No separate reset/commit
+        // dance from the client side.
         if let Some(ref mut p) = progress {
             p(FlashUpdatePhase::Complete);
         }
@@ -841,33 +749,6 @@ impl FlashClient {
         }
         let body = self.open_update().await?;
         Ok(body.update_id)
-    }
-
-    async fn run_execution(&self, action: &str) -> Result<UpdateExecution> {
-        let update_id = self
-            .current_update_id()
-            .await
-            .ok_or(FlashError::NoSession)?;
-        let url = self.build_url(&self.config.updates_executions_path(&update_id))?;
-        debug!("POST {action} at {url}");
-        let body = serde_json::json!({ "action": action });
-        let mut req = self
-            .client
-            .post(url)
-            .json(&body)
-            .timeout(Duration::from_millis(self.config.timeouts.execution_ms));
-        req = self.add_auth(req);
-        let resp = req.send().await?;
-        let exec: UpdateExecution = self.handle_response(resp).await?;
-        if exec.status != "completed" {
-            return Err(FlashError::TransferFailed(format!(
-                "/executions{{{}}} status={}: {}",
-                action,
-                exec.status,
-                exec.message.clone().unwrap_or_default()
-            )));
-        }
-        Ok(exec)
     }
 
     fn build_url(&self, path: &str) -> Result<Url> {

@@ -578,6 +578,17 @@ security_level = 0
         Ok((status, json))
     }
 
+    /// PUT with an empty body — used by the async spec verbs
+    /// (PUT /prepare, /execute, /x-sumo-*).
+    async fn put_empty(&self, path: &str) -> Result<(u16, Value), Box<dyn std::error::Error>> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self.client.put(&url).send().await?;
+        let status = resp.status().as_u16();
+        let body = resp.text().await?;
+        let json: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+        Ok((status, json))
+    }
+
     /// POST with query parameters (for endpoints that use Query extraction)
     async fn post_form(
         &self,
@@ -4398,13 +4409,13 @@ async fn test_updates_register_and_part_upload() {
     eprintln!("=== F.D2 test PASSED ===");
 }
 
-/// /executions {verify} refuses when no part has been uploaded.  This
-/// guards against an empty upload session silently succeeding through
-/// to the backend's verify pipeline.
+/// PUT /prepare refuses when no part has been uploaded.  Guards against
+/// an empty upload session silently succeeding through to the backend's
+/// verify pipeline.
 #[tokio::test]
 #[serial_test::serial]
 async fn test_updates_verify_rejects_empty() {
-    eprintln!("\n=== F.D2: /updates verify rejects empty session ===");
+    eprintln!("\n=== Phase A: PUT /prepare rejects empty session ===");
     let harness = TestHarness::new()
         .await
         .expect("Failed to create test harness");
@@ -4416,27 +4427,26 @@ async fn test_updates_verify_rejects_empty() {
     assert_eq!(status, 201, "expected 201, body = {body}");
     let update_id = body["update_id"].as_str().unwrap().to_string();
 
-    let exec_path = format!(
-        "/vehicle/v1/components/vtx_ecm/updates/{}/executions",
+    let prepare_path = format!(
+        "/vehicle/v1/components/vtx_ecm/updates/{}/prepare",
         update_id
     );
     let (status, body) = harness
-        .post(&exec_path, json!({"action": "verify"}))
+        .put_empty(&prepare_path)
         .await
-        .expect("POST /executions verify failed");
+        .expect("PUT /prepare failed");
     assert_eq!(status, 400, "expected 400 BadRequest, body = {body}");
     assert_eq!(body["error_code"].as_str(), Some("incomplete-request"));
 
-    // Clean up.
-    let exec_path_abort = format!(
-        "/vehicle/v1/components/vtx_ecm/updates/{}/executions",
-        update_id
-    );
+    // Clean up via DELETE /updates/{id} (the spec-wire equivalent of abort).
     let _ = harness
-        .post(&exec_path_abort, json!({"action": "abort"}))
+        .delete(&format!(
+            "/vehicle/v1/components/vtx_ecm/updates/{}",
+            update_id
+        ))
         .await;
 
-    eprintln!("=== F.D2 verify-empty guard test PASSED ===");
+    eprintln!("=== Phase A verify-empty guard test PASSED ===");
 }
 
 /// F.D3 target validation: matching `target` accepted; mismatched

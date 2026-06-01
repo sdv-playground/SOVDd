@@ -684,38 +684,56 @@ impl DiagnosticBackend for ManagedEcuBackend {
         }
     }
 
-    #[allow(deprecated)]
     async fn abort_flash(&self, _transfer_id: &str) -> BackendResult<()> {
-        // Still on the /executions wire; Phase D migration switches
-        // this whole supplier-app shim to prepare/execute/spec_commit.
+        // Spec wire: DELETE /updates/{id} aborts the in-flight task
+        // and releases the backend session.  Force-rollback covers
+        // the case where the upstream's /updates entry has already
+        // moved past awaiting-verdict (the more common stuck-trial
+        // case in production).
         self.flash_client
-            .abort()
+            .force_rollback()
             .await
-            .map_err(|e| BackendError::Transport(format!("Upstream abort failed: {e}")))?;
+            .map_err(|e| BackendError::Transport(format!("Upstream force_rollback failed: {e}")))?;
         Ok(())
     }
 
-    #[allow(deprecated)]
     async fn finalize_flash(&self) -> BackendResult<()> {
         self.require_programming_session().await?;
 
-        // Legacy "finalize" maps to the /updates verify+finalize
-        // pair: verify runs the SUIT chain + opens backend flash;
-        // finalize closes the flash session and activates.
-        tracing::info!("running /executions{{verify}} on upstream");
-        self.flash_client
-            .verify()
+        // Spec wire: prepare re-verifies uploaded parts + opens the
+        // backend flash session; execute drives finalize_flash
+        // (+ validate + activate for banked) and either auto-commits
+        // (singleshot) or pauses at awaiting-verdict (banked +
+        // orchestrated).  This shim chooses unorchestrated mode
+        // because the supplier app is a leaf component — there's no
+        // outer orchestrator to issue a verdict.
+        tracing::info!("running PUT /prepare on upstream");
+        let prepared = self
+            .flash_client
+            .prepare()
             .await
-            .map_err(|e| BackendError::Transport(format!("Upstream verify failed: {e}")))?;
-        tracing::info!("running /executions{{finalize}} on upstream");
-        self.flash_client
-            .finalize()
+            .map_err(|e| BackendError::Transport(format!("Upstream prepare failed: {e}")))?;
+        if prepared.status != "completed" {
+            return Err(BackendError::Transport(format!(
+                "Upstream prepare ended at {}/{}",
+                prepared.phase, prepared.status
+            )));
+        }
+        tracing::info!("running PUT /execute on upstream");
+        let executed = self
+            .flash_client
+            .execute(false)
             .await
-            .map_err(|e| BackendError::Transport(format!("Upstream finalize failed: {e}")))?;
+            .map_err(|e| BackendError::Transport(format!("Upstream execute failed: {e}")))?;
+        if executed.status != "completed" {
+            return Err(BackendError::Transport(format!(
+                "Upstream execute ended at {}/{}",
+                executed.phase, executed.status
+            )));
+        }
         Ok(())
     }
 
-    #[allow(deprecated)]
     async fn commit_flash(&self) -> BackendResult<()> {
         // After ECU reset, the inner session reverts to default and security
         // re-locks. The commit routine requires extended session + security,
@@ -730,14 +748,24 @@ impl DiagnosticBackend for ManagedEcuBackend {
                 .map_err(|e| BackendError::Protocol(format!("Security unlock failed: {}", e)))?;
         }
 
+        // The upstream execute (unorchestrated above) already
+        // committed; this is the outer-session commit equivalent.
+        // If the upstream's in awaiting-verdict (orchestrated path),
+        // spec_commit drives it; otherwise it's a no-op.  Idempotent
+        // for our purposes; ignore "not in awaiting-verdict" 409s.
         self.flash_client
-            .commit()
+            .attach_to_latest()
             .await
-            .map_err(|e| BackendError::Transport(format!("Upstream commit failed: {e}")))?;
-        Ok(())
+            .map_err(|e| BackendError::Transport(format!("Upstream attach failed: {e}")))?;
+        match self.flash_client.spec_commit().await {
+            Ok(_) => Ok(()),
+            Err(sovd_client::flash::FlashError::Server { status: 409, .. }) => Ok(()),
+            Err(e) => Err(BackendError::Transport(format!(
+                "Upstream spec_commit failed: {e}"
+            ))),
+        }
     }
 
-    #[allow(deprecated)]
     async fn rollback_flash(&self) -> BackendResult<()> {
         tracing::info!("Setting ECU extended session for rollback (inner session)");
         self.proxy.set_session_mode("extended").await?;
@@ -748,10 +776,14 @@ impl DiagnosticBackend for ManagedEcuBackend {
                 .map_err(|e| BackendError::Protocol(format!("Security unlock failed: {}", e)))?;
         }
 
+        // force_rollback unconditionally clears the upstream's trial
+        // state — covers both the awaiting-verdict and
+        // already-past-verdict cases without requiring an attached
+        // session.
         self.flash_client
-            .rollback()
+            .force_rollback()
             .await
-            .map_err(|e| BackendError::Transport(format!("Upstream rollback failed: {e}")))?;
+            .map_err(|e| BackendError::Transport(format!("Upstream force_rollback failed: {e}")))?;
         Ok(())
     }
 

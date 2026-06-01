@@ -413,12 +413,11 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data/{part_id}",
             put(handlers::updates::put_bulk_data_part),
         )
-        .route(
-            "/vehicle/v1/components/{component_id}/updates/{update_id}/executions",
-            post(handlers::updates::post_execution),
-        )
         // ISO 17978-3 §7.18 spec verbs — async 202 + Location :: /status.
-        // The /executions wire above is the F.D8b vendor-extension form
+        // The F.D8b vendor-extension `/executions{action}` wire (deprecated
+        // through Phase A–D) was removed in Phase E.  Callers use
+        // PUT prepare / execute / x-sumo-commit / x-sumo-rollback /
+        // x-sumo-force-rollback as appropriate.
         // and stays alive (Deprecation header) for the migration window.
         // tasks/spec-aligned-updates-wire.md UPDATE-WIRE-001.
         .route(
@@ -448,6 +447,16 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/vehicle/v1/components/{component_id}/updates/{update_id}/x-sumo-rollback",
             put(handlers::updates::put_x_sumo_rollback),
+        )
+        // Unconditional trial-state clear — separate from x-sumo-rollback
+        // (which is the orchestrator's verdict on an awaiting-verdict
+        // entry).  Used to unstick a previous flash that left the
+        // backend in trial without an active execute task.  Lives at
+        // the component root because by definition no /updates entry
+        // exists for the stuck trial.
+        .route(
+            "/vehicle/v1/components/{component_id}/x-sumo-force-rollback",
+            put(handlers::updates::put_x_sumo_force_rollback),
         )
         // Heterogeneous campaigns — F.D4.  Top-level collection (not
         // under /components) because a campaign spans several.

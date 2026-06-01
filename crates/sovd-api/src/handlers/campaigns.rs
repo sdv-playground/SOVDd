@@ -512,18 +512,31 @@ async fn run_member_action(
         };
     }
 
-    // For all other verbs, delegate to the member's own
-    // `/updates/{id}/executions` path by calling the same handler.
+    // Map campaign verbs to the spec-wire handlers on /updates.  The
+    // /executions{action} fan-out was retired in Phase E along with
+    // the deprecated wire.
     use super::updates;
-    let result = updates::post_execution(
-        axum::extract::State(state.clone()),
-        axum::extract::Path((member.component_id.clone(), member.update_id.clone())),
-        axum::extract::Query(updates::ExecutionQuery::default()),
-        axum::Json(updates::ExecutionRequest {
-            action: action.to_string(),
-        }),
-    )
-    .await;
+    use axum::extract::{Path, State};
+    let component = member.component_id.clone();
+    let update = member.update_id.clone();
+    let result: Result<(), ApiError> = match action {
+        "finalize" => updates::put_execute(
+            State(state.clone()),
+            Path((component.clone(), update.clone())),
+            axum::extract::Query(updates::ExecuteQuery::default()),
+        )
+        .await
+        .map(|_| ()),
+        "commit" => updates::put_x_sumo_commit(State(state.clone()), Path((component, update)))
+            .await
+            .map(|_| ()),
+        "rollback" => updates::put_x_sumo_rollback(State(state.clone()), Path((component, update)))
+            .await
+            .map(|_| ()),
+        other => Err(ApiError::BadRequest(format!(
+            "unknown campaign verb '{other}'"
+        ))),
+    };
 
     match result {
         Ok(_) => MemberExecutionOutcome {

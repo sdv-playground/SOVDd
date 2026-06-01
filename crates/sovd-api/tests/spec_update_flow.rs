@@ -710,7 +710,12 @@ async fn flash_client_spec_status_carries_table_270_shape() {
 }
 
 #[tokio::test]
-async fn executions_wire_carries_deprecation_header() {
+async fn executions_wire_is_gone() {
+    // The F.D8b vendor /executions{action} wire was retired in
+    // Phase E along with all FlashClient deprecated methods.  POST
+    // to that path now 404s; callers must use the spec verbs
+    // (PUT /prepare, /execute, /x-sumo-commit, /x-sumo-rollback,
+    // /x-sumo-force-rollback).
     let (server, _backend) = spawn_with("singleshot").await;
     let id = open_update(&server).await;
     upload_part(&server, &id, "manifest", b"m").await;
@@ -725,10 +730,9 @@ async fn executions_wire_carries_deprecation_header() {
         .send()
         .await
         .expect("post executions");
-    let deprecation = resp.headers().get("deprecation");
-    assert!(
-        deprecation.is_some(),
-        "Deprecation header missing on /executions response"
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "POST /executions should 404 after Phase E retirement (axum strips the route)"
     );
-    assert_eq!(deprecation.unwrap(), "true");
 }

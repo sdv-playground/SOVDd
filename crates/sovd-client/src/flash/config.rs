@@ -417,14 +417,8 @@ impl FlashConfig {
         )
     }
 
-    /// `{base_prefix}/updates/{update_id}/executions` — lifecycle verb POST.
-    pub fn updates_executions_path(&self, update_id: &str) -> String {
-        format!("{}/updates/{}/executions", self.base_prefix(), update_id)
-    }
-
-    /// ISO 17978-3 §7.18 spec verbs.  These land at the update root
-    /// as `PUT` (not the vendor-extension `POST /executions{action}`)
-    /// and are async — return 202 + `Location: .../status`.
+    /// ISO 17978-3 §7.18 spec verbs.  Async — return 202 +
+    /// `Location: .../status`.
     pub fn updates_prepare_path(&self, update_id: &str) -> String {
         format!("{}/updates/{}/prepare", self.base_prefix(), update_id)
     }
@@ -451,6 +445,12 @@ impl FlashConfig {
             self.base_prefix(),
             update_id
         )
+    }
+    /// Trial-recovery vendor verb — unconditional backend rollback.
+    /// Lives at the component root (not under `/updates/{id}`) because
+    /// by definition no in-flight update_id exists for a stuck trial.
+    pub fn x_sumo_force_rollback_path(&self) -> String {
+        format!("{}/x-sumo-force-rollback", self.base_prefix())
     }
 }
 
