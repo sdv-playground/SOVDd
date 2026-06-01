@@ -343,6 +343,23 @@ impl FlashClient {
         Ok(exec)
     }
 
+    /// Attach this client to the most-recent /updates entry on the
+    /// server.  Used by post-reset callers (orchestrators) that
+    /// construct a fresh FlashClient after the device reboots — the
+    /// in-process `update_id` is gone but the server-side entry
+    /// survives across the reset.
+    #[instrument(skip(self))]
+    pub async fn attach_to_latest(&self) -> Result<String> {
+        let list = self.list_updates().await?;
+        let summary = list
+            .items
+            .into_iter()
+            .last()
+            .ok_or(FlashError::NoSession)?;
+        *self.update_id.lock().await = Some(summary.update_id.clone());
+        Ok(summary.update_id)
+    }
+
     /// `GET /updates/{id}`.
     #[instrument(skip(self))]
     pub async fn status(&self) -> Result<UpdateStatus> {
