@@ -413,7 +413,7 @@ pub async fn post_execution(
 
     // Snapshot the entry we need under the lock without keeping it
     // held across awaits.
-    let (current_state, file_ids, transfer_id) = {
+    let (current_state, parts, transfer_id) = {
         let store = state.updates.0.lock();
         let entry = store
             .get(&update_id)
@@ -424,7 +424,7 @@ pub async fn post_execution(
             entry
                 .parts
                 .iter()
-                .map(|p| p.file_id.clone())
+                .map(|p| (p.part_id.clone(), p.file_id.clone()))
                 .collect::<Vec<_>>(),
             entry.transfer_id.clone(),
         )
@@ -435,14 +435,25 @@ pub async fn post_execution(
 
     let (next_state, new_transfer_id, message) = match request.action.as_str() {
         "verify" => {
-            if file_ids.is_empty() {
+            if parts.is_empty() {
                 return Err(ApiError::BadRequest(
                     "verify called before any /bulk-data part uploaded".into(),
                 ));
             }
-            for fid in &file_ids {
-                backend.verify_package(fid).await?;
-            }
+            // The manifest part is the only one that maps to a
+            // backend-tracked "package" — detached payloads are
+            // validated inline by the streaming pipeline during upload
+            // (hash + decrypt + decompress against the manifest's
+            // declared digest) and never enter the `packages` map.
+            // Verify the manifest part by name ("manifest" by
+            // convention); fall back to the first uploaded part for
+            // legacy single-part flows.
+            let manifest_fid = parts
+                .iter()
+                .find(|(pid, _)| pid == "manifest")
+                .map(|(_, fid)| fid)
+                .unwrap_or(&parts[0].1);
+            backend.verify_package(manifest_fid).await?;
             // start_flash already ran in register_update (POST
             // /updates).  For backends that surface a transfer_id,
             // wait here for the staging pipeline to settle before
