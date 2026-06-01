@@ -134,6 +134,21 @@ pub struct PartStatusEntry {
     pub href: String,
 }
 
+/// Reply from `GET /updates`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdatesList {
+    #[serde(default)]
+    pub items: Vec<UpdateSummary>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateSummary {
+    pub update_id: String,
+    pub state: String,
+    #[serde(default)]
+    pub href: String,
+}
+
 // ---------------------------------------------------------------------------
 // Constructors
 // ---------------------------------------------------------------------------
@@ -340,6 +355,29 @@ impl FlashClient {
         self.handle_response(resp).await
     }
 
+    /// `GET /updates` — list all /updates entries on this component.
+    /// Used by post-reset callers that don't carry the original
+    /// FlashClient instance and need to rediscover the latest update_id.
+    #[instrument(skip(self))]
+    pub async fn list_updates(&self) -> Result<UpdatesList> {
+        let url = self.build_url(&self.config.updates_collection_path())?;
+        let resp = self.request_get(url).await?;
+        self.handle_response(resp).await
+    }
+
+    /// `GET /updates/{id}` for the *last* update on this component,
+    /// without requiring a locally-held update_id. Useful after an ECU
+    /// reset where the original FlashClient has gone out of scope but
+    /// the server-side entry still carries the post-finalize state.
+    #[instrument(skip(self))]
+    pub async fn latest_status(&self) -> Result<UpdateStatus> {
+        let list = self.list_updates().await?;
+        let summary = list.items.into_iter().last().ok_or(FlashError::NoSession)?;
+        let url = self.build_url(&self.config.updates_status_path(&summary.update_id))?;
+        let resp = self.request_get(url).await?;
+        self.handle_response(resp).await
+    }
+
     /// Reset the ECU (PUT `status/restart`) — unchanged by the
     /// /updates migration since it lives at the entity root, not
     /// under /updates.
@@ -452,7 +490,11 @@ impl FlashClient {
         let url = self.build_url(&self.config.updates_executions_path(&update_id))?;
         debug!("POST {action} at {url}");
         let body = serde_json::json!({ "action": action });
-        let mut req = self.client.post(url).json(&body);
+        let mut req = self
+            .client
+            .post(url)
+            .json(&body)
+            .timeout(Duration::from_millis(self.config.timeouts.execution_ms));
         req = self.add_auth(req);
         let resp = req.send().await?;
         let exec: UpdateExecution = self.handle_response(resp).await?;

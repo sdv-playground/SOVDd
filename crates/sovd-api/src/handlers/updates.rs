@@ -154,7 +154,7 @@ pub async fn register_update(
     body: Option<Json<RegisterUpdateRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
     // Verify the component exists before allocating an id.
-    let _ = state.get_backend(&component_id)?;
+    let backend = state.get_backend(&component_id)?;
 
     let req = body.map(|Json(b)| b).unwrap_or_default();
 
@@ -174,6 +174,21 @@ pub async fn register_update(
     let update_id = Uuid::new_v4().to_string();
     let manifest = req.manifest;
 
+    // Open the backend's flash session up-front. Backends such as
+    // `VmBackend` need to be in their `AwaitingManifest` state
+    // before the first `receive_package_stream` call, otherwise the
+    // upload falls into the "legacy integrated envelope" path that
+    // doesn't run the staging pipeline. Calling start_flash here
+    // mirrors the legacy /flash wire's ordering (start_flash →
+    // upload → finalize) while keeping /updates' separate endpoints.
+    // Backends that don't need preallocation return NotSupported,
+    // which we swallow.
+    let transfer_id = match backend.start_flash().await {
+        Ok(id) => Some(id),
+        Err(sovd_core::BackendError::NotSupported(_)) => None,
+        Err(e) => return Err(e.into()),
+    };
+
     {
         let mut store = state.updates.0.lock();
         store.insert(
@@ -183,7 +198,7 @@ pub async fn register_update(
                 parts: Vec::new(),
                 manifest,
                 state: UpdateState::Registered,
-                transfer_id: None,
+                transfer_id,
             },
         );
     }
@@ -428,19 +443,16 @@ pub async fn post_execution(
             for fid in &file_ids {
                 backend.verify_package(fid).await?;
             }
-            let tid = backend.start_flash().await?;
-            // backend.start_flash spawns the UDS download as a
-            // background task and returns immediately; the legacy
-            // /flash wire let the caller poll /flash/transfer/{id}
-            // until the state settled.  In the /updates wire there
-            // is no equivalent poll, so block here until backend
-            // reaches a settled (success or failure) state before
-            // returning a "verified" result.  This bounds the wait
-            // by the per-request timeout the caller already set.
-            await_flash_settled(backend.as_ref(), &tid).await?;
+            // start_flash already ran in register_update (POST
+            // /updates).  For backends that surface a transfer_id,
+            // wait here for the staging pipeline to settle before
+            // declaring the update verified.
+            if let Some(tid) = &transfer_id {
+                await_flash_settled(backend.as_ref(), tid).await?;
+            }
             (
                 UpdateState::Verified,
-                Some(tid),
+                transfer_id.clone(),
                 Some("verified".to_string()),
             )
         }

@@ -134,6 +134,14 @@ pub struct TimeoutsConfig {
     #[serde(default = "default_request_timeout")]
     pub request_ms: u64,
 
+    /// `/executions` action timeout in milliseconds (default: 5 minutes).
+    /// Server-side `verify` waits for the backend UDS download to
+    /// settle and `finalize` chains finalize_flash+validate+activate —
+    /// either can take well beyond the general request budget on
+    /// real ECUs (HSM provisioning, dual-bank validation).
+    #[serde(default = "default_execution_timeout")]
+    pub execution_ms: u64,
+
     /// Connect timeout in milliseconds (default: 10s)
     #[serde(default = "default_connect_timeout")]
     pub connect_ms: u64,
@@ -145,6 +153,7 @@ impl Default for TimeoutsConfig {
             upload_ms: default_upload_timeout(),
             flash_poll_ms: default_poll_interval(),
             request_ms: default_request_timeout(),
+            execution_ms: default_execution_timeout(),
             connect_ms: default_connect_timeout(),
         }
     }
@@ -160,6 +169,10 @@ fn default_poll_interval() -> u64 {
 
 fn default_request_timeout() -> u64 {
     30_000 // 30 seconds
+}
+
+fn default_execution_timeout() -> u64 {
+    300_000 // 5 minutes — matches upload_ms; verify/finalize on real ECUs is slow
 }
 
 fn default_connect_timeout() -> u64 {
