@@ -491,3 +491,42 @@ pub async fn capability_description() -> Json<serde_json::Value> {
         }
     }))
 }
+
+/// `GET /.well-known/sovd-extensions` — discovery doc listing the
+/// vendor extensions this server adds to the spec wire.  Lets
+/// conformance scanners enumerate documented deviations rather than
+/// flagging them as unknown surface.  See
+/// `tasks/spec-aligned-updates-wire.md` §4.1.
+pub async fn sovd_extensions() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "vendor": "sumo",
+        "extensions": {
+            "x-sumo-control": {
+                "kind":   "query-param + lifecycle verbs",
+                "where":  "PUT /vehicle/v1/components/{id}/updates/{update_id}/execute",
+                "values": ["orchestrated"],
+                "verbs": [
+                    "PUT /vehicle/v1/components/{id}/updates/{update_id}/x-sumo-commit",
+                    "PUT /vehicle/v1/components/{id}/updates/{update_id}/x-sumo-rollback"
+                ],
+                "fields": ["x-sumo-substate"],
+                "spec":   "tasks/spec-aligned-updates-wire.md sec 2.2",
+                "summary": "Opt-in fine-grained execute-phase control \
+                            for orchestrators that want to drive the \
+                            trial verdict (commit / rollback) out-of-band."
+            },
+            "x-sumo-bulk-data": {
+                "kind":      "sub-resource",
+                "endpoints": [
+                    "PUT /vehicle/v1/components/{id}/updates/{update_id}/bulk-data/{part_id}",
+                    "GET /vehicle/v1/components/{id}/updates/{update_id}/bulk-data"
+                ],
+                "spec":      "tasks/spec-aligned-updates-wire.md sec 2.3",
+                "summary": "Client streams update bytes to the server. \
+                            Spec model assumes server-pulls-from-OTA \
+                            backend; bulk-data is the reverse channel \
+                            for workstation / workshop deployments."
+            }
+        }
+    }))
+}

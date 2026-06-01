@@ -128,6 +128,12 @@ pub struct UpdatesEntry {
     /// `DELETE /updates/{id}` can cancel it.  `None` when no task
     /// is running; cleared when a task completes.
     pub task_handle: Option<tokio::task::AbortHandle>,
+    /// Watch channel for the orchestrator's trial verdict.  Sender
+    /// is held here so `PUT /x-sumo-commit` / `/x-sumo-rollback` can
+    /// post to it.  `None` in standard mode (Phase A behaviour);
+    /// `Some` when `PUT /execute?x-sumo-control=orchestrated` runs
+    /// and the task pauses at `substate=awaiting-verdict`.
+    pub verdict_tx: Option<tokio::sync::watch::Sender<Verdict>>,
 }
 
 /// Subset of `GenericError` (sovd-core) carried in `UpdatesEntry.error`.
@@ -264,6 +270,21 @@ pub enum Status {
     Completed,
 }
 
+/// Orchestrator's trial-verdict signal.  Used only when the execute
+/// phase runs in `x-sumo-control=orchestrated` mode (Phase B).  Sent
+/// over the per-entry watch channel; the paused execute task wakes
+/// when the verdict transitions from `Pending`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Verdict {
+    /// No verdict yet — the task remains paused.
+    #[default]
+    Pending,
+    /// Orchestrator confirmed the trial succeeded; commit_flash.
+    Commit,
+    /// Orchestrator rejected the trial; rollback_flash.
+    Rollback,
+}
+
 impl Status {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -271,6 +292,26 @@ impl Status {
             Self::InProgress => "inProgress",
             Self::Failed => "failed",
             Self::Completed => "completed",
+        }
+    }
+}
+
+/// Per-server tuning for the `/updates` collection.  The orchestrated
+/// watchdog gates how long the execute task will pause at
+/// `substate=awaiting-verdict` before auto-rolling-back; the default
+/// matches the upper bound a real OEM workshop tester typically needs
+/// to complete a multi-ECU health check.
+#[derive(Clone, Debug)]
+pub struct UpdatesConfig {
+    /// Time the execute task will wait for an `x-sumo-commit` or
+    /// `x-sumo-rollback` verdict before timing out.
+    pub orchestrated_watchdog: std::time::Duration,
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        Self {
+            orchestrated_watchdog: std::time::Duration::from_secs(600),
         }
     }
 }
@@ -296,6 +337,8 @@ pub struct AppState {
     pub updates: UpdatesStore,
     /// Per-campaign tracking for the `/campaigns` collection.
     pub campaigns: CampaignsStore,
+    /// Tunable knobs for the `/updates` lifecycle.
+    pub updates_config: Arc<UpdatesConfig>,
 }
 
 impl AppState {
@@ -311,6 +354,7 @@ impl AppState {
             clear_data_status: ClearDataStatusStore::default(),
             updates: UpdatesStore::default(),
             campaigns: CampaignsStore::default(),
+            updates_config: Arc::new(UpdatesConfig::default()),
         }
     }
 
@@ -329,6 +373,7 @@ impl AppState {
             clear_data_status: ClearDataStatusStore::default(),
             updates: UpdatesStore::default(),
             campaigns: CampaignsStore::default(),
+            updates_config: Arc::new(UpdatesConfig::default()),
         }
     }
 
@@ -348,7 +393,15 @@ impl AppState {
             clear_data_status: ClearDataStatusStore::default(),
             updates: UpdatesStore::default(),
             campaigns: CampaignsStore::default(),
+            updates_config: Arc::new(UpdatesConfig::default()),
         }
+    }
+
+    /// Override the `/updates` collection's tuning knobs (watchdog,
+    /// future limits).  Builder-style consume + return.
+    pub fn with_updates_config(mut self, config: UpdatesConfig) -> Self {
+        self.updates_config = Arc::new(config);
+        self
     }
 
     /// Create AppState from a single backend (for simple single-entity servers)

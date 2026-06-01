@@ -160,6 +160,28 @@ pub struct ExecutionQuery {
     pub refresh: bool,
 }
 
+/// `PUT /updates/{id}/execute` query parameters.
+///
+/// `x-sumo-control=orchestrated` opts the request into the Phase B
+/// orchestrated-extension flow: the execute task pauses post-activation
+/// at `substate=awaiting-verdict` and waits for the orchestrator to
+/// issue `PUT /x-sumo-commit` or `/x-sumo-rollback` before transitioning
+/// to a terminal status.  Absent or any other value → standard
+/// server-driven flow (Phase A behaviour).
+///
+/// `tasks/spec-aligned-updates-wire.md` §2.2.
+#[derive(Debug, Deserialize, Default)]
+pub struct ExecuteQuery {
+    #[serde(rename = "x-sumo-control", default)]
+    pub control: Option<String>,
+}
+
+impl ExecuteQuery {
+    fn is_orchestrated(&self) -> bool {
+        self.control.as_deref() == Some("orchestrated")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -205,10 +227,7 @@ pub async fn register_update(
     // simply skip this step. The actual flash session will be opened
     // later when the package is ready (during the /executions wire's
     // `verify` action or at `PUT /prepare`).
-    let transfer_id = match backend.start_flash().await {
-        Ok(id) => Some(id),
-        Err(_) => None,
-    };
+    let transfer_id = backend.start_flash().await.ok();
 
     {
         let mut store = state.updates.0.lock();
@@ -227,6 +246,7 @@ pub async fn register_update(
                 substate: None,
                 transfer_id,
                 task_handle: None,
+                verdict_tx: None,
             },
         );
     }
@@ -507,16 +527,22 @@ pub async fn put_prepare(
 }
 
 /// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/execute`
-/// — ISO 17978-3 §7.18.6.  Phase A: standard mode only (server-driven
-/// finalize → auto-commit for singleshot, finalize → reset → auto-probe →
-/// commit for banked).  Phase B adds `?x-sumo-control=orchestrated`
-/// for orchestrator-driven trial verdict.
+/// — ISO 17978-3 §7.18.6.  Phase A: standard mode (server-driven
+/// finalize → auto-commit for singleshot, finalize → validate →
+/// activate for banked).  Phase B adds `?x-sumo-control=orchestrated`
+/// for orchestrator-driven trial verdict on banked components.
 pub async fn put_execute(
     State(state): State<AppState>,
     Path((component_id, update_id)): Path<(String, String)>,
+    Query(query): Query<ExecuteQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let backend = state.get_backend(&component_id)?;
     let is_singleshot = backend.update_shape() == "singleshot";
+    // Orchestrated control mode is only meaningful for banked
+    // components — singleshot has no trial phase to pause at.  We
+    // accept the query param on singleshot but silently treat it as
+    // standard mode so callers can use one verb across both shapes.
+    let orchestrated = query.is_orchestrated() && !is_singleshot;
 
     let prior_phase = {
         let mut store = state.updates.0.lock();
@@ -621,13 +647,14 @@ pub async fn put_execute(
             return;
         }
 
-        // Banked Phase A: validate + activate (legacy state-machine
-        // transitions), then leave the entry at execute/completed
-        // *without* a reset.  The orchestrator still drives the
-        // device reset and post-reset health check via the legacy
-        // /executions wire (or the dedicated entity-restart endpoint)
-        // during the migration window.  Phase B adds the orchestrated
-        // execute flow that handles reset+verdict on the server side.
+        // Banked: validate + activate (legacy state-machine
+        // transitions) bring the backend to AwaitingReboot.  In
+        // standard mode we leave the entry at execute/completed and
+        // the orchestrator drives reset + post-reset health check via
+        // the legacy /executions wire (or the entity-restart endpoint).
+        // In orchestrated mode (Phase B) we pause after activate at
+        // substate=awaiting-verdict and wait for the orchestrator to
+        // post commit / rollback via the x-sumo verbs.
         let _ = mutate_entry(&task_state, &task_update_id, |entry| {
             entry.step = Some("validating".into());
             entry.progress = Some(50);
@@ -670,13 +697,122 @@ pub async fn put_execute(
                 return;
             }
         }
+        if !orchestrated {
+            let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                entry.status = Status::Completed;
+                entry.progress = Some(100);
+                entry.step = Some("staged for reset".into());
+                entry.state = UpdateState::Finalized; // legacy wire alignment
+                entry.task_handle = None;
+            });
+            return;
+        }
+
+        // Orchestrated mode: install verdict channel and pause until
+        // the orchestrator commits or rolls back (or the watchdog
+        // fires).  Watch::changed() returns Ok on any transition
+        // away from Pending, including Commit and Rollback; we
+        // re-read .borrow() to discriminate.
+        let (verdict_tx, mut verdict_rx) =
+            tokio::sync::watch::channel(crate::state::Verdict::Pending);
         let _ = mutate_entry(&task_state, &task_update_id, |entry| {
-            entry.status = Status::Completed;
-            entry.progress = Some(100);
-            entry.step = Some("staged for reset".into());
-            entry.state = UpdateState::Finalized; // legacy wire alignment
-            entry.task_handle = None;
+            entry.step = Some("trial boot active, awaiting orchestrator verdict".into());
+            entry.progress = Some(85);
+            entry.substate = Some("awaiting-verdict");
+            entry.verdict_tx = Some(verdict_tx);
         });
+
+        // Phase B watchdog: default 10 min, configurable via
+        // AppState::updates_config.  On expiry the verdict is forced
+        // to Rollback so the device doesn't stay stuck in trial.
+        let watchdog = task_state.updates_config.orchestrated_watchdog;
+        let verdict = tokio::select! {
+            res = verdict_rx.changed() => {
+                if res.is_err() {
+                    // Sender dropped (entry deleted) — treat as rollback intent.
+                    crate::state::Verdict::Rollback
+                } else {
+                    *verdict_rx.borrow()
+                }
+            }
+            _ = tokio::time::sleep(watchdog) => {
+                tracing::warn!(
+                    update_id = %task_update_id,
+                    "orchestrator verdict watchdog fired — auto-rollback"
+                );
+                crate::state::Verdict::Rollback
+            }
+        };
+
+        match verdict {
+            crate::state::Verdict::Commit => {
+                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                    entry.step = Some("committing".into());
+                    entry.substate = Some("committing");
+                });
+                if let Err(e) = backend.commit_flash().await {
+                    let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                        entry.status = Status::Failed;
+                        entry.step = Some("commit_flash failed".into());
+                        entry.substate = None;
+                        entry.verdict_tx = None;
+                        entry.error = Some(crate::state::UpdateError {
+                            error_code: "update-execution-failed".into(),
+                            message: format!("commit: {e}"),
+                            parameters: None,
+                        });
+                        entry.task_handle = None;
+                    });
+                    return;
+                }
+                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                    entry.status = Status::Completed;
+                    entry.progress = Some(100);
+                    entry.step = Some("completed".into());
+                    entry.substate = None;
+                    entry.verdict_tx = None;
+                    entry.state = UpdateState::Committed;
+                    entry.task_handle = None;
+                });
+            }
+            crate::state::Verdict::Rollback => {
+                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                    entry.step = Some("rolling back".into());
+                    entry.substate = Some("rolling-back");
+                });
+                let rb_result = backend.rollback_flash().await;
+                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                    entry.status = Status::Failed;
+                    entry.substate = None;
+                    entry.verdict_tx = None;
+                    entry.error = Some(crate::state::UpdateError {
+                        error_code: "x-sumo-verdict-rollback".into(),
+                        message: match rb_result {
+                            Ok(()) => "rolled back by orchestrator verdict".into(),
+                            Err(e) => format!("rollback_flash failed: {e}"),
+                        },
+                        parameters: None,
+                    });
+                    entry.state = UpdateState::RolledBack;
+                    entry.task_handle = None;
+                });
+            }
+            crate::state::Verdict::Pending => {
+                // Should never happen — changed() only returns when
+                // the value transitions away from the initial state.
+                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                    entry.status = Status::Failed;
+                    entry.substate = None;
+                    entry.verdict_tx = None;
+                    entry.error = Some(crate::state::UpdateError {
+                        error_code: "internal-server-error".into(),
+                        message: "verdict channel woke without transition".into(),
+                        parameters: None,
+                    });
+                    entry.task_handle = None;
+                });
+            }
+        }
     });
 
     {
@@ -757,12 +893,93 @@ pub async fn put_automated(
                 None => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
             }
         }
-        // Kick off execute via the standard handler.
-        let _ = put_execute(State(task_state), Path((task_component_id, task_update_id))).await;
+        // Kick off execute via the standard handler.  /automated is
+        // server-driven by definition, so always use standard mode
+        // (empty query → not orchestrated).
+        let _ = put_execute(
+            State(task_state),
+            Path((task_component_id, task_update_id)),
+            Query(ExecuteQuery::default()),
+        )
+        .await;
     });
 
     let (status, headers) = accepted_with_status_location(&component_id, &update_id)?;
     Ok((status, headers).into_response())
+}
+
+/// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-sumo-commit`
+///
+/// Vendor extension (`x-sumo-` prefix per spec §extension rules)
+/// used by orchestrators driving the execute phase under
+/// `?x-sumo-control=orchestrated`.  Sends a `Commit` verdict to the
+/// paused execute task; rejected with `409` if the entry isn't in
+/// `awaiting-verdict`.  Returns `202 + Location: .../status`.
+pub async fn put_x_sumo_commit(
+    State(state): State<AppState>,
+    Path((component_id, update_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    post_verdict(
+        &state,
+        &component_id,
+        &update_id,
+        crate::state::Verdict::Commit,
+    )?;
+    let (status, headers) = accepted_with_status_location(&component_id, &update_id)?;
+    Ok((status, headers))
+}
+
+/// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-sumo-rollback`
+///
+/// Symmetric to `x-sumo-commit`; sends a `Rollback` verdict.
+pub async fn put_x_sumo_rollback(
+    State(state): State<AppState>,
+    Path((component_id, update_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    post_verdict(
+        &state,
+        &component_id,
+        &update_id,
+        crate::state::Verdict::Rollback,
+    )?;
+    let (status, headers) = accepted_with_status_location(&component_id, &update_id)?;
+    Ok((status, headers))
+}
+
+/// Common verdict-posting path for the two x-sumo verbs.  Validates
+/// that the entry is paused at `substate=awaiting-verdict` and posts
+/// the new verdict via the entry's watch channel.
+fn post_verdict(
+    state: &AppState,
+    component_id: &str,
+    update_id: &str,
+    verdict: crate::state::Verdict,
+) -> Result<(), ApiError> {
+    let _ = state.get_backend(component_id)?;
+    let store = state.updates.0.lock();
+    let entry = store
+        .get(update_id)
+        .filter(|e| e.component_id == component_id)
+        .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+    if entry.substate != Some("awaiting-verdict") {
+        return Err(ApiError::Conflict(format!(
+            "x-sumo verdict requires execute/awaiting-verdict, got {}/{} substate={:?}",
+            entry.phase.as_str(),
+            entry.status.as_str(),
+            entry.substate
+        )));
+    }
+    match entry.verdict_tx.as_ref() {
+        Some(tx) => {
+            // send_replace overwrites the current value and wakes any
+            // waiter.  Returns the previous value; we don't care.
+            let _ = tx.send_replace(verdict);
+            Ok(())
+        }
+        None => Err(ApiError::Conflict(
+            "x-sumo verdict: no orchestrator channel on entry".into(),
+        )),
+    }
 }
 
 /// `GET /vehicle/v1/components/{component_id}/updates/{update_id}/status`

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde_json::Value;
-use sovd_api::{create_router, AppState};
+use sovd_api::{create_router, state::UpdatesConfig, AppState};
 use sovd_client::testing::TestServer;
 use sovd_core::{
     BackendError, BackendResult, Capabilities, DataValue, DiagnosticBackend, EntityInfo,
@@ -215,13 +215,22 @@ impl DiagnosticBackend for MockBackend {
 // ---------------------------------------------------------------------------
 
 async fn spawn_with(shape: &'static str) -> (TestServer, Arc<MockBackend>) {
+    spawn_with_watchdog(shape, Duration::from_secs(600)).await
+}
+
+async fn spawn_with_watchdog(
+    shape: &'static str,
+    watchdog: Duration,
+) -> (TestServer, Arc<MockBackend>) {
     let backend = Arc::new(MockBackend::new("dev1", shape));
     let mut backends = HashMap::new();
     backends.insert(
         "dev1".to_string(),
         backend.clone() as Arc<dyn DiagnosticBackend>,
     );
-    let state = AppState::new(backends);
+    let state = AppState::new(backends).with_updates_config(UpdatesConfig {
+        orchestrated_watchdog: watchdog,
+    });
     let router = create_router(state);
     let server = TestServer::start(router).await.expect("test server");
     (server, backend)
@@ -401,6 +410,176 @@ async fn status_body_shape_matches_table_270() {
     assert_eq!(body["status"], "pending");
     // error only when status=failed
     assert!(body.get("error").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Phase B — orchestrated extension
+// ---------------------------------------------------------------------------
+
+async fn prepare_and_orchestrated_execute(server: &TestServer, id: &str) {
+    let resp = put(
+        server,
+        &format!("/vehicle/v1/components/dev1/updates/{}/prepare", id),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let prepared = poll_terminal(server, id).await;
+    assert_eq!(prepared["status"], "completed");
+    let resp = put(
+        server,
+        &format!(
+            "/vehicle/v1/components/dev1/updates/{}/execute?x-sumo-control=orchestrated",
+            id
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+}
+
+async fn wait_for_substate(server: &TestServer, id: &str, want: &str) -> Value {
+    for _ in 0..200 {
+        let body = get_status(server, id).await;
+        if body
+            .get("x-sumo-substate")
+            .and_then(Value::as_str)
+            .map(|s| s == want)
+            .unwrap_or(false)
+        {
+            return body;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("substate never reached {want}");
+}
+
+#[tokio::test]
+async fn orchestrated_banked_commit_round_trip() {
+    let (server, backend) = spawn_with("banked").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"banked").await;
+    upload_part(&server, &id, "#kernel", b"\xCAfake").await;
+    prepare_and_orchestrated_execute(&server, &id).await;
+
+    let body = wait_for_substate(&server, &id, "awaiting-verdict").await;
+    assert_eq!(body["phase"], "execute");
+    assert_eq!(body["status"], "inProgress");
+
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{}/x-sumo-commit", id),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+
+    let final_body = poll_terminal(&server, &id).await;
+    assert_eq!(final_body["phase"], "execute");
+    assert_eq!(final_body["status"], "completed");
+    assert!(final_body.get("error").is_none());
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::Committed);
+}
+
+#[tokio::test]
+async fn orchestrated_banked_rollback_round_trip() {
+    let (server, backend) = spawn_with("banked").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"banked").await;
+    upload_part(&server, &id, "#kernel", b"\xCAfake").await;
+    prepare_and_orchestrated_execute(&server, &id).await;
+    wait_for_substate(&server, &id, "awaiting-verdict").await;
+
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{}/x-sumo-rollback", id),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+
+    let final_body = poll_terminal(&server, &id).await;
+    assert_eq!(final_body["status"], "failed");
+    assert_eq!(
+        final_body["error"]["error_code"], "x-sumo-verdict-rollback",
+        "rollback should attribute the failure to the orchestrator's verdict"
+    );
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
+}
+
+#[tokio::test]
+async fn orchestrated_banked_watchdog_auto_rollback() {
+    // Short watchdog so the test doesn't wait the default 10 minutes.
+    let (server, backend) = spawn_with_watchdog("banked", Duration::from_millis(250)).await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"banked").await;
+    upload_part(&server, &id, "#kernel", b"\xCAfake").await;
+    prepare_and_orchestrated_execute(&server, &id).await;
+
+    // Don't post a verdict — watchdog should fire and roll back.
+    let final_body = poll_terminal(&server, &id).await;
+    assert_eq!(final_body["status"], "failed");
+    assert_eq!(final_body["error"]["error_code"], "x-sumo-verdict-rollback");
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
+}
+
+#[tokio::test]
+async fn x_sumo_commit_rejected_when_not_awaiting_verdict() {
+    let (server, _backend) = spawn_with("banked").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"x").await;
+    // No prepare/execute yet → entry is at prepare/pending.
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{}/x-sumo-commit", id),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn orchestrated_on_singleshot_falls_through_to_standard() {
+    // Singleshot has no trial phase; the query parameter is silently
+    // ignored and execute auto-completes.
+    let (server, _backend) = spawn_with("singleshot").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"hsm").await;
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{}/prepare", id),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    poll_terminal(&server, &id).await;
+    let resp = put(
+        &server,
+        &format!(
+            "/vehicle/v1/components/dev1/updates/{}/execute?x-sumo-control=orchestrated",
+            id
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let final_body = poll_terminal(&server, &id).await;
+    assert_eq!(final_body["status"], "completed");
+    assert!(final_body.get("x-sumo-substate").is_none());
+}
+
+#[tokio::test]
+async fn discovery_endpoint_lists_x_sumo_extensions() {
+    let (server, _backend) = spawn_with("singleshot").await;
+    let url = format!("{}/.well-known/sovd-extensions", server.base_url());
+    let resp = http().get(url).send().await.expect("discovery");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    let exts = &body["extensions"];
+    assert!(exts.get("x-sumo-control").is_some());
+    assert!(exts.get("x-sumo-bulk-data").is_some());
+    let verbs = &exts["x-sumo-control"]["verbs"];
+    assert!(
+        verbs
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str().unwrap_or("").contains("x-sumo-commit")),
+        "x-sumo-commit verb should be advertised"
+    );
 }
 
 #[tokio::test]

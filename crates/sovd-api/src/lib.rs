@@ -51,6 +51,13 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/docs",
             get(handlers::meta::capability_description),
         )
+        // Vendor-extension discovery (Phase B).  Conformance scanners
+        // enumerate documented deviations here rather than flag them
+        // as unknown surface.  tasks/spec-aligned-updates-wire.md §4.1.
+        .route(
+            "/.well-known/sovd-extensions",
+            get(handlers::meta::sovd_extensions),
+        )
         // Component routes
         .route(
             "/vehicle/v1/components",
@@ -429,6 +436,18 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/vehicle/v1/components/{component_id}/updates/{update_id}/status",
             get(handlers::updates::get_status),
+        )
+        // Phase B — orchestrated-mode vendor verbs.  Only meaningful
+        // for entries that ran `PUT /execute?x-sumo-control=orchestrated`
+        // and are paused at `substate=awaiting-verdict`.  See
+        // tasks/spec-aligned-updates-wire.md §2.2.
+        .route(
+            "/vehicle/v1/components/{component_id}/updates/{update_id}/x-sumo-commit",
+            put(handlers::updates::put_x_sumo_commit),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/updates/{update_id}/x-sumo-rollback",
+            put(handlers::updates::put_x_sumo_rollback),
         )
         // Heterogeneous campaigns — F.D4.  Top-level collection (not
         // under /components) because a campaign spans several.
