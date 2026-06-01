@@ -485,7 +485,38 @@ pub async fn put_prepare(
             }
         }
 
-        if let Some(tid) = transfer_id.as_deref() {
+        // If register_update couldn't preallocate the backend flash
+        // session (NotSupported / not-yet-ready), retry now — by this
+        // point any verified-package precondition the backend wanted
+        // has had a chance to land via the bulk-data uploads.
+        let active_transfer = match transfer_id {
+            Some(tid) => Some(tid),
+            None => match backend.start_flash().await {
+                Ok(tid) => {
+                    let tid_clone = tid.clone();
+                    let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                        entry.transfer_id = Some(tid_clone);
+                    });
+                    Some(tid)
+                }
+                Err(sovd_core::BackendError::NotSupported(_)) => None,
+                Err(e) => {
+                    let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                        entry.status = Status::Failed;
+                        entry.step = Some("start_flash failed".into());
+                        entry.error = Some(crate::state::UpdateError {
+                            error_code: "update-preparation-failed".into(),
+                            message: format!("start_flash: {e:?}"),
+                            parameters: None,
+                        });
+                        entry.task_handle = None;
+                    });
+                    return;
+                }
+            },
+        };
+
+        if let Some(tid) = active_transfer.as_deref() {
             let _ = mutate_entry(&task_state, &task_update_id, |entry| {
                 entry.step = Some("waiting for staging pipeline".into());
                 entry.progress = Some(80);
