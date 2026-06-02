@@ -80,18 +80,17 @@ pub async fn clear_data_action(
         )));
     }
 
-    // Stub state machine: idle → running → completed in one tick.
-    // When a backend wires real dispatch, mark `running` on entry,
-    // then update from the spawned task.
-    {
-        let mut store = state.clear_data_status.0.lock();
-        store.insert(component_id.clone(), "completed".to_string());
-    }
-
+    // No backend trait method dispatches a real clear-data wipe yet.
+    // Recording a fabricated `completed` would make a conformance
+    // poller believe the wipe happened.  Be honest: 501.  The action
+    // is validated above so unknown actions still 400, and an unknown
+    // component still 404s via get_backend.
     tracing::info!(
         component = %component_id,
         action = %action,
-        "clear-data: stub completion (no backend dispatch)"
+        "clear-data: no backend dispatch — returning 501"
     );
-    Ok(StatusCode::ACCEPTED)
+    Err(ApiError::NotImplemented(
+        "clear-data actions are not yet wired to a backend".into(),
+    ))
 }

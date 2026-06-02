@@ -32,6 +32,12 @@ pub enum ApiError {
     Conflict(String),
     /// 409 Conflict — `update-process-in-progress`.
     UpdateInProgress(String),
+    /// 409 Conflict — `update-preparation-in-progress`.
+    UpdatePreparationInProgress(String),
+    /// 409 Conflict — `update-execution-in-progress`.
+    UpdateExecutionInProgress(String),
+    /// 409 Conflict — `update-automated-not-supported`.
+    UpdateAutomatedNotSupported(String),
     /// 409 Conflict — `precondition-not-fulfilled` (mode/session/lock
     /// gate failed).  Same status as Conflict; kept distinct for
     /// telemetry/log clarity.
@@ -90,6 +96,18 @@ impl IntoResponse for ApiError {
             ApiError::UpdateInProgress(msg) => (
                 StatusCode::CONFLICT,
                 GenericError::new(error_code::UPDATE_PROCESS_IN_PROGRESS, msg),
+            ),
+            ApiError::UpdatePreparationInProgress(msg) => (
+                StatusCode::CONFLICT,
+                GenericError::new(error_code::UPDATE_PREPARATION_IN_PROGRESS, msg),
+            ),
+            ApiError::UpdateExecutionInProgress(msg) => (
+                StatusCode::CONFLICT,
+                GenericError::new(error_code::UPDATE_EXECUTION_IN_PROGRESS, msg),
+            ),
+            ApiError::UpdateAutomatedNotSupported(msg) => (
+                StatusCode::CONFLICT,
+                GenericError::new(error_code::UPDATE_AUTOMATED_NOT_SUPPORTED, msg),
             ),
             ApiError::PreconditionFailed(msg) => (
                 StatusCode::CONFLICT,

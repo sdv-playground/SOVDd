@@ -384,7 +384,7 @@ pub async fn put_prepare(
             .filter(|e| e.component_id == component_id)
             .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
         if matches!(entry.status, Status::InProgress) {
-            return Err(ApiError::Conflict(format!(
+            return Err(ApiError::UpdatePreparationInProgress(format!(
                 "update {update_id} is already in {} phase, status inProgress",
                 entry.phase.as_str()
             )));
@@ -558,7 +558,7 @@ pub async fn put_execute(
             .filter(|e| e.component_id == component_id)
             .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
         if matches!(entry.status, Status::InProgress) {
-            return Err(ApiError::Conflict(format!(
+            return Err(ApiError::UpdateExecutionInProgress(format!(
                 "update {update_id} is already in {} phase, status inProgress",
                 entry.phase.as_str()
             )));
@@ -859,8 +859,8 @@ pub async fn put_automated(
             .unwrap_or(true)
     };
     if !allowed {
-        return Err(ApiError::Conflict(
-            "update-automated-not-supported: the package cannot be installed automatically".into(),
+        return Err(ApiError::UpdateAutomatedNotSupported(
+            "the package cannot be installed automatically".into(),
         ));
     }
 

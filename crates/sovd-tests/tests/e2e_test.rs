@@ -1177,7 +1177,7 @@ async fn test_sse_stream_periodic_data() {
     // streaming we use the inline query-style endpoint that joins N
     // params into one stream.
     let stream_url = format!(
-        "http://localhost:{}/vehicle/v1/components/vtx_ecm/streams?parameters=vehicle_speed,coolant_temp,engine_load&rate_hz=10",
+        "http://localhost:{}/vehicle/v1/components/vtx_ecm/streams?parameters=vehicle_speed&parameters=coolant_temp&parameters=engine_load&rate_hz=10",
         TestHarness::SERVER_PORT
     );
 
@@ -1649,7 +1649,7 @@ async fn test_sse_stream_mixed_access_levels() {
     // Extended: engine_rpm, oil_pressure
     // Protected: boost_pressure, throttle_position
     let stream_url = format!(
-        "http://localhost:{}/vehicle/v1/components/vtx_ecm/streams?parameters=vehicle_speed,coolant_temp,engine_rpm,oil_pressure,boost_pressure,throttle_position&rate_hz=10",
+        "http://localhost:{}/vehicle/v1/components/vtx_ecm/streams?parameters=vehicle_speed&parameters=coolant_temp&parameters=engine_rpm&parameters=oil_pressure&parameters=boost_pressure&parameters=throttle_position&rate_hz=10",
         TestHarness::SERVER_PORT
     );
 

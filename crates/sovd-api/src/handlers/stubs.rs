@@ -104,7 +104,9 @@ pub async fn reset_configurations(
     Path(component_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     require_component(&state, &component_id)?;
-    Ok(StatusCode::NO_CONTENT)
+    Err(ApiError::NotImplemented(
+        "configurations.reset not yet wired to a backend".into(),
+    ))
 }
 
 // =============================================================================

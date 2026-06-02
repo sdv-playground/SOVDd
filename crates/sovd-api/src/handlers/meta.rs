@@ -476,13 +476,17 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
                 "values": ["orchestrated"],
                 "verbs": [
                     "PUT /vehicle/v1/components/{id}/updates/{update_id}/x-sumo-commit",
-                    "PUT /vehicle/v1/components/{id}/updates/{update_id}/x-sumo-rollback"
+                    "PUT /vehicle/v1/components/{id}/updates/{update_id}/x-sumo-rollback",
+                    "PUT /vehicle/v1/components/{id}/x-sumo-force-rollback"
                 ],
                 "fields": ["x-sumo-substate"],
                 "spec":   "tasks/spec-aligned-updates-wire.md sec 2.2",
                 "summary": "Opt-in fine-grained execute-phase control \
                             for orchestrators that want to drive the \
-                            trial verdict (commit / rollback) out-of-band."
+                            trial verdict (commit / rollback) out-of-band. \
+                            x-sumo-force-rollback unconditionally clears \
+                            stuck backend trial state when no in-flight \
+                            update_id exists."
             },
             "x-sumo-bulk-data": {
                 "kind":      "sub-resource",

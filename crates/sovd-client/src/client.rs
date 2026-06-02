@@ -1341,11 +1341,15 @@ impl SovdClient {
     ) -> Result<crate::streaming::Subscription> {
         use crate::streaming::Subscription;
 
-        // Build stream URL with query parameters
-        let params_str = parameters.join(",");
+        // Build stream URL with explode=true repeated keys (C-064).
+        let params_q: String = parameters
+            .iter()
+            .map(|p| format!("parameters={p}"))
+            .collect::<Vec<_>>()
+            .join("&");
         let stream_path = format!(
-            "/vehicle/v1/components/{}/streams?parameters={}&rate_hz={}",
-            component_id, params_str, rate_hz
+            "/vehicle/v1/components/{}/streams?{}&rate_hz={}",
+            component_id, params_q, rate_hz
         );
 
         // Generate a pseudo subscription ID for tracking

@@ -7,11 +7,11 @@ use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, RawQuery, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
@@ -20,16 +20,6 @@ use crate::state::AppState;
 
 fn default_rate() -> u32 {
     10
-}
-
-/// Query parameters for inline streaming
-#[derive(Debug, Deserialize)]
-pub struct StreamQuery {
-    /// Comma-separated parameter IDs
-    pub parameters: String,
-    /// Update rate in Hz
-    #[serde(default = "default_rate")]
-    pub rate_hz: u32,
 }
 
 /// SSE EventEnvelope — ISO 17978-3 §5.6 Table 5.
@@ -177,20 +167,37 @@ pub async fn stream_subscription(
 /// GET /vehicle/v1/components/:component_id/streams
 /// Stream data using query parameters (inline subscription)
 ///
-/// Example: GET /vehicle/v1/components/engine_ecu/streams?parameters=engine_rpm,coolant_temp&rate_hz=10
+/// Example: GET /vehicle/v1/components/engine_ecu/streams?parameters=engine_rpm&parameters=coolant_temp&rate_hz=10
 /// Gateway example: GET /vehicle/v1/components/vehicle_gateway/streams?parameters=vtx_ecm/coolant_temp&rate_hz=10
 pub async fn stream_data(
     State(state): State<AppState>,
     Path(component_id): Path<String>,
-    Query(query): Query<StreamQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<impl IntoResponse, ApiError> {
-    // Parse parameter IDs
-    let param_ids: Vec<String> = query
-        .parameters
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    // C-064 explode=true: collect repeated `?parameters=` keys plus an
+    // optional `rate_hz`, parsed from the raw query (axum's typed Query
+    // collapses repeated keys).  DID identifiers carry no characters
+    // that need percent-decoding.
+    let raw = raw_query.unwrap_or_default();
+    let mut param_ids: Vec<String> = Vec::new();
+    let mut rate_hz: u32 = default_rate();
+    for pair in raw.split('&').filter(|s| !s.is_empty()) {
+        let (key, val) = pair.split_once('=').unwrap_or((pair, ""));
+        match key {
+            "parameters" => {
+                let v = val.trim();
+                if !v.is_empty() {
+                    param_ids.push(v.to_string());
+                }
+            }
+            "rate_hz" => {
+                if let Ok(r) = val.parse::<u32>() {
+                    rate_hz = r;
+                }
+            }
+            _ => {}
+        }
+    }
 
     if param_ids.is_empty() {
         return Err(ApiError::BadRequest("No parameters specified".to_string()));
@@ -232,7 +239,7 @@ pub async fn stream_data(
 
         // Subscribe to data via child backend
         let receiver = child_backend
-            .subscribe_data(&dids, query.rate_hz)
+            .subscribe_data(&dids, rate_hz)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -261,7 +268,7 @@ pub async fn stream_data(
 
     // Subscribe to data using resolved DIDs
     let receiver = backend
-        .subscribe_data(&dids, query.rate_hz)
+        .subscribe_data(&dids, rate_hz)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 

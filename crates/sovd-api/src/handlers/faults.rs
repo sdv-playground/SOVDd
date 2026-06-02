@@ -139,27 +139,23 @@ pub async fn clear_faults(
 
 /// DELETE /vehicle/v1/components/:component_id/faults/:fault_id
 ///
-/// Spec §7.8 fault.delete — clear a single DTC.  UDS 0x14
-/// (ClearDiagnosticInformation) takes a 3-byte groupOfDTC; we parse
-/// the path's `fault_id` as hex and pass it through.  We deliberately
-/// refuse the clear-all sentinel (`0xFFFFFF`) here — that belongs to
-/// `DELETE /faults`, not the per-fault path — and unparseable ids get
-/// 501 rather than silently wiping the whole DTC store.
+/// Spec §7.8 `faults.delete_one` permits [204, 404, 409, 501].  UDS
+/// 0x14 (ClearDiagnosticInformation) only takes a 3-byte groupOfDTC —
+/// there is no reliable mapping from a single SOVD fault-code to a
+/// single-DTC clear, and issuing the group clear would silently wipe
+/// neighbouring DTCs.  Rather than mislead the caller with a 204 that
+/// cleared more than they asked for, we return 501.  Clearing the
+/// whole memory is `DELETE /faults` (group/all clear).
 pub async fn delete_fault(
     State(state): State<AppState>,
-    Path((component_id, fault_id)): Path<(String, String)>,
+    Path((component_id, _fault_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    let backend = state.get_backend(&component_id)?;
-    let code = u32::from_str_radix(fault_id.trim_start_matches("0x"), 16).map_err(|_| {
-        ApiError::NotImplemented(format!(
-            "single-DTC delete requires a hex fault id (got {fault_id:?})"
-        ))
-    })?;
-    if code == 0xFF_FFFF {
-        return Err(ApiError::BadRequest(
-            "clear-all not allowed on single-fault path; use DELETE /faults".into(),
-        ));
-    }
-    let _ = backend.clear_faults(Some(code)).await?;
-    Ok(StatusCode::NO_CONTENT)
+    // Validate the component exists so an unknown component still 404s
+    // rather than a blanket 501.
+    let _ = state.get_backend(&component_id)?;
+    Err(ApiError::NotImplemented(
+        "single-DTC delete is not reliably mappable to UDS 0x14 \
+         (group clear); clear the whole memory via DELETE /faults"
+            .into(),
+    ))
 }
