@@ -156,60 +156,6 @@ pub struct UpdatePart {
     pub file_id: String,
 }
 
-/// Per-campaign tracking for the spec-compliant `/campaigns` collection.
-///
-/// F.D4 adds the wire surface for atomic multi-component updates.
-/// A campaign references existing `/updates` entries by their
-/// `(component_id, update_id)` tuples (inside-out registration);
-/// `/executions` actions fan out across members.  Banked-vs-Singleshot
-/// ordering (defer Singleshot finalize until after Banked reboot)
-/// is documented in `tasks/sw-update-architecture.md` §5 but not yet
-/// implemented at the SOVD layer — capabilities aren't exposed on
-/// the SOVD wire today.  Members are processed sequentially.
-///
-/// Held in memory; survives no restart.
-#[derive(Clone, Debug, Default)]
-pub struct CampaignsStore(pub Arc<Mutex<HashMap<String, CampaignsEntry>>>);
-
-#[derive(Clone, Debug)]
-pub struct CampaignsEntry {
-    pub members: Vec<CampaignMember>,
-    pub manifest: Option<serde_json::Value>,
-    pub state: CampaignState,
-}
-
-#[derive(Clone, Debug)]
-pub struct CampaignMember {
-    pub component_id: String,
-    pub update_id: String,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CampaignState {
-    #[default]
-    Registered,
-    Staged,
-    Finalized,
-    Committed,
-    RolledBack,
-    Aborted,
-    Failed,
-}
-
-impl CampaignState {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Registered => "registered",
-            Self::Staged => "staged",
-            Self::Finalized => "finalized",
-            Self::Committed => "committed",
-            Self::RolledBack => "rolledback",
-            Self::Aborted => "aborted",
-            Self::Failed => "failed",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UpdateState {
     #[default]
@@ -335,8 +281,6 @@ pub struct AppState {
     pub clear_data_status: ClearDataStatusStore,
     /// Per-update part tracking for the `/updates` collection.
     pub updates: UpdatesStore,
-    /// Per-campaign tracking for the `/campaigns` collection.
-    pub campaigns: CampaignsStore,
     /// Tunable knobs for the `/updates` lifecycle.
     pub updates_config: Arc<UpdatesConfig>,
 }
@@ -353,7 +297,6 @@ impl AppState {
             log_config: LogConfigStore::default(),
             clear_data_status: ClearDataStatusStore::default(),
             updates: UpdatesStore::default(),
-            campaigns: CampaignsStore::default(),
             updates_config: Arc::new(UpdatesConfig::default()),
         }
     }
@@ -372,7 +315,6 @@ impl AppState {
             log_config: LogConfigStore::default(),
             clear_data_status: ClearDataStatusStore::default(),
             updates: UpdatesStore::default(),
-            campaigns: CampaignsStore::default(),
             updates_config: Arc::new(UpdatesConfig::default()),
         }
     }
@@ -392,7 +334,6 @@ impl AppState {
             log_config: LogConfigStore::default(),
             clear_data_status: ClearDataStatusStore::default(),
             updates: UpdatesStore::default(),
-            campaigns: CampaignsStore::default(),
             updates_config: Arc::new(UpdatesConfig::default()),
         }
     }

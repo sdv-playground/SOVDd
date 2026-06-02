@@ -849,10 +849,30 @@ impl SovdClient {
         let body = serde_json::json!({ "parameters": params });
 
         let response = self.client.post(url).json(&body).send().await?;
-        // Server wraps the IO control result inside an OperationExecution
-        // (executions sub-resource shape).  Unwrap `result` back to the
-        // legacy OutputControlResponse for caller compatibility.
-        let exec: OperationExecution = self.handle_response(response).await?;
+        // Phase E / C-080: the POST returns 202 + a Running placeholder
+        // (result: None); the IO control runs in a spawned task and the
+        // OutputControlResponse lands on the execution resource.  Poll
+        // GET .../executions/{exec_id} until terminal, then unwrap.
+        let started: OperationExecution = self.handle_response(response).await?;
+        let mut exec = self
+            .get_operation_execution(component_id, output_id, &started.execution_id)
+            .await?;
+        for _ in 0..50 {
+            if exec.status != OperationStatus::Running {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            exec = self
+                .get_operation_execution(component_id, output_id, &started.execution_id)
+                .await?;
+        }
+        if exec.status == OperationStatus::Failed {
+            return Err(SovdClientError::server_error(
+                409,
+                exec.error
+                    .unwrap_or_else(|| "control_output failed".to_string()),
+            ));
+        }
         let result = exec.result.ok_or_else(|| {
             SovdClientError::ParseError("control_output: missing result in execution".into())
         })?;

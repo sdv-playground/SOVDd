@@ -677,9 +677,9 @@ pub trait DiagnosticBackend: Send + Sync {
         ))
     }
 
-    /// F.D5: describe the update shape so the campaign coordinator can
-    /// order Banked-vs-Singleshot finalize correctly per ISO 17978-3 §7.13
-    /// (and `tasks/sw-update-architecture.md` §5).
+    /// Describe the update shape so the `/updates` execute path can
+    /// order Banked-vs-Singleshot finalize/commit correctly per ISO 17978-3
+    /// §7.13 (and `tasks/sw-update-architecture.md` §5).
     ///
     /// Return one of:
     ///
@@ -689,8 +689,8 @@ pub trait DiagnosticBackend: Send + Sync {
     /// - `"singleshot"` — write-through, no rollback (HSM keystore,
     ///   container app, config-only).  `finalize` writes live; `commit`
     ///   is bookkeeping; there is no `rollback`.
-    /// - `"unknown"` (default) — backend doesn't advertise; the
-    ///   coordinator falls back to sequential per-member execution.
+    /// - `"unknown"` (default) — backend doesn't advertise; the execute
+    ///   path treats it as Banked (non-singleshot).
     ///
     /// Implementations override this when their lifecycle is one of the
     /// two named shapes.  Returning the string keeps the trait wire-only

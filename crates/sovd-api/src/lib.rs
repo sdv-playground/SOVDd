@@ -390,7 +390,7 @@ pub fn create_router(state: AppState) -> Router {
             post(handlers::discovery::discover_ecus),
         )
         // /flash + /files retired in F.D8b — sovd-client::FlashClient
-        // routes via /updates + /campaigns internally now.  See
+        // routes via /updates internally now.  See
         // commit history if you need the legacy handlers.
         // Spec-compliant `/updates` collection — F.D2 thin alias over
         // the existing flash backend.  ISO 17978-3 §7.13.  Multipart-
@@ -458,22 +458,6 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/x-sumo-force-rollback",
             put(handlers::updates::put_x_sumo_force_rollback),
         )
-        // Heterogeneous campaigns — F.D4.  Top-level collection (not
-        // under /components) because a campaign spans several.
-        .route(
-            "/vehicle/v1/campaigns",
-            post(handlers::campaigns::register_campaign)
-                .get(handlers::campaigns::list_campaigns),
-        )
-        .route(
-            "/vehicle/v1/campaigns/{campaign_id}",
-            get(handlers::campaigns::get_campaign)
-                .delete(handlers::campaigns::delete_campaign),
-        )
-        .route(
-            "/vehicle/v1/campaigns/{campaign_id}/executions",
-            post(handlers::campaigns::post_execution),
-        )
         // Admin routes - DID definitions management
         .route(
             "/admin/definitions",
@@ -503,5 +487,5 @@ pub fn create_router(state: AppState) -> Router {
 // stack it carried (Deprecation / Sunset / Link → successor-version
 // per RFC 8594 + RFC 9745) were retired.  See git history for the
 // transitional shape.  sovd-client::FlashClient routes through
-// /updates + /campaigns now and these legacy URL paths no longer
+// /updates now and these legacy URL paths no longer
 // exist.

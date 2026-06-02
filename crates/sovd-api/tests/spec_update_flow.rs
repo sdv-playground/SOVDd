@@ -33,8 +33,6 @@ struct MockBackend {
     info: EntityInfo,
     capabilities: Capabilities,
     shape: MockShape,
-    /// part_id → (file_id, sha256)
-    parts: Mutex<Vec<(String, String, String)>>,
     /// monotonic counter for file_id allocation
     next_id: Mutex<u64>,
     /// transfer_id allocated by start_flash
@@ -61,7 +59,6 @@ impl MockBackend {
                 ..Default::default()
             },
             shape: MockShape { shape },
-            parts: Mutex::new(Vec::new()),
             next_id: Mutex::new(0),
             transfer_id: Mutex::new(None),
             flash_state: Mutex::new(CoreFlashState::Transferring),
@@ -587,7 +584,7 @@ async fn discovery_endpoint_lists_x_sumo_extensions() {
 // ---------------------------------------------------------------------------
 
 fn flash_client_for(server: &TestServer) -> sovd_client::FlashClient {
-    let cfg = sovd_client::flash::FlashConfig::builder(&server.base_url())
+    let cfg = sovd_client::flash::FlashConfig::builder(server.base_url())
         .component_id("dev1")
         // Tight polling so the test isn't dominated by sleeps.
         .flash_poll_ms(25)

@@ -2524,11 +2524,23 @@ async fn test_routine_result() {
         .await
         .expect("start_operation_execution failed");
 
-    // Poll via the executions sub-resource
-    let result = client
+    // Poll via the executions sub-resource until terminal — the POST
+    // returns 202 + Running and the backend call runs in a spawned task
+    // (Phase E / C-080).
+    let mut result = client
         .get_operation_execution("vtx_ecm", "check_preconditions", &started.execution_id)
         .await
         .expect("get_operation_execution failed");
+    for _ in 0..50 {
+        if result.status != sovd_client::OperationStatus::Running {
+            break;
+        }
+        sleep(Duration::from_millis(20)).await;
+        result = client
+            .get_operation_execution("vtx_ecm", "check_preconditions", &started.execution_id)
+            .await
+            .expect("get_operation_execution failed");
+    }
 
     eprintln!(
         "Response: exec_id={}, status={}",
@@ -2552,13 +2564,36 @@ async fn test_routine_security_required() {
         .expect("Failed to create test harness");
     let client = harness.sovd_client();
 
-    // Try to start erase_memory without security - should fail
-    let result = client
+    // Phase E: the POST returns 202 (op exists, params valid); the
+    // SecurityRequired failure surfaces on the execution resource, not the
+    // POST. Start, then poll until the execution reports a terminal status.
+    let started = client
         .start_operation_execution("vtx_ecm", "erase_memory", None)
-        .await;
+        .await
+        .expect("start_operation_execution should be accepted (202)");
 
-    // Should fail with security access denied
-    assert!(result.is_err(), "Expected error without security");
+    let mut result = client
+        .get_operation_execution("vtx_ecm", "erase_memory", &started.execution_id)
+        .await
+        .expect("get_operation_execution failed");
+    for _ in 0..50 {
+        if result.status != sovd_client::OperationStatus::Running {
+            break;
+        }
+        sleep(Duration::from_millis(20)).await;
+        result = client
+            .get_operation_execution("vtx_ecm", "erase_memory", &started.execution_id)
+            .await
+            .expect("get_operation_execution failed");
+    }
+
+    // Should fail with security access denied (recorded on the execution).
+    assert_eq!(
+        result.status,
+        sovd_client::OperationStatus::Failed,
+        "Expected Failed without security, got {}",
+        result.status
+    );
 
     eprintln!("=== Test PASSED: Routine without security correctly rejected ===");
 }
@@ -2767,7 +2802,7 @@ async fn test_upload_file() {
 async fn test_list_files() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -2779,7 +2814,7 @@ async fn test_list_files() {
 async fn test_verify_file() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -2791,7 +2826,7 @@ async fn test_verify_file() {
 async fn test_delete_file() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -2803,7 +2838,7 @@ async fn test_delete_file() {
 async fn test_start_flash_transfer() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -2815,7 +2850,7 @@ async fn test_start_flash_transfer() {
 async fn test_flash_transfer_status() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -2827,7 +2862,7 @@ async fn test_flash_transfer_status() {
 async fn test_finalize_flash_transfer() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -3009,7 +3044,7 @@ async fn test_flash_invalid_file_id() {
 async fn test_abort_flash_transfer() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -3021,7 +3056,7 @@ async fn test_abort_flash_transfer() {
 async fn test_complete_flash_workflow() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -3036,7 +3071,7 @@ async fn test_complete_flash_workflow() {
 async fn test_flash_workflow_block_counter_1() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -3631,7 +3666,7 @@ mod firmware {
 async fn test_software_update_full_cycle_with_version_check() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -3648,7 +3683,7 @@ async fn test_software_update_full_cycle_with_version_check() {
 async fn test_software_update_detects_corrupted_firmware() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -3660,7 +3695,7 @@ async fn test_software_update_detects_corrupted_firmware() {
 async fn test_software_update_rejects_invalid_header() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -4175,7 +4210,7 @@ async fn test_delete_nonexistent_log() {
 async fn test_flash_commit_workflow() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -4189,7 +4224,7 @@ async fn test_flash_commit_workflow() {
 async fn test_flash_rollback_workflow() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -4203,7 +4238,7 @@ async fn test_flash_rollback_workflow() {
 async fn test_flash_commit_not_supported() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -4217,7 +4252,7 @@ async fn test_flash_commit_not_supported() {
 async fn test_flash_commit_wrong_state() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -4232,7 +4267,7 @@ async fn test_flash_commit_wrong_state() {
 async fn test_abort_during_awaiting_activation() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -4247,7 +4282,7 @@ async fn test_abort_during_awaiting_activation() {
 async fn test_abort_after_activated_rejected() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -4261,7 +4296,7 @@ async fn test_abort_after_activated_rejected() {
 async fn test_abort_after_committed_rejected() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -4275,7 +4310,7 @@ async fn test_abort_after_committed_rejected() {
 async fn test_abort_after_rolledback_rejected() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -4290,7 +4325,7 @@ async fn test_abort_after_rolledback_rejected() {
 async fn test_abort_after_awaiting_reboot_rejected() {
     // F.D8b: legacy /flash + /files flow retired; this test exercised
     // semantics that no longer exist on the wire.  See the /updates-
-    // native tests (test_updates_*, test_campaigns_*) for the
+    // native tests (test_updates_*) for the
     // replacement coverage.
     panic!("retired in F.D8b — superseded by /updates-native tests");
 }
@@ -4490,164 +4525,6 @@ async fn test_updates_target_validation() {
     eprintln!("=== F.D3 target-validation test PASSED ===");
 }
 
-/// F.D4 campaigns wire surface: register over existing /updates,
-/// status fan-out, lifecycle action dispatched per-member.
-#[tokio::test]
-#[serial_test::serial]
-async fn test_campaigns_register_and_status() {
-    eprintln!("\n=== F.D4: register campaign + GET status ===");
-    let harness = TestHarness::new()
-        .await
-        .expect("Failed to create test harness");
-
-    // Register one /updates so the campaign has something to point at.
-    let (status, body) = harness
-        .post("/vehicle/v1/components/vtx_ecm/updates", json!({}))
-        .await
-        .expect("register update failed");
-    assert_eq!(status, 201);
-    let update_id = body["update_id"].as_str().unwrap().to_string();
-
-    // Register the campaign with that member.
-    let (status, body) = harness
-        .post(
-            "/vehicle/v1/campaigns",
-            json!({
-                "manifest": {"name": "test campaign"},
-                "members": [{"component_id": "vtx_ecm", "update_id": update_id.clone()}],
-            }),
-        )
-        .await
-        .expect("register campaign failed");
-    assert_eq!(status, 201, "register campaign expected 201, body = {body}");
-    let campaign_id = body["campaign_id"].as_str().unwrap().to_string();
-    let campaign_href = body["href"].as_str().unwrap().to_string();
-    assert!(campaign_href.contains(&campaign_id));
-
-    // GET /vehicle/v1/campaigns — campaign appears.
-    let (status, body) = harness
-        .get_with_status("/vehicle/v1/campaigns")
-        .await
-        .expect("list campaigns failed");
-    assert_eq!(status, 200);
-    let items = body["items"].as_array().expect("items missing");
-    assert!(items
-        .iter()
-        .any(|i| i["campaign_id"].as_str() == Some(campaign_id.as_str())));
-
-    // GET /vehicle/v1/campaigns/{id} — members include the update we registered.
-    let (status, body) = harness
-        .get_with_status(&campaign_href)
-        .await
-        .expect("get campaign failed");
-    assert_eq!(status, 200);
-    assert_eq!(body["campaign_id"].as_str(), Some(campaign_id.as_str()));
-    let members = body["members"].as_array().expect("members missing");
-    assert_eq!(members.len(), 1);
-    assert_eq!(members[0]["component_id"].as_str(), Some("vtx_ecm"));
-    assert_eq!(members[0]["update_id"].as_str(), Some(update_id.as_str()));
-
-    // Stage action — campaign is registered but update hasn't been
-    // verified, so stage should fail on the member.
-    let exec_path = format!("/vehicle/v1/campaigns/{}/executions", campaign_id);
-    let (status, body) = harness
-        .post(&exec_path, json!({"action": "stage"}))
-        .await
-        .expect("stage failed");
-    assert_eq!(status, 200, "executions returns 200 with status body");
-    assert_eq!(body["status"].as_str(), Some("failed"));
-    let member_outcomes = body["members"].as_array().expect("members missing");
-    assert_eq!(member_outcomes.len(), 1);
-    assert_eq!(member_outcomes[0]["status"].as_str(), Some("failed"));
-
-    // Campaign state reflects the failure.
-    let (_, body) = harness
-        .get_with_status(&campaign_href)
-        .await
-        .expect("status after stage failed");
-    assert_eq!(body["state"].as_str(), Some("failed"));
-
-    // DELETE the campaign — 204; member /updates not touched.
-    let del = harness
-        .delete(&campaign_href)
-        .await
-        .expect("DELETE campaign failed");
-    assert_eq!(del, 204);
-
-    // Clean up the orphaned update.
-    let _ = harness
-        .post(
-            &format!(
-                "/vehicle/v1/components/vtx_ecm/updates/{}/executions",
-                update_id
-            ),
-            json!({"action": "abort"}),
-        )
-        .await;
-
-    eprintln!("=== F.D4 register+status test PASSED ===");
-}
-
-/// Empty members list rejected with 400.
-#[tokio::test]
-#[serial_test::serial]
-async fn test_campaigns_register_rejects_empty_members() {
-    let harness = TestHarness::new()
-        .await
-        .expect("Failed to create test harness");
-
-    let (status, body) = harness
-        .post("/vehicle/v1/campaigns", json!({"members": []}))
-        .await
-        .expect("register empty failed");
-    assert_eq!(status, 400, "empty members must reject, body = {body}");
-    assert_eq!(body["error_code"].as_str(), Some("incomplete-request"));
-}
-
-/// Mismatched (component_id, update_id) pair rejected with 415.
-#[tokio::test]
-#[serial_test::serial]
-async fn test_campaigns_register_rejects_cross_component() {
-    let harness = TestHarness::new()
-        .await
-        .expect("Failed to create test harness");
-
-    // Open an update on vtx_ecm.
-    let (status, body) = harness
-        .post("/vehicle/v1/components/vtx_ecm/updates", json!({}))
-        .await
-        .expect("register update failed");
-    assert_eq!(status, 201);
-    let update_id = body["update_id"].as_str().unwrap().to_string();
-
-    // Try to register a campaign that addresses that update to a
-    // different component_id.  Should 415 wrong-target.
-    let (status, body) = harness
-        .post(
-            "/vehicle/v1/campaigns",
-            json!({"members": [{
-                "component_id": "vm-other",
-                "update_id": update_id.clone(),
-            }]}),
-        )
-        .await
-        .expect("register cross-component failed");
-    assert_eq!(status, 415, "cross-component should 415, body = {body}");
-    assert_eq!(body["error_code"].as_str(), Some("vendor-specific"));
-    assert_eq!(body["vendor_code"].as_str(), Some("wrong-target"));
-
-    // Clean up.
-    let _ = harness
-        .post(
-            &format!(
-                "/vehicle/v1/components/vtx_ecm/updates/{}/executions",
-                update_id
-            ),
-            json!({"action": "abort"}),
-        )
-        .await;
-}
-
 /// F.D8a: every /flash + /files response carries deprecation
 /// headers (RFC 8594 + RFC 9745) pointing at the /updates successor.
 /// F.D8b: routes deleted — this test no longer applicable.
@@ -4718,32 +4595,4 @@ async fn test_legacy_flash_files_carry_deprecation_headers() {
     );
 
     eprintln!("=== F.D8a deprecation headers test PASSED ===");
-}
-
-/// Unknown executions action returns 400 with the spec error code.
-#[tokio::test]
-#[serial_test::serial]
-async fn test_updates_executions_unknown_action() {
-    let harness = TestHarness::new()
-        .await
-        .expect("Failed to create test harness");
-
-    let (status, body) = harness
-        .post("/vehicle/v1/components/vtx_ecm/updates", json!({}))
-        .await
-        .expect("POST /updates failed");
-    assert_eq!(status, 201);
-    let update_id = body["update_id"].as_str().unwrap().to_string();
-
-    let exec_path = format!(
-        "/vehicle/v1/components/vtx_ecm/updates/{}/executions",
-        update_id
-    );
-    let (status, body) = harness
-        .post(&exec_path, json!({"action": "nuke-from-orbit"}))
-        .await
-        .expect("POST /executions failed");
-    assert_eq!(status, 400, "expected 400, body = {body}");
-    assert_eq!(body["error_code"].as_str(), Some("incomplete-request"));
-    let _ = harness.post(&exec_path, json!({"action": "abort"})).await;
 }

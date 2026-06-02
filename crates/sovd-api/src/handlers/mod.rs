@@ -3,7 +3,6 @@
 //! These handlers use the DiagnosticBackend trait and are backend-agnostic.
 
 pub mod apps;
-pub mod campaigns;
 pub mod clear_data;
 pub mod components;
 pub mod data;
@@ -12,8 +11,7 @@ pub mod definitions;
 pub mod discovery;
 pub mod faults;
 // F.D8b: handlers::files + handlers::flash deleted.  The legacy
-// wire shapes they served are replaced by /updates (F.D2) +
-// /campaigns (F.D4).
+// wire shapes they served are replaced by /updates (F.D2).
 pub mod logs;
 pub mod logs_ext;
 pub mod meta;
