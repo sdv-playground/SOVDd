@@ -46,6 +46,8 @@ RUST_LOG=debug cargo run --bin sovdd -- config/sovd.toml
 
 ## Architecture
 
+> Full detail in `ARCHITECTURE.md` (verified 2026-06-03). This section is the quick contributor map.
+
 ### Crate Dependency Graph
 
 ```
@@ -61,8 +63,8 @@ sovd-core (foundation — DiagnosticBackend trait, models, errors)
 sovdd (server binary)
   ├── sovd-api + sovd-uds + sovd-gateway + sovd-conv + sovd-proxy
 
-example-app (app entity binary)
-  ├── sovd-api + sovd-proxy + sovd-core
+example-app (app entity binary — embeds example-ecu for a full app→ECU stack in one process)
+  ├── sovd-api + sovd-proxy + sovd-core + sovd-client + sovd-uds + example-ecu
 
 sovd-cli → sovd-client
 sovd-tests → sovd-api + sovd-uds + sovd-gateway + sovd-conv + sovd-client
@@ -70,21 +72,23 @@ sovd-tests → sovd-api + sovd-uds + sovd-gateway + sovd-conv + sovd-client
 
 ### Central Abstraction: `DiagnosticBackend` Trait
 
-Defined in `crates/sovd-core/src/backend.rs`. ~35 async methods grouped by domain, all with default `NotSupported` implementations so backends only implement what they support:
+Defined in `crates/sovd-core/src/backend.rs`. ~45 async methods grouped by domain, almost all with default `NotSupported` implementations so backends only implement what they support:
 
-- **Data:** `list_parameters`, `read_data`, `write_data`, `read_raw_did`, `write_raw_did`, `subscribe_data`
-- **Faults:** `list_faults`, `get_fault_detail`, `clear_faults`
-- **Operations:** `list_operations`, `execute_operation`, `get_operation_status`, `stop_operation`
+- **Data:** `list_parameters`, `read_data`, `write_data`, `read_raw_did`, `write_raw_did`, `define_data_identifier`, `clear_data_identifier`, `subscribe_data`, `ecu_reset`
+- **Faults:** `get_faults`, `get_fault_detail`, `clear_faults`
+- **Logs:** `get_logs`, `get_log`, `get_log_content`, `delete_log`, `stream_logs`
+- **Operations:** `list_operations`, `start_operation`, `get_operation_status`, `stop_operation`
 - **I/O Control:** `list_outputs`, `get_output`, `control_output`
-- **Flash/Software:** `receive_package`, `start_flash`, `get_flash_status`, `abort_flash`, `finalize_flash`, `commit_flash`, `rollback_flash`, `get_activation_state`, `ecu_reset`, `get_software_info`
-- **Session/Security:** `get_session_mode`, `set_session_mode`, `get_security_mode`, `set_security_mode`
+- **Software/packages:** `get_software_info`, `receive_package`, `receive_package_stream`, `list_packages`, `get_package`, `verify_package`, `verify_part`, `delete_package`
+- **Async flash:** `start_flash`, `update_shape`, `get_flash_status`, `list_flash_transfers`, `abort_flash`, `finalize_flash`, `validate`, `invalidate`, `activate`, `commit_flash`, `rollback_flash`, `get_activation_state`
+- **Modes:** `get/set_session_mode`, `get/set_security_mode`, `get/set_link_mode`
 - **Entities:** `list_sub_entities`, `get_sub_entity`
 
-Three implementations: `UdsBackend` (sovd-uds), `GatewayBackend` (sovd-gateway), `SovdProxyBackend` (sovd-proxy). The API layer (`sovd-api`) dispatches to whichever backend is configured and never knows the concrete type.
+Three library implementations — `UdsBackend` (sovd-uds), `GatewayBackend` (sovd-gateway), `SovdProxyBackend` (sovd-proxy) — plus the reference app-entity `ManagedEcuBackend`/`ExampleAppBackend` (example-app). The API layer (`sovd-api`) dispatches to whichever backend is configured and never knows the concrete type. (The trait doc-comment also names `HpcBackend`/`ContainerBackend` — illustrative, not implemented.)
 
 ### API Layer (sovd-api)
 
-`crates/sovd-api/src/lib.rs` builds the axum router. `AppState` holds: backends map, `DidStore`, `SubscriptionManager`. Handlers are in `crates/sovd-api/src/handlers/` — one file per domain (data.rs, faults.rs, flash.rs, modes.rs, operations.rs, outputs.rs, streams.rs, subscriptions.rs, sub_entity.rs, etc.).
+`crates/sovd-api/src/lib.rs` builds the axum router (one flat `Router` with `GenericError` 404/405 fallbacks and CORS/trace/no-body-limit layers — no auth/TLS today). `AppState` holds: backends map, `DidStore`, `SubscriptionManager`, plus per-domain caches (operation executions, `/updates` tracking, log/clear-data config). Handlers are in `crates/sovd-api/src/handlers/` — one file per domain (data.rs, faults.rs, operations.rs, modes.rs, reset.rs, updates.rs, streams.rs, subscriptions.rs, sub_entity.rs, stubs.rs, …). The retired `flash.rs`/`files.rs`/`outputs.rs` handlers are gone: flash/OTA is the `/updates` wire and I/O control (0x2F) lives under `/operations` (C-133).
 
 ### UDS Backend (sovd-uds)
 
@@ -96,7 +100,7 @@ Three implementations: `UdsBackend` (sovd-uds), `GatewayBackend` (sovd-gateway),
 
 ### Gateway Composition (sovd-gateway)
 
-`GatewayBackend` wraps N child backends and itself implements `DiagnosticBackend`. Parameters are addressed as `child_id/param_id`. Capabilities are the OR of all children. Supports unlimited nesting for multi-tier architectures (tested up to 4-tier in `simulations/supplier_ota/`).
+`GatewayBackend` wraps N child backends and itself implements `DiagnosticBackend`. Children are exposed as sub-entities and addressed via `/apps/{child}/...` (the flat gateway data path was retired for C-021); internally, resources route by `child_id/param_id` prefix. The gateway advertises gateway-class capabilities (`sub_entities`); a client reads each child's real capabilities from that child's own detail — not a naive OR. Supports unlimited nesting for multi-tier architectures (tested up to 4-tier in `simulations/supplier_ota/`).
 
 ### App Entity Model (example-app)
 
@@ -109,12 +113,13 @@ Three implementations: `UdsBackend` (sovd-uds), `GatewayBackend` (sovd-gateway),
 
 ### Flash State Machine
 
-Strict 10-state lifecycle enforced in `sovd-uds`:
+13-state `FlashState` lifecycle (`crates/sovd-core/src/backend.rs`), branching on `supports_rollback`. See ARCHITECTURE.md §8 for the full dual-bank vs single-bank diagram. Dual-bank trial path:
 ```
-Queued → Preparing → Transferring → AwaitingActivation → AwaitingReboot → Activated → Committed|RolledBack
+Initial → Queued → Preparing → Transferring → AwaitingActivation [→ Validated] → AwaitingReboot → Verifying → Activated → Committed|RolledBack
 ```
-- Abort only valid during Queued through AwaitingActivation
-- AwaitingReboot enforces ECU reboot before commit/rollback
+Single-bank collapses to `… → Activated → Complete` (no reboot/trial). `Failed` is the terminal error/abort state.
+- Abort only valid Queued..AwaitingActivation (+ Validated); after AwaitingReboot, revert via `rollback_flash()` once Activated
+- `Verifying` = component-driven post-reset health check; `validate()`/`Validated` are opt-in
 - State held in `parking_lot::RwLock`; lock ordering: `activation_state` before `flash_state` to prevent deadlocks
 
 ### Security Model

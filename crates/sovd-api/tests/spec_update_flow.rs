@@ -836,3 +836,30 @@ fn build_capability_doc_scopes_to_component_prefix() {
     assert_eq!(empty["openapi"], "3.1.0");
     assert!(empty["paths"].as_object().unwrap().is_empty());
 }
+
+/// C-060 (ISO 17978-3 §6.2.1 / Table 21): the capability description
+/// declares `security` plus a bearer `securityScheme` — for both the
+/// global and scoped docs. Token enforcement is the deferred auth slice;
+/// the doc declares the intended mechanism per §5.4.4.
+#[test]
+fn build_capability_doc_declares_security() {
+    use sovd_api::handlers::meta::build_capability_doc;
+
+    for doc in [
+        build_capability_doc(None),
+        build_capability_doc(Some("/vehicle/v1/components/vtx_ecm")),
+    ] {
+        let security = doc["security"]
+            .as_array()
+            .expect("capability description must carry a `security` array");
+        assert!(!security.is_empty(), "security must declare a requirement");
+        assert!(
+            security[0].get("bearerAuth").is_some(),
+            "security references the bearerAuth scheme"
+        );
+        let scheme = &doc["components"]["securitySchemes"]["bearerAuth"];
+        assert_eq!(scheme["type"], "http", "bearerAuth is an http scheme");
+        assert_eq!(scheme["scheme"], "bearer");
+        assert!(scheme["bearerFormat"].is_string());
+    }
+}

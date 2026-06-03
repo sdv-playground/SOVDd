@@ -439,8 +439,17 @@ pub fn build_capability_doc(scope: Option<&str>) -> serde_json::Value {
         "servers": [
             {"url": "/vehicle/v1"},
         ],
+        "security": [{ "bearerAuth": [] }],
         "paths": paths,
         "components": {
+            "securitySchemes": {
+                "bearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "bearerFormat": "JWT",
+                    "description": "ISO 17978-3 §5.4.4 — OAuth2/OIDC bearer token (RFC 6749/6750/8693) presented via the Authorization header. NOTE: token enforcement is a planned auth/TLS slice; this server does not yet validate tokens (tracked by C-030/031/032).",
+                },
+            },
             "schemas": {
                 "GenericError": {
                     "type": "object",
