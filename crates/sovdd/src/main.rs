@@ -162,13 +162,15 @@ async fn main() -> anyhow::Result<()> {
         Some(ref path) => load_auth_config(path)?,
         None => AuthConfig::default(),
     };
+    let allow_insecure_transport = auth_config.allow_insecure_transport;
     let auth = AuthContext::from_config(auth_config)
         .await
         .map_err(|e| anyhow::anyhow!("auth config: {}", e))?;
-    if auth.is_open() {
-        tracing::warn!("Client authentication DISABLED (open surface) — set [server.auth] to enable");
-    } else {
+    let auth_enabled = !auth.is_open();
+    if auth_enabled {
         tracing::info!("Client authentication enabled");
+    } else {
+        tracing::warn!("Client authentication DISABLED (open surface) — set [server.auth] to enable");
     }
 
     // Create the app state with DID store, output configs, and auth context
@@ -187,6 +189,21 @@ async fn main() -> anyhow::Result<()> {
         Some(ref path) => load_tls_config(path)?,
         None => None,
     };
+    // Don't serve authenticated traffic over plaintext by accident — bearer
+    // tokens must not cross the wire in cleartext.
+    if auth_enabled && tls_config.is_none() {
+        if !allow_insecure_transport {
+            anyhow::bail!(
+                "[server.auth] is enabled but [server.tls] is not configured — bearer tokens \
+                 would cross the wire in cleartext. Configure [server.tls], or set \
+                 [server.auth] allow_insecure_transport = true for loopback dev/CI."
+            );
+        }
+        tracing::warn!(
+            "Serving authenticated traffic over PLAIN HTTP (allow_insecure_transport=true) — \
+             tokens are NOT encrypted in transit"
+        );
+    }
     match tls_config {
         Some(tls) => {
             tracing::info!("Listening on https://{} (TLS, rustls)", addr);

@@ -18,7 +18,7 @@ use axum::extract::{Request, State};
 use axum::http::{header::AUTHORIZATION, Method};
 use axum::middleware::Next;
 use axum::response::Response;
-use jsonwebtoken::{decode, decode_header, jwk::JwkSet, DecodingKey, Validation};
+use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
@@ -41,6 +41,11 @@ pub struct AuthConfig {
     /// the offline workshop-token issuer is purely additive later.
     #[serde(default)]
     pub issuers: Vec<IssuerConfig>,
+    /// Permit serving authenticated requests over plain HTTP (no `[server.tls]`).
+    /// Default false: the server refuses to start so bearer tokens never cross
+    /// the wire in cleartext by accident. Set true only for loopback dev/CI.
+    #[serde(default)]
+    pub allow_insecure_transport: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -96,6 +101,13 @@ impl ClientContext {
                 || s.strip_prefix("component:")
                     .is_some_and(|c| c == component_id)
         })
+    }
+
+    /// Server-admin authorization (`/admin/*` — mutates the shared DidStore,
+    /// which changes how every component's data is parsed). Requires an explicit
+    /// `admin:*` / `admin` scope; ordinary `component:*` access does NOT grant it.
+    pub fn can_admin(&self) -> bool {
+        self.scopes.iter().any(|s| s == "admin:*" || s == "admin")
     }
 }
 
@@ -201,8 +213,9 @@ impl AuthContext {
                 if raw == token {
                     Ok(ClientContext {
                         subject: "static".to_string(),
-                        // A static dev token is full-access — no scope info to narrow it.
-                        scopes: vec!["component:*".to_string()],
+                        // A static dev token is full-access (components + admin) —
+                        // there is no scope info to narrow it.
+                        scopes: vec!["component:*".to_string(), "admin:*".to_string()],
                     })
                 } else {
                     Err("invalid bearer token".to_string())
@@ -276,6 +289,21 @@ impl Claims {
     }
 }
 
+/// Accepted JWT signature algorithms — asymmetric only (no symmetric `HS*`, so a
+/// public verification key can never be misused as an HMAC secret). Pinned at the
+/// app layer rather than trusting the token header's `alg` (alg-confusion defence).
+const ASYMMETRIC_ALGS: &[Algorithm] = &[
+    Algorithm::RS256,
+    Algorithm::RS384,
+    Algorithm::RS512,
+    Algorithm::PS256,
+    Algorithm::PS384,
+    Algorithm::PS512,
+    Algorithm::ES256,
+    Algorithm::ES384,
+    Algorithm::EdDSA,
+];
+
 impl JwksManager {
     /// Validate a JWT against all trusted issuers: match `kid`, then verify
     /// signature, expiry, audience, and issuer.
@@ -292,10 +320,15 @@ impl JwksManager {
 
             let key = DecodingKey::from_jwk(jwk)
                 .map_err(|e| format!("failed to build decoding key from JWK: {e}"))?;
-            let mut validation = Validation::new(header.alg);
+            // Pin accepted algorithms (asymmetric only) at the app layer instead
+            // of trusting the token header's `alg` — defence-in-depth against
+            // algorithm-confusion. Also enforce nbf (not-before).
+            let mut validation = Validation::new(Algorithm::ES256);
+            validation.algorithms = ASYMMETRIC_ALGS.to_vec();
             validation.set_audience(&[&provider.audience]);
             validation.set_issuer(&[&provider.issuer]);
             validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
+            validation.validate_nbf = true;
 
             let data = decode::<Claims>(raw, &key, &validation)
                 .map_err(|e| format!("JWT validation failed: {e}"))?;
@@ -410,13 +443,19 @@ pub async fn require_auth(
         .await
         .map_err(ApiError::Unauthorized)?;
 
-    // C-031 authorization: component-scoped paths require the matching scope.
-    if let Some(component_id) = component_in_path(req.uri().path()) {
+    // Authorization (C-030 / C-031). Component-scoped paths require the matching
+    // `component:<id>` scope; the server-admin surface requires an `admin` scope.
+    let path = req.uri().path().to_owned();
+    if let Some(component_id) = component_in_path(&path) {
         if !ctx.can_access_component(component_id) {
             return Err(ApiError::Unauthorized(format!(
                 "client not authorized for component '{component_id}'"
             )));
         }
+    } else if path.starts_with("/admin/") && !ctx.can_admin() {
+        return Err(ApiError::Unauthorized(
+            "client not authorized for /admin (requires an admin scope)".to_string(),
+        ));
     }
 
     req.extensions_mut().insert(ctx);
@@ -457,12 +496,14 @@ mod tests {
             mode: AuthMode::Static,
             static_token: Some("s3cret".to_string()),
             issuers: Vec::new(),
+            allow_insecure_transport: false,
         })
         .await
         .unwrap();
         assert!(!ctx.is_open());
         let granted = ctx.authenticate(Some("Bearer s3cret")).await.unwrap();
         assert!(granted.can_access_component("any_component")); // static = full access
+        assert!(granted.can_admin()); // ...including the /admin surface
         assert!(ctx.authenticate(Some("Bearer nope")).await.is_err());
         assert!(ctx.authenticate(None).await.is_err());
         assert!(ctx.authenticate(Some("Basic s3cret")).await.is_err());
@@ -474,6 +515,7 @@ mod tests {
             mode: AuthMode::Static,
             static_token: None,
             issuers: Vec::new(),
+            allow_insecure_transport: false,
         })
         .await
         .err()
@@ -487,6 +529,7 @@ mod tests {
             mode: AuthMode::Oidc,
             static_token: None,
             issuers: Vec::new(),
+            allow_insecure_transport: false,
         })
         .await
         .err()
@@ -559,6 +602,25 @@ mod tests {
             scopes: Vec::new(),
         };
         assert!(!none.can_access_component("engine_ecu"));
+    }
+
+    #[test]
+    fn admin_scope_required_and_distinct_from_component() {
+        let comp = ClientContext {
+            subject: "x".into(),
+            scopes: vec!["component:*".into()],
+        };
+        assert!(!comp.can_admin(), "component:* must NOT grant admin");
+
+        let adm = ClientContext {
+            subject: "x".into(),
+            scopes: vec!["admin:*".into()],
+        };
+        assert!(adm.can_admin());
+        assert!(
+            !adm.can_access_component("engine_ecu"),
+            "admin:* is not component access"
+        );
     }
 
     #[test]
@@ -701,9 +763,54 @@ mod tests {
 
         // public path → 200 without auth
         let r = app
+            .clone()
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
+
+        // P0 fix: discovery is scope-filtered too — an engine-scoped token sees
+        // exactly one ECU, never body_ecu's identity.
+        let r = app
+            .clone()
+            .oneshot(
+                Request::post("/vehicle/v1/discovery")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["count"], 1, "discovery must not enumerate out-of-scope ECUs");
+
+        // P0 fix: /admin requires an admin scope — a component-only token is denied.
+        let r = app
+            .oneshot(
+                Request::get("/admin/definitions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::UNAUTHORIZED,
+            "/admin needs an admin scope"
+        );
+
+        // ...and an admin-scoped token reaches it.
+        let mut admin_backends = std::collections::HashMap::new();
+        admin_backends.insert("engine_ecu".to_string(), mock("engine_ecu"));
+        let admin_app = crate::create_router(
+            AppState::new(admin_backends)
+                .with_auth(Arc::new(AuthContext::test_scoped(vec!["admin:*"]))),
+        );
+        let r = admin_app
+            .oneshot(Request::get("/admin/definitions").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "admin scope reaches /admin");
     }
 }

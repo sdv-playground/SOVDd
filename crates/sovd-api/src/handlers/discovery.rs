@@ -3,10 +3,11 @@
 //! Provides endpoints for discovering ECUs on the vehicle network.
 
 use axum::extract::{Query, State};
-use axum::Json;
+use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+use crate::auth::ClientContext;
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -100,9 +101,14 @@ const DID_SOFTWARE_VERSION: u16 = 0xF195;
 /// Scan for ECUs on the vehicle network using functional addressing (broadcast)
 pub async fn discover_ecus(
     State(state): State<AppState>,
+    client: Option<Extension<ClientContext>>,
     Query(params): Query<DiscoveryQuery>,
 ) -> Result<Json<DiscoveryResponse>, ApiError> {
     let _timeout = Duration::from_millis(params.timeout_ms);
+    // C-031: a discovery enumeration must not leak the identities (VIN/serial/SW)
+    // of components the caller can't access. Filter by scope exactly like
+    // GET /components; no ClientContext ⇒ auth disabled ⇒ discover everything.
+    let client = client.map(|Extension(c)| c);
 
     tracing::info!(
         method = %params.method,
@@ -119,6 +125,12 @@ pub async fn discover_ecus(
 
             // Get registered backends and read identification DIDs from each
             for (component_id, backend) in state.backends() {
+                // Skip components outside the caller's scope (C-031 non-leakage).
+                if let Some(c) = &client {
+                    if !c.can_access_component(component_id) {
+                        continue;
+                    }
+                }
                 let _entity_info = backend.entity_info();
 
                 // Read identification DIDs if requested
