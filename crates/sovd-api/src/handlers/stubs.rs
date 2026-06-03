@@ -172,7 +172,9 @@ pub async fn release_lock(
     Path((component_id, _lock_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     require_component(&state, &component_id)?;
-    Ok(StatusCode::NO_CONTENT)
+    Err(ApiError::NotImplemented(
+        "locks.release not yet wired to a backend".into(),
+    ))
 }
 
 // =============================================================================
@@ -218,7 +220,9 @@ pub async fn delete_trigger(
     Path((component_id, _trigger_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     require_component(&state, &component_id)?;
-    Ok(StatusCode::NO_CONTENT)
+    Err(ApiError::NotImplemented(
+        "triggers.delete not yet wired to a backend".into(),
+    ))
 }
 
 // =============================================================================
@@ -275,7 +279,9 @@ pub async fn delete_communication_log(
     Path((component_id, _log_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     require_component(&state, &component_id)?;
-    Ok(StatusCode::NO_CONTENT)
+    Err(ApiError::NotImplemented(
+        "communication-logs.delete not yet wired to a backend".into(),
+    ))
 }
 
 // =============================================================================
