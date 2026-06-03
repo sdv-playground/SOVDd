@@ -46,6 +46,12 @@ pub struct AuthConfig {
     /// the wire in cleartext by accident. Set true only for loopback dev/CI.
     #[serde(default)]
     pub allow_insecure_transport: bool,
+    /// `mode = "workshop-ca"`: path to the pinned workshop-CA cert bundle (PEM).
+    #[serde(default)]
+    pub ca_cert: Option<String>,
+    /// `mode = "workshop-ca"`: this device's id — the expected token `aud`.
+    #[serde(default)]
+    pub device_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -59,6 +65,10 @@ pub enum AuthMode {
     Static,
     /// Validate JWTs against one or more OIDC issuers' JWKS.
     Oidc,
+    /// Validate delegated-cert (`x5c`) JWTs against a pinned workshop CA — the
+    /// offline/workshop path. Requires `ca_cert` + `device_id`.
+    #[serde(rename = "workshop-ca")]
+    WorkshopCa,
 }
 
 /// A trusted OIDC issuer.
@@ -124,6 +134,7 @@ enum Validator {
     Disabled,
     Static { token: String },
     Oidc { manager: Arc<JwksManager> },
+    WorkshopCa { validator: crate::workshop_ca::WorkshopCaValidator },
     /// Test-only: always authenticates, with a fixed scope set.
     #[cfg(test)]
     TestScoped { scopes: Vec<String> },
@@ -199,6 +210,21 @@ impl AuthContext {
                 spawn_jwks_refresh(manager.clone());
                 Validator::Oidc { manager }
             }
+            AuthMode::WorkshopCa => {
+                let ca_path = cfg
+                    .ca_cert
+                    .filter(|p| !p.is_empty())
+                    .ok_or("auth.mode = \"workshop-ca\" requires auth.ca_cert (PEM path)")?;
+                let device_id = cfg
+                    .device_id
+                    .filter(|d| !d.is_empty())
+                    .ok_or("auth.mode = \"workshop-ca\" requires auth.device_id")?;
+                let ca_pem = std::fs::read_to_string(&ca_path)
+                    .map_err(|e| format!("read auth.ca_cert {ca_path}: {e}"))?;
+                let validator =
+                    crate::workshop_ca::WorkshopCaValidator::from_pem(&ca_pem, &device_id)?;
+                Validator::WorkshopCa { validator }
+            }
         };
         Ok(Self { validator })
     }
@@ -228,6 +254,11 @@ impl AuthContext {
                     subject: claims.sub.clone(),
                     scopes: claims.into_scopes(),
                 })
+            }
+            Validator::WorkshopCa { validator } => {
+                let raw = bearer(header)?;
+                let (subject, scopes) = validator.validate(raw)?;
+                Ok(ClientContext { subject, scopes })
             }
             #[cfg(test)]
             Validator::TestScoped { scopes } => Ok(ClientContext {
@@ -495,8 +526,7 @@ mod tests {
         let ctx = AuthContext::from_config(AuthConfig {
             mode: AuthMode::Static,
             static_token: Some("s3cret".to_string()),
-            issuers: Vec::new(),
-            allow_insecure_transport: false,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -514,8 +544,7 @@ mod tests {
         let err = AuthContext::from_config(AuthConfig {
             mode: AuthMode::Static,
             static_token: None,
-            issuers: Vec::new(),
-            allow_insecure_transport: false,
+            ..Default::default()
         })
         .await
         .err()
@@ -528,8 +557,7 @@ mod tests {
         let err = AuthContext::from_config(AuthConfig {
             mode: AuthMode::Oidc,
             static_token: None,
-            issuers: Vec::new(),
-            allow_insecure_transport: false,
+            ..Default::default()
         })
         .await
         .err()

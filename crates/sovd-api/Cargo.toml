@@ -31,6 +31,10 @@ crc32fast = "1.4"
 parking_lot.workspace = true
 jsonwebtoken.workspace = true
 reqwest.workspace = true
+# Workshop-CA token validation (x5c chain → pinned CA)
+x509-cert = { version = "0.2", features = ["pem"] }
+p256 = { version = "0.13", features = ["ecdsa"] }
+base64 = "0.22"
 
 [dev-dependencies]
 sovd-client.workspace = true

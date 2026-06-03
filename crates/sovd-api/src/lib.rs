@@ -18,6 +18,7 @@ pub mod auth;
 pub mod error;
 pub mod handlers;
 pub mod state;
+pub mod workshop_ca;
 
 pub use auth::{AuthConfig, AuthContext, AuthMode, ClientContext, IssuerConfig};
 pub use error::ApiError;
