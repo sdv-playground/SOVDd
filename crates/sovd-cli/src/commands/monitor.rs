@@ -1,11 +1,65 @@
 //! Monitor command - real-time parameter streaming
 
 use anyhow::Result;
-use sovd_client::SovdClient;
+use futures::stream::{select_all, SelectAll, StreamExt};
+use sovd_client::{SovdClient, StreamError, StreamEvent, Subscription, SubscriptionInterval};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::output::{OutputContext, OutputFormat, StreamRow};
+
+/// Active event source for the monitor loop.
+///
+/// Direct (no `/` in any param) multi-parameter requests use the inline
+/// query-style streamer, which joins N params into ONE SSE stream.
+/// Gateway-child params (`child/param`) are not handled by the inline
+/// streamer — they go through the spec cyclic-subscription path, one
+/// subscription per param, merged client-side so the same event loop
+/// drives both shapes.
+enum MonitorStream {
+    /// One inline stream (direct multi-param).
+    Inline(Subscription),
+    /// N cyclic subscriptions merged into one (gateway children).
+    Cyclic(SelectAll<Subscription>),
+}
+
+impl MonitorStream {
+    /// Next event, regardless of the underlying shape.
+    async fn next(&mut self) -> Option<Result<StreamEvent, StreamError>> {
+        match self {
+            MonitorStream::Inline(sub) => StreamExt::next(sub).await,
+            MonitorStream::Cyclic(set) => StreamExt::next(set).await,
+        }
+    }
+
+    /// Explicitly cancel every underlying subscription (DELETE on the
+    /// server).  Without this, `Subscription::drop` still cleans up, but
+    /// Ctrl-C asks for a deterministic teardown.
+    async fn cancel(self) -> Result<()> {
+        match self {
+            MonitorStream::Inline(sub) => sub.cancel().await?,
+            MonitorStream::Cyclic(set) => {
+                for sub in set.into_iter() {
+                    sub.cancel().await?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Map the CLI's `--rate` (Hz) to the coarse spec interval.  SOVDd maps
+/// fast→20 Hz, normal→5 Hz, slow→1 Hz, so: >=10 Hz → Fast, >=2 Hz →
+/// Normal, 0/1 Hz → Slow.
+fn rate_to_interval(rate: u32) -> SubscriptionInterval {
+    if rate >= 10 {
+        SubscriptionInterval::Fast
+    } else if rate >= 2 {
+        SubscriptionInterval::Normal
+    } else {
+        SubscriptionInterval::Slow
+    }
+}
 
 /// Monitor parameters in real-time via SSE streaming
 pub async fn monitor(
@@ -22,10 +76,20 @@ pub async fn monitor(
     ));
     ctx.info("Press Ctrl+C to stop");
 
-    // The CLI subscribes to multiple parameters at once — spec model is
-    // single-resource-per-subscription, so use the inline query-style
-    // stream that lets us join N params into one SSE stream.
-    let mut subscription = client.subscribe_inline(ecu, params.clone(), rate).await?;
+    // Gateway children (`child/param`) can no longer ride the inline
+    // streamer — fan them out over the spec cyclic-subscription path and
+    // merge.  Pure direct requests keep the single-stream inline shape.
+    let is_gateway = params.iter().any(|p| p.contains('/'));
+    let mut stream = if is_gateway {
+        let interval = rate_to_interval(rate);
+        let mut subs = Vec::with_capacity(params.len());
+        for param in &params {
+            subs.push(client.subscribe(ecu, param, interval).await?);
+        }
+        MonitorStream::Cyclic(select_all(subs))
+    } else {
+        MonitorStream::Inline(client.subscribe_inline(ecu, params.clone(), rate).await?)
+    };
 
     // Set up Ctrl+C handler
     let running = Arc::new(AtomicBool::new(true));
@@ -50,7 +114,7 @@ pub async fn monitor(
 
     while running.load(Ordering::SeqCst) {
         tokio::select! {
-            event = subscription.next() => {
+            event = stream.next() => {
                 match event {
                     Some(Ok(data)) => {
                         print_stream_event(&data, &params, ctx);
@@ -75,7 +139,7 @@ pub async fn monitor(
     }
 
     ctx.info("\nStopping subscription...");
-    subscription.cancel().await?;
+    stream.cancel().await?;
     ctx.success("Subscription cancelled");
 
     Ok(())

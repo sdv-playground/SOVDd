@@ -979,6 +979,8 @@ async fn test_full_dual_layer_flow() {
 #[tokio::test]
 #[serial_test::serial]
 async fn test_streaming_via_sse() {
+    use sovd_client::SubscriptionInterval;
+
     require_vcan0!();
     let harness = GatewayTestHarness::new()
         .await
@@ -986,16 +988,21 @@ async fn test_streaming_via_sse() {
 
     eprintln!("=== STREAMING TEST (UDS 0x2A) ===\n");
 
-    // Request streaming of coolant_temp parameter at 10Hz through gateway
-    // The server will use UDS 0x2A ReadDataByPeriodicIdentifier
-    eprintln!("Requesting SSE stream via subscribe_inline...");
+    // Request streaming of coolant_temp through the gateway via the spec
+    // cyclic-subscription path.  The server uses UDS 0x2A
+    // ReadDataByPeriodicIdentifier behind the subscription.
+    eprintln!("Requesting SSE stream via cyclic subscription...");
     eprintln!("Collecting data for 3 seconds...\n");
 
     let mut sub = harness
         .client()
-        .subscribe_inline("vehicle_gateway", vec!["vtx_ecm/coolant_temp".into()], 10)
+        .subscribe(
+            "vehicle_gateway",
+            "vtx_ecm/coolant_temp",
+            SubscriptionInterval::Fast,
+        )
         .await
-        .expect("Failed to start inline subscription");
+        .expect("Failed to start cyclic subscription");
 
     // Collect streaming data for 3 seconds
     let mut events = Vec::new();
@@ -1054,6 +1061,8 @@ async fn test_streaming_via_sse() {
 #[tokio::test]
 #[serial_test::serial]
 async fn test_streaming_through_gateway() {
+    use sovd_client::SubscriptionInterval;
+
     require_vcan0!();
     let harness = GatewayTestHarness::new()
         .await
@@ -1061,15 +1070,20 @@ async fn test_streaming_through_gateway() {
 
     eprintln!("=== GATEWAY STREAMING TEST ===\n");
 
-    // Request streaming through gateway with prefixed parameter
-    eprintln!("Requesting SSE stream through gateway via subscribe_inline...");
+    // Request streaming through gateway with a prefixed (child) parameter
+    // via the spec cyclic-subscription path.
+    eprintln!("Requesting SSE stream through gateway via cyclic subscription...");
     eprintln!("Collecting data for 2 seconds...\n");
 
     let mut sub = harness
         .client()
-        .subscribe_inline("vehicle_gateway", vec!["vtx_ecm/coolant_temp".into()], 5)
+        .subscribe(
+            "vehicle_gateway",
+            "vtx_ecm/coolant_temp",
+            SubscriptionInterval::Normal,
+        )
         .await
-        .expect("Failed to start inline subscription through gateway");
+        .expect("Failed to start cyclic subscription through gateway");
 
     // Collect streaming data for 2 seconds
     let mut events = Vec::new();

@@ -72,10 +72,25 @@ pub async fn stream_subscription(
     let did_store = state.did_store_arc();
     let mut did_to_info: HashMap<String, (String, u16)> = HashMap::new();
     let resource_param = subscription.resource.clone();
-    let did_str = if let Some(did) = did_store.resolve_did(&resource_param) {
-        let did_str = format!("{:04X}", did);
-        did_to_info.insert(did_str.clone(), (resource_param.clone(), did));
-        did_str
+    // Resolve the resource to the id handed to the backend. A gateway
+    // child resource is `child/param`: resolve the `param` to its DID but
+    // KEEP the `child/` prefix so GatewayBackend::subscribe_data can route
+    // it to the child. The forwarded data points come back keyed by the
+    // child-local id (the gateway does not re-prefix them), so did_to_info
+    // is keyed on that local id, not the prefixed resource.
+    let did_str = if let Some((child, param)) = resource_param.split_once('/') {
+        if let Some(did) = did_store.resolve_did(param) {
+            let did_hex = format!("{:04X}", did);
+            did_to_info.insert(did_hex.clone(), (param.to_string(), did));
+            format!("{child}/{did_hex}")
+        } else {
+            did_to_info.insert(param.to_string(), (param.to_string(), 0));
+            format!("{child}/{param}")
+        }
+    } else if let Some(did) = did_store.resolve_did(&resource_param) {
+        let did_hex = format!("{:04X}", did);
+        did_to_info.insert(did_hex.clone(), (resource_param.clone(), did));
+        did_hex
     } else {
         did_to_info.insert(resource_param.clone(), (resource_param.clone(), 0));
         resource_param.clone()
@@ -165,10 +180,14 @@ pub async fn stream_subscription(
 }
 
 /// GET /vehicle/v1/components/:component_id/streams
-/// Stream data using query parameters (inline subscription)
+/// Stream data using query parameters (inline subscription).
+///
+/// DIRECT-COMPONENT-ONLY: parameters resolve against the addressed
+/// component's own backend.  Gateway-child streaming goes through the
+/// spec cyclic-subscription path (`POST .../cyclic-subscriptions`), not
+/// this inline streamer.
 ///
 /// Example: GET /vehicle/v1/components/engine_ecu/streams?parameters=engine_rpm&parameters=coolant_temp&rate_hz=10
-/// Gateway example: GET /vehicle/v1/components/vehicle_gateway/streams?parameters=vtx_ecm/coolant_temp&rate_hz=10
 pub async fn stream_data(
     State(state): State<AppState>,
     Path(component_id): Path<String>,
@@ -204,47 +223,6 @@ pub async fn stream_data(
     }
 
     let did_store = state.did_store_arc();
-
-    // Check if parameters have gateway prefix (e.g., "vtx_ecm/coolant_temp")
-    // If so, route to the child backend via the gateway's sub-entities
-    let first_param = &param_ids[0];
-    if let Some((child_backend_id, _child_param)) = first_param.split_once('/') {
-        // Gateway routing: get the child backend from gateway's sub-entities
-        let gateway_backend = state.get_backend(&component_id)?;
-        let child_backend = gateway_backend
-            .get_sub_entity(child_backend_id)
-            .await
-            .map_err(|_| {
-                ApiError::NotFound(format!("Sub-entity not found: {}", child_backend_id))
-            })?;
-
-        // Resolve all parameters for the child backend (strip prefix)
-        let mut dids: Vec<String> = Vec::new();
-        let mut did_to_info: HashMap<String, (String, u16)> = HashMap::new();
-
-        for param in &param_ids {
-            let (_, child_param_name) = param.split_once('/').unwrap_or(("", param));
-            if let Some(did) = did_store.resolve_did(child_param_name) {
-                let did_str = format!("{:04X}", did);
-                dids.push(did_str.clone());
-                did_to_info.insert(did_str, (child_param_name.to_string(), did));
-            } else {
-                dids.push(child_param_name.to_string());
-                did_to_info.insert(
-                    child_param_name.to_string(),
-                    (child_param_name.to_string(), 0),
-                );
-            }
-        }
-
-        // Subscribe to data via child backend
-        let receiver = child_backend
-            .subscribe_data(&dids, rate_hz)
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-        return create_sse_stream(receiver, did_to_info, did_store);
-    }
 
     // Regular component: direct access
     let backend = state.get_backend(&component_id)?;
