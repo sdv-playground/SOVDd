@@ -16,7 +16,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
-use sovd_api::{create_router, AppState};
+use sovd_api::{create_router, AppState, AuthConfig, AuthContext};
 use sovd_conv::DidStore;
 use sovd_gateway::GatewayBackend;
 use sovd_proxy::SovdProxyBackend;
@@ -117,6 +117,10 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting sovdd (SOVD Server Daemon)");
 
+    // Install the rustls crypto provider (ring) for in-process TLS. Harmless
+    // when TLS is unused; required before building any rustls server config.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Parse command-line arguments
     let args = parse_args();
 
@@ -150,19 +154,55 @@ async fn main() -> anyhow::Result<()> {
     // Per-component YAML entries take precedence if present.
     register_standard_dids(&did_store);
 
-    // Create the app state with DID store and output configs
-    let state = AppState::with_output_configs(backends, Arc::new(did_store), output_configs);
+    // Build the client-authentication context (JWT-bearer slice, ISO
+    // 17978-3 C-030/C-032). `[server.auth]` selects disabled (default —
+    // open surface for dev/mock) / static (dev token) / oidc (validate
+    // JWTs against trusted issuers' JWKS). See tasks/sovdd-auth-slice.md.
+    let auth_config = match args.config_path {
+        Some(ref path) => load_auth_config(path)?,
+        None => AuthConfig::default(),
+    };
+    let auth = AuthContext::from_config(auth_config)
+        .await
+        .map_err(|e| anyhow::anyhow!("auth config: {}", e))?;
+    if auth.is_open() {
+        tracing::warn!("Client authentication DISABLED (open surface) — set [server.auth] to enable");
+    } else {
+        tracing::info!("Client authentication enabled");
+    }
+
+    // Create the app state with DID store, output configs, and auth context
+    let state = AppState::with_output_configs(backends, Arc::new(did_store), output_configs)
+        .with_auth(Arc::new(auth));
 
     // Create the router
     let app = create_router(state);
 
     // Bind to address
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    tracing::info!("Listening on http://{}", addr);
 
-    // Run the server
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // Serve over TLS when `[server.tls]` is configured (rustls/ring), else
+    // plain HTTP (dev/sim, or when TLS is terminated by a fronting proxy).
+    let tls_config = match args.config_path {
+        Some(ref path) => load_tls_config(path)?,
+        None => None,
+    };
+    match tls_config {
+        Some(tls) => {
+            tracing::info!("Listening on https://{} (TLS, rustls)", addr);
+            let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert, &tls.key)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to load TLS cert/key: {}", e))?;
+            axum_server::bind_rustls(addr, rustls)
+                .serve(app.into_make_service())
+                .await?;
+        }
+        None => {
+            tracing::info!("Listening on http://{}", addr);
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            axum::serve(listener, app).await?;
+        }
+    }
 
     Ok(())
 }
@@ -225,6 +265,45 @@ fn load_did_definition_file(store: &mut DidStore, path: &Path) -> anyhow::Result
     }
 
     Ok(())
+}
+
+/// Parse the `[server.auth]` section for the JWT-bearer auth slice.
+/// Re-reads the config file (cheap; keeps `load_config_file` untouched).
+fn load_auth_config(path: &str) -> anyhow::Result<AuthConfig> {
+    let content = std::fs::read_to_string(path)?;
+    let config: toml::Value = toml::from_str(&content)?;
+    match config.get("server").and_then(|s| s.get("auth")) {
+        Some(auth) => Ok(auth.clone().try_into()?),
+        None => Ok(AuthConfig::default()),
+    }
+}
+
+/// In-process TLS settings parsed from `[server.tls]`.
+struct TlsConfig {
+    cert: String,
+    key: String,
+}
+
+/// Parse the optional `[server.tls]` section (PEM cert + key paths).
+/// `Ok(None)` ⇒ serve plain HTTP (dev/sim, or TLS terminated by a front).
+fn load_tls_config(path: &str) -> anyhow::Result<Option<TlsConfig>> {
+    let content = std::fs::read_to_string(path)?;
+    let config: toml::Value = toml::from_str(&content)?;
+    let Some(tls) = config.get("server").and_then(|s| s.get("tls")) else {
+        return Ok(None);
+    };
+    let cert = tls
+        .get("cert")
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| anyhow::anyhow!("[server.tls] missing 'cert' (path to PEM certificate)"))?;
+    let key = tls
+        .get("key")
+        .and_then(|k| k.as_str())
+        .ok_or_else(|| anyhow::anyhow!("[server.tls] missing 'key' (path to PEM private key)"))?;
+    Ok(Some(TlsConfig {
+        cert: cert.to_string(),
+        key: key.to_string(),
+    }))
 }
 
 /// Load configuration from TOML file

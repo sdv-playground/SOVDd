@@ -19,6 +19,10 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 toml.workspace = true
 
+# In-process TLS (rustls + ring provider — portable, no cmake/NASM)
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+
 [[bin]]
 name = "sovdd"
 path = "src/main.rs"

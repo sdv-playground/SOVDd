@@ -9,6 +9,7 @@ use sovd_conv::DidStore;
 use sovd_core::{DiagnosticBackend, OperationExecution};
 use sovd_uds::config::OutputConfig;
 
+use crate::auth::AuthContext;
 use crate::error::ApiError;
 use crate::handlers::subscriptions::SubscriptionManager;
 
@@ -283,6 +284,9 @@ pub struct AppState {
     pub updates: UpdatesStore,
     /// Tunable knobs for the `/updates` lifecycle.
     pub updates_config: Arc<UpdatesConfig>,
+    /// Client→SOVDd authentication context (JWT-bearer slice). Defaults to
+    /// disabled (open surface); set via [`AppState::with_auth`].
+    auth: Arc<AuthContext>,
 }
 
 impl AppState {
@@ -298,6 +302,7 @@ impl AppState {
             clear_data_status: ClearDataStatusStore::default(),
             updates: UpdatesStore::default(),
             updates_config: Arc::new(UpdatesConfig::default()),
+            auth: Arc::new(AuthContext::default()),
         }
     }
 
@@ -316,6 +321,7 @@ impl AppState {
             clear_data_status: ClearDataStatusStore::default(),
             updates: UpdatesStore::default(),
             updates_config: Arc::new(UpdatesConfig::default()),
+            auth: Arc::new(AuthContext::default()),
         }
     }
 
@@ -335,6 +341,7 @@ impl AppState {
             clear_data_status: ClearDataStatusStore::default(),
             updates: UpdatesStore::default(),
             updates_config: Arc::new(UpdatesConfig::default()),
+            auth: Arc::new(AuthContext::default()),
         }
     }
 
@@ -343,6 +350,18 @@ impl AppState {
     pub fn with_updates_config(mut self, config: UpdatesConfig) -> Self {
         self.updates_config = Arc::new(config);
         self
+    }
+
+    /// Attach the client-authentication context (JWT-bearer slice).
+    /// Builder-style consume + return.
+    pub fn with_auth(mut self, auth: Arc<AuthContext>) -> Self {
+        self.auth = auth;
+        self
+    }
+
+    /// The client-authentication context, read by the auth middleware.
+    pub fn auth(&self) -> &AuthContext {
+        &self.auth
     }
 
     /// Create AppState from a single backend (for simple single-entity servers)

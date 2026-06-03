@@ -1,11 +1,12 @@
 //! Component discovery handlers
 
 use axum::extract::{Path, State};
-use axum::Json;
+use axum::{Extension, Json};
 use serde::Serialize;
 
 use sovd_core::Capabilities;
 
+use crate::auth::ClientContext;
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -79,11 +80,23 @@ impl From<&Capabilities> for CapabilitiesResponse {
 }
 
 /// GET /vehicle/v1/components
-/// List all available components
-pub async fn list_components(State(state): State<AppState>) -> Json<ComponentsResponse> {
+/// List all available components.
+///
+/// C-031 non-leakage: when authentication is enabled, the listing is filtered
+/// to the components the client's scopes permit (no `ClientContext` ⇒ auth
+/// disabled ⇒ list everything).
+pub async fn list_components(
+    State(state): State<AppState>,
+    client: Option<Extension<ClientContext>>,
+) -> Json<ComponentsResponse> {
+    let client = client.map(|Extension(c)| c);
     let items: Vec<ComponentInfo> = state
         .backends()
         .iter()
+        .filter(|(id, _)| match &client {
+            Some(c) => c.can_access_component(id.as_str()),
+            None => true, // auth disabled ⇒ no filtering
+        })
         .map(|(id, backend)| {
             let info = backend.entity_info();
             ComponentInfo {

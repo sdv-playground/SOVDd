@@ -406,7 +406,7 @@ pub fn build_capability_doc(scope: Option<&str>) -> serde_json::Value {
             Some(p) => p,
             None => continue, // out of scope for this entity path
         };
-        let op = serde_json::json!({
+        let mut op = serde_json::json!({
             "summary": entry.summary,
             "responses": {
                 "default": {
@@ -419,6 +419,13 @@ pub fn build_capability_doc(scope: Option<&str>) -> serde_json::Value {
                 }
             }
         });
+        // Public resources (§5.4.4) override the global bearer requirement
+        // with an empty security set — they need no authentication.
+        if matches!(entry.path, "/health" | "/version-info" | "/vehicle/v1/docs") {
+            op.as_object_mut()
+                .unwrap()
+                .insert("security".to_string(), serde_json::json!([]));
+        }
         let path_entry = paths
             .entry(emitted)
             .or_insert_with(|| serde_json::json!({}));
@@ -447,7 +454,7 @@ pub fn build_capability_doc(scope: Option<&str>) -> serde_json::Value {
                     "type": "http",
                     "scheme": "bearer",
                     "bearerFormat": "JWT",
-                    "description": "ISO 17978-3 §5.4.4 — OAuth2/OIDC bearer token (RFC 6749/6750/8693) presented via the Authorization header. NOTE: token enforcement is a planned auth/TLS slice; this server does not yet validate tokens (tracked by C-030/031/032).",
+                    "description": "ISO 17978-3 §5.4.4 — bearer JWT in the Authorization header. When [server.auth] is configured, the server validates the token against trusted OIDC issuers (signature/aud/iss/exp) and authorizes per-component via `component:<id>` / `component:*` scopes; public resources (health, version-info, docs, .well-known) need none. Obtain a token from your OIDC provider's authorize/token endpoints (§7.23 — see the issuer's /.well-known/openid-configuration). C-030/031/032.",
                 },
             },
             "schemas": {

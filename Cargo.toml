@@ -78,6 +78,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Async utilities
 async-trait = "0.1"
 
+# Auth — JWT bearer validation (mirrors SOVD-security-helper)
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+
 # DoIP (Diagnostics over IP)
 # Using git versions to avoid dependency conflicts between crates.io versions
 doip-definitions = { git = "https://github.com/theswiftfox/doip-definitions.git", rev = "bdeab8c" }

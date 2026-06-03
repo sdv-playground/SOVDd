@@ -29,6 +29,8 @@ hex.workspace = true
 sha2.workspace = true
 crc32fast = "1.4"
 parking_lot.workspace = true
+jsonwebtoken.workspace = true
+reqwest.workspace = true
 
 [dev-dependencies]
 sovd-client.workspace = true

@@ -14,10 +14,12 @@
 //! let router = create_router(state);
 //! ```
 
+pub mod auth;
 pub mod error;
 pub mod handlers;
 pub mod state;
 
+pub use auth::{AuthConfig, AuthContext, AuthMode, ClientContext, IssuerConfig};
 pub use error::ApiError;
 pub use state::AppState;
 
@@ -471,8 +473,15 @@ pub fn create_router(state: AppState) -> Router {
         // plain text otherwise).
         .fallback(handlers::meta::not_found_fallback)
         .method_not_allowed_fallback(handlers::meta::method_not_allowed_fallback)
-        // Middleware
+        // Middleware (request order, outermost first: cors → trace → auth → body-limit)
         .layer(DefaultBodyLimit::disable()) // SOVD streaming uploads (ASAM SOVD chunked transfer)
+        // Client→SOVDd JWT-bearer auth (ISO 17978-3 C-030/C-032). Public
+        // resources + CORS preflight pass through; see `auth::require_auth`.
+        // No-op when `[server.auth]` is absent/disabled (open surface).
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_auth,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)
