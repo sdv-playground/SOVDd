@@ -76,18 +76,11 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/data/{param_id}",
             get(handlers::data::read_parameter).put(handlers::data::write_parameter),
         )
-        // Gateway data routes (nested path: child_id/param_id)
-        .route(
-            "/vehicle/v1/components/{component_id}/data/{child_id}/{child_param_id}",
-            get(handlers::data::read_gateway_parameter)
-                .put(handlers::data::write_gateway_parameter),
-        )
-        // Deep gateway data routes (3-level nesting: gw_id/child_id/param_id)
-        .route(
-            "/vehicle/v1/components/{component_id}/data/{gw_id}/{child_id}/{param_id}",
-            get(handlers::data::read_deep_gateway_parameter)
-                .put(handlers::data::write_deep_gateway_parameter),
-        )
+        // Child-ECU data behind a gateway is addressed via the sub-entity
+        // path (`/apps/{child}/data/{param}`), NOT a flat
+        // `/data/{child}/{param}` route.  The dedicated flat gateway
+        // routes were retired for C-021 (one canonical data-addressing
+        // path); see handlers::sub_entity.
         // Raw DID access via the spec `?raw=true` query on the standard
         // data parameter route (ISO 17978-3 §7.10). Hex DID strings like
         // "F405" resolve through DidStore the same as semantic names; raw

@@ -331,10 +331,10 @@ async fn test_ecu_read_vin_through_gateway() {
         .await
         .expect("Failed to setup test harness");
 
-    // Access ECU through gateway using prefixed parameter
+    // Access ECU through gateway using the sub-entity data path
     let vin = harness
         .client()
-        .read_data("vehicle_gateway", "vtx_ecm/vin")
+        .read_sub_entity_data("vehicle_gateway", "vtx_ecm", "vin")
         .await
         .expect("Failed to read VIN through gateway");
 
@@ -431,11 +431,11 @@ async fn test_gateway_routes_read_to_uds() {
         .await
         .expect("Failed to setup test harness");
 
-    // Read VIN THROUGH the gateway using prefixed parameter ID
-    // The gateway routes "vtx_ecm/vin" to the vtx_ecm backend
+    // Read VIN THROUGH the gateway using the sub-entity data path.
+    // The gateway resolves the "vtx_ecm" sub-entity and reads "vin".
     let vin = harness
         .client()
-        .read_data("vehicle_gateway", "vtx_ecm/vin")
+        .read_sub_entity_data("vehicle_gateway", "vtx_ecm", "vin")
         .await
         .expect("Failed to read VIN through gateway");
 
@@ -518,14 +518,14 @@ async fn test_read_multiple_public_parameters() {
         .await
         .expect("Failed to setup test harness");
 
-    // Read multiple public parameters through gateway with prefixed IDs
+    // Read multiple public parameters through the gateway via the
+    // sub-entity data path.
     let test_params = [("vin", 17), ("part_number", 16), ("serial_number", 11)];
 
     for (param_id, min_len) in test_params {
-        let prefixed = format!("vtx_ecm/{}", param_id);
         let result = harness
             .client()
-            .read_data("vehicle_gateway", &prefixed)
+            .read_sub_entity_data("vehicle_gateway", "vtx_ecm", param_id)
             .await
             .unwrap_or_else(|e| panic!("Failed to read {} through gateway: {}", param_id, e));
 
@@ -557,7 +557,7 @@ async fn test_read_numeric_parameters() {
     // Read coolant temp through gateway (public, uint8)
     let temp = harness
         .client()
-        .read_data("vehicle_gateway", "vtx_ecm/coolant_temp")
+        .read_sub_entity_data("vehicle_gateway", "vtx_ecm", "coolant_temp")
         .await
         .expect("Failed to read coolant_temp through gateway");
 
@@ -578,7 +578,7 @@ async fn test_read_numeric_parameters() {
     // Read vehicle speed through gateway (public, uint8)
     let speed = harness
         .client()
-        .read_data("vehicle_gateway", "vtx_ecm/vehicle_speed")
+        .read_sub_entity_data("vehicle_gateway", "vtx_ecm", "vehicle_speed")
         .await
         .expect("Failed to read vehicle_speed through gateway");
 
@@ -610,7 +610,7 @@ async fn test_write_parameter_through_gateway() {
 
     match harness
         .client()
-        .write_data("vehicle_gateway", "vtx_ecm/programming_date", new_date)
+        .write_sub_entity_data("vehicle_gateway", "vtx_ecm", "programming_date", new_date)
         .await
     {
         Ok(()) => {
@@ -745,88 +745,34 @@ async fn test_gateway_routes_parameter_read() {
         .await
         .expect("Failed to setup test harness");
 
-    // Read multiple parameters through gateway with prefixed IDs
-    let params_to_test = [
-        "vtx_ecm/vin",
-        "vtx_ecm/coolant_temp",
-        "vtx_ecm/vehicle_speed",
-    ];
-
-    for param_id in params_to_test {
-        let result = harness
-            .client()
-            .read_data("vehicle_gateway", param_id)
-            .await
-            .unwrap_or_else(|e| panic!("Failed to read {} through gateway: {}", param_id, e));
-
-        eprintln!("{} (via gateway): {:?}", param_id, result);
-    }
-}
-
-/// Test gateway read with actual nested path segments (not URL-encoded)
-/// This tests the route: /data/:child_id/:child_param_id
-#[tokio::test]
-#[serial_test::serial]
-async fn test_gateway_routes_nested_path_read() {
-    require_vcan0!();
-    let harness = GatewayTestHarness::new()
-        .await
-        .expect("Failed to setup test harness");
-
-    // Read parameters through gateway using actual nested path (not URL-encoded)
-    // This tests the /data/:child_id/:child_param_id route
+    // Read multiple parameters through the gateway via the sub-entity
+    // data path.
     let params_to_test = [
         ("vtx_ecm", "vin"),
         ("vtx_ecm", "coolant_temp"),
         ("vtx_ecm", "vehicle_speed"),
     ];
 
-    for (child_id, param_name) in params_to_test {
-        // Use actual path segments, not URL-encoded
-        let (status, result) = harness
-            .get_with_status(&format!(
-                "/vehicle/v1/components/vehicle_gateway/data/{}/{}",
-                child_id, param_name
-            ))
+    for (child_id, param_id) in params_to_test {
+        let result = harness
+            .client()
+            .read_sub_entity_data("vehicle_gateway", child_id, param_id)
             .await
             .unwrap_or_else(|e| {
                 panic!(
-                    "Failed to read {}/{} through gateway nested path: {}",
-                    child_id, param_name, e
+                    "Failed to read {}/{} through gateway: {}",
+                    child_id, param_id, e
                 )
             });
 
-        assert_eq!(
-            status, 200,
-            "Expected 200 OK for {}/{}, got {} with body: {:?}",
-            child_id, param_name, status, result
-        );
-
-        eprintln!(
-            "{}/{} (via gateway nested path): {}",
-            child_id,
-            param_name,
-            serde_json::to_string_pretty(&result).unwrap()
-        );
-
-        assert!(
-            result.get("value").is_some(),
-            "{}/{} should have value",
-            child_id,
-            param_name
-        );
-        assert!(
-            result.get("id").is_some(),
-            "{}/{} should have id",
-            child_id,
-            param_name
-        );
-
-        // Verify the ID is prefixed with the child component
-        let id = result["id"].as_str().unwrap();
-        assert!(id.contains("/"), "ID should be prefixed: {}", id);
+        eprintln!("{}/{} (via gateway): {:?}", child_id, param_id, result);
     }
 }
+
+// `test_gateway_routes_nested_path_read` was removed for C-021: it
+// exercised the retired flat `/data/{child}/{param}` gateway route.
+// Child-parameter access via the gateway is covered by
+// `test_child_parameters_via_sub_entity` below (sub-entity path).
 
 #[tokio::test]
 #[serial_test::serial]
@@ -849,10 +795,10 @@ async fn test_child_parameters_via_sub_entity() {
         "Gateway /data should not contain child-prefixed parameters"
     );
 
-    // Individual child parameter reads via prefixed routing still work
+    // Individual child parameter reads via the sub-entity path still work
     let vin = harness
         .client()
-        .read_data("vehicle_gateway", "vtx_ecm/vin")
+        .read_sub_entity_data("vehicle_gateway", "vtx_ecm", "vin")
         .await
         .expect("Failed to read vtx_ecm/vin through gateway");
 
@@ -981,7 +927,7 @@ async fn test_full_dual_layer_flow() {
     eprintln!("\nStep 4: Read VIN through gateway");
     let vin = harness
         .client()
-        .read_data("vehicle_gateway", "vtx_ecm/vin")
+        .read_sub_entity_data("vehicle_gateway", "vtx_ecm", "vin")
         .await
         .expect("Failed to read VIN through gateway");
     eprintln!("  VIN: {}", vin.value);
@@ -1012,14 +958,14 @@ async fn test_full_dual_layer_flow() {
         .expect("Failed to execute operation through gateway");
     eprintln!("  Operation completed: {:?}", op_result.status);
 
-    // Step 7: Verify VIN read through gateway nested path
-    eprintln!("\nStep 7: Verify gateway nested path access");
+    // Step 7: Verify VIN read through the gateway sub-entity path
+    eprintln!("\nStep 7: Verify gateway sub-entity path access");
     let (status, nested_vin) = harness
-        .get_with_status("/vehicle/v1/components/vehicle_gateway/data/vtx_ecm/vin")
+        .get_with_status("/vehicle/v1/components/vehicle_gateway/apps/vtx_ecm/data/vin")
         .await
-        .expect("Failed to read VIN via nested path");
+        .expect("Failed to read VIN via sub-entity path");
     eprintln!(
-        "  Nested path VIN (status {}): {}",
+        "  Sub-entity path VIN (status {}): {}",
         status, nested_vin["value"]
     );
 

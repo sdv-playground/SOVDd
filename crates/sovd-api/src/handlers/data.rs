@@ -226,51 +226,6 @@ pub async fn write_parameter(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-/// GET /vehicle/v1/components/:component_id/data/:child_id/:child_param_id
-/// Read a parameter through a gateway (handles nested path)
-pub async fn read_gateway_parameter(
-    State(state): State<AppState>,
-    Path((component_id, child_id, child_param_id)): Path<(String, String, String)>,
-    Query(query): Query<ReadQuery>,
-) -> Result<Json<DidResponse>, ApiError> {
-    // Combine into prefixed format and delegate to internal handler
-    let prefixed_param = format!("{}/{}", child_id, child_param_id);
-    read_did_internal(&state, &component_id, &prefixed_param, query.raw).await
-}
-
-/// PUT /vehicle/v1/components/:component_id/data/:child_id/:child_param_id — 204.
-pub async fn write_gateway_parameter(
-    State(state): State<AppState>,
-    Path((component_id, child_id, child_param_id)): Path<(String, String, String)>,
-    Json(request): Json<WriteDidRequest>,
-) -> Result<axum::http::StatusCode, ApiError> {
-    let prefixed_param = format!("{}/{}", child_id, child_param_id);
-    let _ = write_did_internal(&state, &component_id, &prefixed_param, request).await?;
-    Ok(axum::http::StatusCode::NO_CONTENT)
-}
-
-/// GET /vehicle/v1/components/:component_id/data/:gw_id/:child_id/:param_id
-/// Read a parameter through a deeply nested gateway (e.g., vehicle_gw → uds_gw → engine_ecu → param)
-pub async fn read_deep_gateway_parameter(
-    State(state): State<AppState>,
-    Path((component_id, gw_id, child_id, child_param_id)): Path<(String, String, String, String)>,
-    Query(query): Query<ReadQuery>,
-) -> Result<Json<DidResponse>, ApiError> {
-    let prefixed_param = format!("{}/{}/{}", gw_id, child_id, child_param_id);
-    read_did_internal(&state, &component_id, &prefixed_param, query.raw).await
-}
-
-/// PUT /vehicle/v1/components/:component_id/data/:gw_id/:child_id/:param_id — 204.
-pub async fn write_deep_gateway_parameter(
-    State(state): State<AppState>,
-    Path((component_id, gw_id, child_id, child_param_id)): Path<(String, String, String, String)>,
-    Json(request): Json<WriteDidRequest>,
-) -> Result<axum::http::StatusCode, ApiError> {
-    let prefixed_param = format!("{}/{}/{}", gw_id, child_id, child_param_id);
-    let _ = write_did_internal(&state, &component_id, &prefixed_param, request).await?;
-    Ok(axum::http::StatusCode::NO_CONTENT)
-}
-
 // =============================================================================
 // Internal Implementation
 // =============================================================================
@@ -284,149 +239,10 @@ async fn read_did_internal(
     let backend = state.get_backend(component_id)?;
     let did_store = state.did_store();
 
-    // Check if this is a gateway with a prefixed parameter (e.g., "vtx_ecm/vin")
-    // Gateway parameters use format: "{backend_id}/{param_id}"
-    if let Some((child_backend_id, child_param_id)) = param_id.split_once('/') {
-        // Get the child backend from the gateway's sub-entities
-        if let Ok(child_backend) = backend.get_sub_entity(child_backend_id).await {
-            // Route to the child backend via DidStore
-            let child_did_u16 = match did_store.resolve_did(child_param_id) {
-                Some(did) => did,
-                None => {
-                    // DID not in local store — fall back to read_data() on child
-                    let values = child_backend
-                        .read_data(&[child_param_id.to_string()])
-                        .await?;
-
-                    if let Some(dv) = values.into_iter().next() {
-                        let raw = dv.raw.clone().unwrap_or_default();
-                        let length = dv.length.unwrap_or(0);
-                        let has_raw = !raw.is_empty();
-                        return Ok(Json(DidResponse {
-                            id: format!("{}/{}", child_backend_id, child_param_id),
-                            did: dv.did.unwrap_or_default(),
-                            value: if raw_only && has_raw {
-                                serde_json::json!(raw)
-                            } else {
-                                dv.value
-                            },
-                            unit: if raw_only { None } else { dv.unit },
-                            raw,
-                            length,
-                            converted: !raw_only && has_raw,
-                            timestamp: Utc::now().to_rfc3339(),
-                        }));
-                    }
-
-                    return Err(ApiError::BadRequest(format!(
-                        "Unknown parameter: {}",
-                        child_param_id
-                    )));
-                }
-            };
-
-            // Get the definition for this specific child component
-            let child_def = did_store.get_for_component(child_did_u16, child_backend_id);
-            let semantic_id = child_def
-                .as_ref()
-                .and_then(|def| def.id.clone())
-                .unwrap_or_else(|| child_param_id.to_string());
-
-            if let Some(def) = child_def {
-                // Local DidStore has a definition — read raw bytes and decode locally
-                let raw_bytes = child_backend.read_raw_did(child_did_u16).await?;
-
-                if raw_only {
-                    return Ok(Json(DidResponse {
-                        id: format!("{}/{}", child_backend_id, semantic_id),
-                        did: format_did(child_did_u16),
-                        value: serde_json::json!(hex::encode(&raw_bytes)),
-                        unit: None,
-                        raw: hex::encode(&raw_bytes),
-                        length: raw_bytes.len(),
-                        converted: false,
-                        timestamp: Utc::now().to_rfc3339(),
-                    }));
-                }
-
-                let (value, unit, converted) = match did_store.decode(child_did_u16, &raw_bytes) {
-                    Ok(decoded) => (decoded, def.unit, true),
-                    Err(_) => (serde_json::json!(hex::encode(&raw_bytes)), None, false),
-                };
-
-                return Ok(Json(DidResponse {
-                    id: format!("{}/{}", child_backend_id, semantic_id),
-                    did: format_did(child_did_u16),
-                    value,
-                    unit,
-                    raw: hex::encode(&raw_bytes),
-                    length: raw_bytes.len(),
-                    converted,
-                    timestamp: Utc::now().to_rfc3339(),
-                }));
-            } else {
-                // No local definition — fall back to read_data() on the child backend.
-                // For proxy backends this returns already-decoded values from upstream.
-                let values = child_backend
-                    .read_data(&[child_param_id.to_string()])
-                    .await?;
-
-                if let Some(dv) = values.into_iter().next() {
-                    let raw = dv.raw.clone().unwrap_or_default();
-                    let length = dv.length.unwrap_or(0);
-                    let has_raw = !raw.is_empty();
-                    return Ok(Json(DidResponse {
-                        id: format!("{}/{}", child_backend_id, semantic_id),
-                        did: dv.did.unwrap_or_else(|| format_did(child_did_u16)),
-                        value: if raw_only && has_raw {
-                            serde_json::json!(raw)
-                        } else {
-                            dv.value
-                        },
-                        unit: if raw_only { None } else { dv.unit },
-                        raw,
-                        length,
-                        converted: !raw_only && has_raw,
-                        timestamp: Utc::now().to_rfc3339(),
-                    }));
-                }
-
-                return Err(ApiError::NotFound(format!(
-                    "Parameter not found: {}",
-                    child_param_id
-                )));
-            }
-        }
-
-        // Child not in top-level backends -- route through the gateway backend.
-        // This handles proxy backends where children are inside a GatewayBackend.
-        let values = backend.read_data(&[param_id.to_string()]).await?;
-
-        if let Some(dv) = values.into_iter().next() {
-            let raw = dv.raw.clone().unwrap_or_default();
-            let length = dv.length.unwrap_or(0);
-            let has_raw = !raw.is_empty();
-            return Ok(Json(DidResponse {
-                id: param_id.to_string(),
-                did: dv.did.unwrap_or_default(),
-                value: if raw_only && has_raw {
-                    serde_json::json!(raw)
-                } else {
-                    dv.value
-                },
-                unit: if raw_only { None } else { dv.unit },
-                raw,
-                length,
-                converted: !raw_only && has_raw,
-                timestamp: Utc::now().to_rfc3339(),
-            }));
-        }
-
-        return Err(ApiError::NotFound(format!(
-            "Parameter not found: {}",
-            param_id
-        )));
-    }
+    // Child-ECU parameters behind a gateway are addressed via the
+    // sub-entity path (`/apps/{child}/data/{param}` → handlers::sub_entity),
+    // not a slashed `param_id` here.  The flat gateway data-routing branch
+    // was retired for C-021 (single canonical data-addressing path).
 
     // Resolve parameter: try semantic name first, then DID hex format
     // This allows SOVD-compliant names like "coolant_temperature" while
@@ -545,23 +361,9 @@ async fn write_did_internal(
     let backend = state.get_backend(component_id)?;
     let did_store = state.did_store();
 
-    // Check if this is a gateway with a prefixed parameter
-    if param_id.contains('/') {
-        // Try gateway routing: write through the backend's write_data
-        let data = convert_value_to_bytes(&request)?;
-        backend.write_data(param_id, &data).await?;
-
-        return Ok(Json(DidResponse {
-            id: param_id.to_string(),
-            did: String::new(),
-            value: request.value,
-            unit: None,
-            raw: hex::encode(&data),
-            length: data.len(),
-            converted: false,
-            timestamp: Utc::now().to_rfc3339(),
-        }));
-    }
+    // Child-ECU writes behind a gateway are addressed via the sub-entity
+    // path (`/apps/{child}/data/{param}` → handlers::sub_entity), not a
+    // slashed `param_id` here.  Flat gateway routing retired for C-021.
 
     // Resolve parameter: try semantic name first, then DID hex format
     let did_u16 = did_store

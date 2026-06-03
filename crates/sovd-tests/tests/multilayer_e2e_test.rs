@@ -744,12 +744,14 @@ async fn test_read_ecu_param_through_full_chain() {
         .await
         .expect("Failed to setup test harness");
 
-    // Read vortex_engine/vtx_vx500/boost_pressure through vehicle gateway
+    // Read boost_pressure through the vehicle gateway via the sub-entity
+    // data path.  The nested app path (vortex_engine → vtx_vx500) is a
+    // single percent-encoded `{app_id}` segment that resolve() walks.
     // Vehicle GW → example-app → sub-entity → proxy → UDS GW → example-ecu via CAN
     let result = harness
         .get(
             VEHICLE_GW_PORT,
-            "/vehicle/v1/components/vehicle_gateway/data/vortex_engine%2Fvtx_vx500%2Fboost_pressure",
+            "/vehicle/v1/components/vehicle_gateway/apps/vortex_engine%2Fvtx_vx500/data/boost_pressure",
         )
         .await
         .expect("Failed to read boost_pressure through full chain");
@@ -777,12 +779,13 @@ async fn test_raw_read_through_full_chain() {
         .await
         .expect("Failed to setup test harness");
 
-    // Read boost_pressure with ?raw=true through the full chain
+    // Read boost_pressure with ?raw=true through the full chain via the
+    // sub-entity data path (nested app path percent-encoded).
     // Vehicle GW → example-app → sub-entity → proxy → UDS GW → example-ecu via CAN
     let result = harness
         .get(
             VEHICLE_GW_PORT,
-            "/vehicle/v1/components/vehicle_gateway/data/vortex_engine%2Fvtx_vx500%2Fboost_pressure?raw=true",
+            "/vehicle/v1/components/vehicle_gateway/apps/vortex_engine%2Fvtx_vx500/data/boost_pressure?raw=true",
         )
         .await
         .expect("Failed to raw-read boost_pressure through full chain");
@@ -1084,7 +1087,7 @@ async fn test_full_multilayer_flow() {
     let bp = harness
         .get(
             VEHICLE_GW_PORT,
-            "/vehicle/v1/components/vehicle_gateway/data/vortex_engine%2Fvtx_vx500%2Fboost_pressure",
+            "/vehicle/v1/components/vehicle_gateway/apps/vortex_engine%2Fvtx_vx500/data/boost_pressure",
         )
         .await
         .expect("Failed to read boost_pressure");
