@@ -44,9 +44,11 @@ pub fn create_router(state: AppState) -> Router {
         // path across all API editions) and lists every version this
         // server serves.  C-005 mandatory.
         .route("/version-info", get(handlers::meta::version_info))
-        // Spec §7.5 — capability description (online OpenAPI doc)
-        // scoped to the entity path it's read from.  Minimal stub
-        // today; full path-walking emitter tracked separately.
+        // Spec §7.5 — capability description (online OpenAPI doc).
+        // This route serves the GLOBAL doc (every path).  Per-entity
+        // scoped `{path}/docs` (C-063) is served by the router fallback
+        // (`not_found_fallback`), since axum's `{*wildcard}` can't be a
+        // non-final segment to express `/{*path}/docs` as a real route.
         .route(
             "/vehicle/v1/docs",
             get(handlers::meta::capability_description),

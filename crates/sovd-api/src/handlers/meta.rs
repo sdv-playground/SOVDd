@@ -5,6 +5,7 @@
 //! is mounted at `/version-info` not `/vehicle/v1/version-info`.
 
 use axum::http::{StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
@@ -40,10 +41,34 @@ pub async fn version_info() -> Json<VersionInfoResponse> {
     })
 }
 
-/// Router fallback for unknown paths — emit `GenericError` with the
-/// spec-conforming shape instead of axum's plain-text default.
-pub async fn not_found_fallback(uri: Uri) -> ApiError {
-    ApiError::NotFound(format!("No resource at {}", uri.path()))
+/// Router fallback — dual role.
+///
+/// 1. **Scoped capability description** (ISO 17978-3 §6.3.3/7.5, C-063):
+///    any `GET {entity-path}/docs` at arbitrary depth returns `200` with
+///    an OpenAPI 3.1.0 document whose `paths` are scoped to that entity
+///    path.  This is handled here in the fallback rather than as a real
+///    route because axum's `{*wildcard}` must be the final path segment,
+///    so a `/{*path}/docs` route is inexpressible.  The global
+///    `/vehicle/v1/docs` is a real route and never reaches this fallback.
+///    Scope is computed purely by path-template matching — entity
+///    existence is not validated, and an empty scope still yields a valid
+///    OpenAPI doc with empty `paths` (never a 404).
+///
+/// 2. **Spec-conforming 404** for everything else — emit `GenericError`
+///    with the spec shape instead of axum's plain-text default.
+pub async fn not_found_fallback(uri: Uri) -> Response {
+    let path = uri.path();
+    if let Some(entity) = path.strip_suffix("/docs") {
+        // Strip a trailing slash if the entity itself ended with one
+        // (e.g. `/vehicle/v1/components/foo//docs` is unusual but cheap
+        // to tolerate).  Require a non-empty entity so a bare `/docs`
+        // request still 404s rather than aliasing the global doc.
+        let entity = entity.strip_suffix('/').unwrap_or(entity);
+        if !entity.is_empty() {
+            return Json(build_capability_doc(Some(entity))).into_response();
+        }
+    }
+    ApiError::NotFound(format!("No resource at {}", path)).into_response()
 }
 
 /// Router fallback for matched paths with disallowed methods.
@@ -336,14 +361,51 @@ const PATHS: &[PathEntry] = &[
 
 /// GET /vehicle/v1/docs — capability description (§7.5).
 ///
-/// Today this is a curated OpenAPI 3.1.0 document built from the
-/// `PATHS` table above + a small set of reusable schemas
-/// (`GenericError`, `Fault`, `OperationExecution`, `CyclicSubscription`).
-/// A full path-walker that introspects the axum router is a TODO —
-/// axum 0.8 doesn't expose its routing table.
+/// Curated OpenAPI 3.1.0 document built from the `PATHS` table above +
+/// a small set of reusable schemas (`GenericError`, `Fault`,
+/// `OperationExecution`, `CyclicSubscription`).  This route serves the
+/// *global* doc (every path); per-entity scoped docs are served by
+/// [`not_found_fallback`] on `{entity}/docs`.  A full path-walker that
+/// introspects the axum router is a TODO — axum 0.8 doesn't expose its
+/// routing table.
 pub async fn capability_description() -> Json<serde_json::Value> {
+    Json(build_capability_doc(None))
+}
+
+/// Build the OpenAPI 3.1.0 capability description (§7.5, C-063).
+///
+/// `scope == None` → the global document: every entry in `PATHS`.
+///
+/// `scope == Some(entity_path)` → the document scoped to that entity
+/// path (e.g. `/vehicle/v1/components/vtx_ecm`).  Only `PATHS` whose
+/// template is *at or under* that entity path are emitted, with the
+/// concrete ids substituted in for the matched prefix.  The envelope
+/// (`openapi`/`info`/`servers`/`components`) is identical in both modes.
+///
+/// ## Scoping algorithm
+///
+/// Split `entity_path` into segments `E`.  For each `PathEntry`, split
+/// its template into segments `T`.  The entry is in-scope iff
+/// `T.len() >= E.len()` and for every `i in 0..E.len()`, `T[i] == E[i]`
+/// **or** `T[i]` is a `{param}` placeholder.  The emitted path is the
+/// concrete `E[..]` prefix joined with the template tail `T[E.len()..]`
+/// (placeholders in the tail are preserved).  E.g. template
+/// `/vehicle/v1/components/{component_id}/data/{param_id}` scoped to
+/// `/vehicle/v1/components/vtx_ecm` emits
+/// `/vehicle/v1/components/vtx_ecm/data/{param_id}`.
+pub fn build_capability_doc(scope: Option<&str>) -> serde_json::Value {
+    // Pre-split the requested entity path (if any) into non-empty
+    // segments.  Leading/trailing slashes drop out cleanly.
+    let scope_segs: Vec<&str> = scope
+        .map(|s| s.split('/').filter(|seg| !seg.is_empty()).collect())
+        .unwrap_or_default();
+
     let mut paths = serde_json::Map::new();
     for entry in PATHS {
+        let emitted = match emit_scoped_path(entry.path, &scope_segs) {
+            Some(p) => p,
+            None => continue, // out of scope for this entity path
+        };
         let op = serde_json::json!({
             "summary": entry.summary,
             "responses": {
@@ -358,7 +420,7 @@ pub async fn capability_description() -> Json<serde_json::Value> {
             }
         });
         let path_entry = paths
-            .entry(entry.path.to_string())
+            .entry(emitted)
             .or_insert_with(|| serde_json::json!({}));
         path_entry
             .as_object_mut()
@@ -366,7 +428,7 @@ pub async fn capability_description() -> Json<serde_json::Value> {
             .insert(entry.method.to_ascii_lowercase(), op);
     }
 
-    Json(serde_json::json!({
+    serde_json::json!({
         "openapi": "3.1.0",
         "info": {
             "title": "SOVDd",
@@ -458,7 +520,45 @@ pub async fn capability_description() -> Json<serde_json::Value> {
                 }
             }
         }
-    }))
+    })
+}
+
+/// Compute the emitted OpenAPI path for `template` under `scope_segs`.
+///
+/// Returns `Some(path)` if the template is in-scope per the algorithm
+/// documented on [`build_capability_doc`], or `None` if it's out of
+/// scope.  When `scope_segs` is empty (global doc) every template is in
+/// scope and emitted verbatim.
+fn emit_scoped_path(template: &str, scope_segs: &[&str]) -> Option<String> {
+    if scope_segs.is_empty() {
+        // Global doc — emit the template verbatim (today's behaviour).
+        return Some(template.to_string());
+    }
+    let tmpl_segs: Vec<&str> = template.split('/').filter(|s| !s.is_empty()).collect();
+    // The template must be at least as deep as the entity path …
+    if tmpl_segs.len() < scope_segs.len() {
+        return None;
+    }
+    // … and every prefix segment must match literally or be a `{param}`.
+    for (i, want) in scope_segs.iter().enumerate() {
+        let have = tmpl_segs[i];
+        let is_placeholder = have.starts_with('{') && have.ends_with('}');
+        if !is_placeholder && have != *want {
+            return None;
+        }
+    }
+    // Emit: concrete entity prefix + the template tail (placeholders in
+    // the tail are preserved verbatim).
+    let mut out = String::new();
+    for seg in scope_segs {
+        out.push('/');
+        out.push_str(seg);
+    }
+    for seg in &tmpl_segs[scope_segs.len()..] {
+        out.push('/');
+        out.push_str(seg);
+    }
+    Some(out)
 }
 
 /// `GET /.well-known/sovd-extensions` — discovery doc listing the

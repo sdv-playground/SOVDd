@@ -733,3 +733,106 @@ async fn executions_wire_is_gone() {
         "POST /executions should 404 after Phase E retirement (axum strips the route)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// C-063 — scoped online capability description ({path}/docs)
+// ISO 17978-3 §6.3.3/7.5
+// ---------------------------------------------------------------------------
+
+/// HTTP GET helper for the docs tests.
+async fn get_json(server: &TestServer, path: &str) -> (reqwest::StatusCode, Value) {
+    let url = format!("{}{}", server.base_url(), path);
+    let resp = http().get(url).send().await.expect("get");
+    let status = resp.status();
+    let body = resp.json().await.expect("json body");
+    (status, body)
+}
+
+/// C-063: `GET {entity}/docs` returns 200 with an OpenAPI 3.1.0 doc whose
+/// `paths` are scoped to that entity path, and is a strict subset of the
+/// global `/vehicle/v1/docs`.
+#[tokio::test]
+async fn scoped_docs_are_path_scoped_subset_of_global() {
+    let (server, _backend) = spawn_with("singleshot").await;
+
+    // Global doc — still 200 with every path (unchanged behaviour).
+    let (g_status, global) = get_json(&server, "/vehicle/v1/docs").await;
+    assert_eq!(g_status, reqwest::StatusCode::OK);
+    assert_eq!(global["openapi"], "3.1.0");
+    let global_paths = global["paths"].as_object().expect("global paths object");
+    assert!(!global_paths.is_empty(), "global doc must list paths");
+
+    // Scoped doc — note vtx_ecm is NOT a registered backend; scoping is
+    // purely by path-template match, existence is not validated (C-063).
+    let scope = "/vehicle/v1/components/vtx_ecm";
+    let (s_status, scoped) = get_json(&server, &format!("{scope}/docs")).await;
+    assert_eq!(s_status, reqwest::StatusCode::OK);
+    assert_eq!(scoped["openapi"], "3.1.0");
+    assert!(
+        scoped["info"].get("x-sovd-version").is_some(),
+        "info.x-sovd-version must be present"
+    );
+
+    let scoped_paths = scoped["paths"].as_object().expect("scoped paths object");
+    assert!(
+        !scoped_paths.is_empty(),
+        "scoped doc must have a non-empty paths object"
+    );
+
+    // Every emitted path is under the entity prefix …
+    for key in scoped_paths.keys() {
+        assert!(
+            key.starts_with(scope),
+            "scoped path {key:?} must start with {scope:?}"
+        );
+    }
+    // … and it's a strict subset of the global path set (fewer entries,
+    // and the global doc carries server-level paths like /health that a
+    // component-scoped doc must not).
+    assert!(
+        scoped_paths.len() < global_paths.len(),
+        "scoped paths ({}) should be fewer than global ({})",
+        scoped_paths.len(),
+        global_paths.len()
+    );
+    assert!(
+        !scoped_paths.contains_key("/health"),
+        "scoped component doc must not include server-level /health"
+    );
+    // A representative concrete substitution: the data sub-resource
+    // template keeps its tail placeholder but pins the component id.
+    assert!(
+        scoped_paths.contains_key("/vehicle/v1/components/vtx_ecm/data/{param_id}"),
+        "expected concrete-id + tail-placeholder path; got keys: {:?}",
+        scoped_paths.keys().collect::<Vec<_>>()
+    );
+}
+
+/// Unit-level check of the scoping builder independent of HTTP, asserting
+/// the prefix invariant and that scoping strictly narrows the path set.
+#[test]
+fn build_capability_doc_scopes_to_component_prefix() {
+    use sovd_api::handlers::meta::build_capability_doc;
+
+    let global = build_capability_doc(None);
+    let global_paths = global["paths"].as_object().unwrap();
+
+    let scope = "/vehicle/v1/components/vtx_ecm";
+    let scoped = build_capability_doc(Some(scope));
+    assert_eq!(scoped["openapi"], "3.1.0");
+    let scoped_paths = scoped["paths"].as_object().unwrap();
+
+    assert!(!scoped_paths.is_empty());
+    assert!(scoped_paths.len() < global_paths.len());
+    for key in scoped_paths.keys() {
+        assert!(key.starts_with(scope), "{key:?} not under {scope:?}");
+    }
+    // Templated tail is preserved; matched prefix is concrete.
+    assert!(scoped_paths.contains_key("/vehicle/v1/components/vtx_ecm/faults/{fault_id}"));
+
+    // An entity path no template matches yields a valid-but-empty paths
+    // object, never a panic / missing envelope.
+    let empty = build_capability_doc(Some("/no/such/entity/at/all"));
+    assert_eq!(empty["openapi"], "3.1.0");
+    assert!(empty["paths"].as_object().unwrap().is_empty());
+}
