@@ -96,7 +96,9 @@ pub async fn delete_configuration_one(
     Path((component_id, _configuration_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     require_component(&state, &component_id)?;
-    Ok(StatusCode::NO_CONTENT)
+    Err(ApiError::NotImplemented(
+        "configurations.reset-one not yet wired to a backend".into(),
+    ))
 }
 
 pub async fn reset_configurations(
