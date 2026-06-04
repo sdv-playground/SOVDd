@@ -568,6 +568,26 @@ pub trait DiagnosticBackend: Send + Sync {
         ))
     }
 
+    /// Describe an update package for the ISO 17978-3 §7.18.3 `/updates`
+    /// catalog (Table 261 detail body).
+    ///
+    /// Invoked lazily on `GET /updates/{id}` — by which point all bulk-data
+    /// parts (including the `"manifest"` part) have been uploaded, so a
+    /// package-format-aware backend (e.g. SUIT/vm-mgr) can re-read the staged
+    /// manifest via the part `file_id`s and fill in `update_name`,
+    /// `affected_components`, `size`, etc.
+    ///
+    /// The default impl is format-agnostic: it builds the descriptor from
+    /// what the client declared in the register body plus derivable values
+    /// (`size` summed from uploaded parts). Override to enrich from a parsed
+    /// manifest, starting from [`default_descriptor_from_context`] as the base.
+    async fn describe_update_package(
+        &self,
+        ctx: &UpdatePackageContext<'_>,
+    ) -> BackendResult<UpdatePackageDescriptor> {
+        Ok(default_descriptor_from_context(ctx))
+    }
+
     // =========================================================================
     // Package Management (for async flash flow)
     // =========================================================================
@@ -899,4 +919,113 @@ pub struct SoftwareInfo {
     /// Additional version details
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
+}
+
+/// ISO 17978-3 §7.18.3 Table 261 — detail body for one update package
+/// (`GET /updates/{update-package-id}`).
+///
+/// Mandatory fields: `id`, `update_name`, `size`. Everything else is optional
+/// and omitted from the wire when `None`/empty.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UpdatePackageDescriptor {
+    /// Identifier for the update package (Table 261 `id`).
+    pub id: String,
+    /// Human-readable name of the update.
+    pub update_name: String,
+    /// Download size in KILOBYTES (Table 261 — "defined in kilo bytes").
+    pub size: u64,
+    /// Whether the package can be installed automatedly. Table 261 defaults
+    /// this to `false` when absent; omitted here when not known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub automated: Option<bool>,
+    /// Origins (Table 254) for which the package is applicable. Empty = any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub origin: Vec<String>,
+    /// Release notes (free text or a URI).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// Estimated time (seconds) the vehicle is unavailable during install.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<u64>,
+    /// Preconditions to install the update (e.g. "parking").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preconditions: Option<String>,
+    /// Components/apps added by the update (entity-path uri-references).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added_components: Vec<String>,
+    /// Components/apps removed by the update.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_components: Vec<String>,
+    /// Components/apps whose version changed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub updated_components: Vec<String>,
+    /// Components/apps with changed user-perceived behaviour.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affected_components: Vec<String>,
+}
+
+/// One uploaded bulk-data part, as seen by [`DiagnosticBackend::describe_update_package`].
+#[derive(Debug, Clone, Copy)]
+pub struct UpdatePartRef<'a> {
+    /// The part identifier (e.g. `"manifest"` or a payload uri).
+    pub part_id: &'a str,
+    /// Uploaded size in bytes.
+    pub size: u64,
+    /// SHA-256 recorded at upload.
+    pub sha256: &'a str,
+    /// Backend handle from `receive_package_stream` (re-read key).
+    pub file_id: &'a str,
+}
+
+/// Read-model the API layer hands to [`DiagnosticBackend::describe_update_package`].
+///
+/// Carries what the SOVD `/updates` layer knows about a registered update —
+/// the stable package id, the addressed component, the client's register body
+/// (verbatim), and the uploaded parts — so a backend can build the Table 261
+/// descriptor without sovd-core depending on the API layer's update store.
+#[derive(Debug, Clone, Copy)]
+pub struct UpdatePackageContext<'a> {
+    /// Stable package id (URL key / Table 261 `id`).
+    pub id: &'a str,
+    /// The component the update targets (entity-path leaf).
+    pub component_id: &'a str,
+    /// What the client declared in the `POST /updates` body, verbatim.
+    pub register_body: Option<&'a serde_json::Value>,
+    /// Bulk-data parts uploaded so far.
+    pub parts: &'a [UpdatePartRef<'a>],
+}
+
+/// Default [`UpdatePackageDescriptor`] for a context: format-agnostic, built
+/// from client-declared fields in the register body plus derivable values
+/// (`size` summed from uploaded parts, bytes → KiB rounded up). SUIT-aware
+/// backends call this as a base and override the fields they can enrich.
+pub fn default_descriptor_from_context(ctx: &UpdatePackageContext<'_>) -> UpdatePackageDescriptor {
+    let body = ctx.register_body;
+    let body_str = |k: &str| {
+        body.and_then(|b| b.get(k))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    let body_u64 = |k: &str| body.and_then(|b| b.get(k)).and_then(|v| v.as_u64());
+    let total_bytes: u64 = ctx.parts.iter().map(|p| p.size).sum();
+    // Table 261 `size` is in kilobytes; round up so a sub-1KiB package isn't 0.
+    let size_kib = total_bytes.div_ceil(1024);
+    UpdatePackageDescriptor {
+        id: ctx.id.to_string(),
+        update_name: body_str("update_name").unwrap_or_else(|| ctx.id.to_string()),
+        size: body_u64("size").unwrap_or(size_kib),
+        automated: body
+            .and_then(|b| b.get("automated"))
+            .and_then(|v| v.as_bool()),
+        // SOVDd's `/updates` tracks workshop-pushed staging sessions → proximity.
+        origin: vec!["proximity".to_string()],
+        notes: body_str("notes"),
+        duration: body_u64("duration"),
+        preconditions: body_str("preconditions"),
+        added_components: Vec::new(),
+        removed_components: Vec::new(),
+        updated_components: Vec::new(),
+        // Default: the addressed component is the one affected.
+        affected_components: vec![format!("/vehicle/v1/components/{}", ctx.component_id)],
+    }
 }
