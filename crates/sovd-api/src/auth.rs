@@ -132,12 +132,20 @@ pub struct AuthContext {
 
 enum Validator {
     Disabled,
-    Static { token: String },
-    Oidc { manager: Arc<JwksManager> },
-    WorkshopCa { validator: crate::workshop_ca::WorkshopCaValidator },
+    Static {
+        token: String,
+    },
+    Oidc {
+        manager: Arc<JwksManager>,
+    },
+    WorkshopCa {
+        validator: crate::workshop_ca::WorkshopCaValidator,
+    },
     /// Test-only: always authenticates, with a fixed scope set.
     #[cfg(test)]
-    TestScoped { scopes: Vec<String> },
+    TestScoped {
+        scopes: Vec<String>,
+    },
 }
 
 impl Default for AuthContext {
@@ -377,10 +385,7 @@ struct OidcDiscovery {
 }
 
 /// Fetch a provider's OIDC discovery document and its JWKS.
-async fn discover_jwks(
-    client: &reqwest::Client,
-    issuer: &str,
-) -> Result<(String, JwkSet), String> {
+async fn discover_jwks(client: &reqwest::Client, issuer: &str) -> Result<(String, JwkSet), String> {
     let discovery_url = format!(
         "{}/.well-known/openid-configuration",
         issuer.trim_end_matches('/')
@@ -402,7 +407,12 @@ async fn discover_jwks(
         .await
         .map_err(|e| format!("failed to fetch JWKS from {}: {e}", discovery.jwks_uri))?
         .error_for_status()
-        .map_err(|e| format!("JWKS endpoint {} returned an error: {e}", discovery.jwks_uri))?
+        .map_err(|e| {
+            format!(
+                "JWKS endpoint {} returned an error: {e}",
+                discovery.jwks_uri
+            )
+        })?
         .json()
         .await
         .map_err(|e| format!("failed to parse JWKS from {}: {e}", discovery.jwks_uri))?;
@@ -572,7 +582,9 @@ mod tests {
         assert!(is_public_path("/vehicle/v1/docs"));
         assert!(is_public_path("/vehicle/v1/components/engine_ecu/docs"));
         assert!(is_public_path("/.well-known/sovd-extensions"));
-        assert!(!is_public_path("/vehicle/v1/components/engine_ecu/data/rpm"));
+        assert!(!is_public_path(
+            "/vehicle/v1/components/engine_ecu/data/rpm"
+        ));
         assert!(!is_public_path("/vehicle/v1/components"));
     }
 
@@ -783,10 +795,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let items = json["items"].as_array().unwrap();
-        assert_eq!(items.len(), 1, "listing must not leak out-of-scope components");
+        assert_eq!(
+            items.len(),
+            1,
+            "listing must not leak out-of-scope components"
+        );
         assert_eq!(items[0]["id"], "engine_ecu");
 
         // public path → 200 without auth
@@ -809,9 +827,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(r.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["count"], 1, "discovery must not enumerate out-of-scope ECUs");
+        assert_eq!(
+            json["count"], 1,
+            "discovery must not enumerate out-of-scope ECUs"
+        );
 
         // P0 fix: /admin requires an admin scope — a component-only token is denied.
         let r = app
@@ -836,7 +859,11 @@ mod tests {
                 .with_auth(Arc::new(AuthContext::test_scoped(vec!["admin:*"]))),
         );
         let r = admin_app
-            .oneshot(Request::get("/admin/definitions").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/admin/definitions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK, "admin scope reaches /admin");

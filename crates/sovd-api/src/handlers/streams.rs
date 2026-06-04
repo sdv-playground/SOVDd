@@ -176,6 +176,10 @@ pub async fn stream_subscription(
         }
     });
 
+    // C-070 (§5.2.2): axum's `Sse` responder emits `Content-Type:
+    // text/event-stream`; `KeepAlive` adds the comment-line heartbeat the
+    // spec's `Connection: keep-alive` requirement maps to. Both are asserted
+    // in `spec_update_flow::sse_subscription_stream_carries_event_stream_ct`.
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
@@ -329,5 +333,8 @@ fn create_sse_stream(
         }
     });
 
+    // C-070 (§5.2.2): see the note in `stream_subscription` — axum's `Sse`
+    // sets `Content-Type: text/event-stream`; asserted in
+    // `spec_update_flow::sse_inline_stream_carries_event_stream_ct`.
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }

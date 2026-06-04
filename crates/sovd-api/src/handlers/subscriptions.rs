@@ -28,6 +28,7 @@ use axum::Json;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -202,13 +203,118 @@ pub struct CyclicSubscriptionsResponse {
     pub items: Vec<CyclicSubscription>,
 }
 
+/// Verify a single data parameter is GET-able on `backend` the same way
+/// the data path resolves it (`read_did_internal` / the sub-entity reader):
+/// DidStore resolution under `entity_id`, presence in `list_parameters`, or a
+/// non-empty `read_data` probe.  Returns `true` if any of those succeed.
+async fn param_is_get_able(
+    backend: &Arc<dyn sovd_core::DiagnosticBackend>,
+    did_store: &sovd_conv::DidStore,
+    param: &str,
+) -> bool {
+    // A DidStore-known parameter (semantic name or raw hex DID) is
+    // addressable — the same first step the data reader takes.
+    if did_store.resolve_did(param).is_some() {
+        return true;
+    }
+    // Backend-resolved parameter (proxy/app entities): listed or readable.
+    if let Ok(params) = backend.list_parameters().await {
+        if params.iter().any(|p| p.id == param) {
+            return true;
+        }
+    }
+    matches!(
+        backend.read_data(std::slice::from_ref(&param.to_string())).await,
+        Ok(values) if !values.is_empty()
+    )
+}
+
+/// C-073 (§7.10.3): the subscribed `resource` must be a same-entity resource
+/// the client can GET.  Resolve it exactly the way the SSE delivery path
+/// (`streams::stream_subscription`) and the data path do:
+///
+///   * `child/param` → resolve `child` as a sub-entity (same-entity tree),
+///     then validate `param` is GET-able on the child.
+///   * `param` → validate `param` is GET-able on the addressed entity.
+///
+/// A `data/` collection segment (the spec's uri-reference form, e.g.
+/// `data/coolant_temperature` or `child/data/F405`) is tolerated.  An
+/// unresolvable or cross-entity resource is rejected with `400
+/// incomplete-request`.
+///
+/// Returns the *canonical* resource string to persist — the form
+/// `stream_subscription` resolves: a bare `param` for direct, `child/param`
+/// for gateway-child (the optional `data/` collection segment is stripped so
+/// the stream path's `split_once('/')` routes it correctly).
+async fn validate_subscription_resource(
+    state: &AppState,
+    component_id: &str,
+    backend: &Arc<dyn sovd_core::DiagnosticBackend>,
+    resource: &str,
+) -> Result<String, ApiError> {
+    let resource = resource.trim_start_matches('/');
+    if resource.is_empty() {
+        return Err(ApiError::BadRequest(
+            "subscription resource must not be empty".into(),
+        ));
+    }
+    let did_store = state.did_store();
+
+    let bad = |r: &str| {
+        ApiError::BadRequest(format!(
+            "subscription resource {r:?} is not a GET-able same-entity parameter"
+        ))
+    };
+
+    // The spec uri-reference form addresses the entity's own `data`
+    // collection (`data/<param>`); strip that leading collection segment so
+    // it isn't mistaken for a gateway-child id by the split below.
+    if let Some(param) = resource.strip_prefix("data/") {
+        if !param.is_empty()
+            && !param.contains('/')
+            && param_is_get_able(backend, did_store, param).await
+        {
+            return Ok(param.to_string());
+        }
+        return Err(bad(resource));
+    }
+
+    // Gateway-child resource: `child/param` (possibly `child/data/param`).
+    if let Some((child, rest)) = resource.split_once('/') {
+        let param = rest.strip_prefix("data/").unwrap_or(rest);
+        if param.is_empty() || param.contains('/') {
+            return Err(ApiError::BadRequest(format!(
+                "subscription resource {resource:?} is not a single same-entity parameter"
+            )));
+        }
+        let child_backend = backend.get_sub_entity(child).await.map_err(|e| match e {
+            sovd_core::BackendError::EntityNotFound(_) => ApiError::BadRequest(format!(
+                "subscription resource {resource:?}: sub-entity {child:?} not found on {component_id:?}"
+            )),
+            other => ApiError::from(other),
+        })?;
+        if param_is_get_able(&child_backend, did_store, param).await {
+            return Ok(format!("{child}/{param}"));
+        }
+        return Err(ApiError::BadRequest(format!(
+            "subscription resource {resource:?} is not GET-able on sub-entity {child:?}"
+        )));
+    }
+
+    // Bare direct resource on the addressed entity (param-id or hex DID).
+    if param_is_get_able(backend, did_store, resource).await {
+        return Ok(resource.to_string());
+    }
+    Err(bad(resource))
+}
+
 /// POST /vehicle/v1/components/:component_id/cyclic-subscriptions
 pub async fn create_cyclic_subscription(
     State(state): State<AppState>,
     Path(component_id): Path<String>,
-    Json(request): Json<CyclicSubscriptionRequest>,
+    Json(mut request): Json<CyclicSubscriptionRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let _backend = state.get_backend(&component_id)?;
+    let backend = state.get_backend(&component_id)?;
 
     // Spec: duration=0 makes the subscription expire instantly and
     // is nonsensical; reject as incomplete-request.
@@ -217,6 +323,11 @@ pub async fn create_cyclic_subscription(
             "duration must be > 0; omit the field for no expiry".to_string(),
         ));
     }
+
+    // C-073: the subscribed resource must be same-entity and GET-able.
+    // Persist the canonical (normalized) form the SSE delivery path resolves.
+    request.resource =
+        validate_subscription_resource(&state, &component_id, backend, &request.resource).await?;
 
     let subscription = state
         .subscription_manager

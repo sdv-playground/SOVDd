@@ -41,10 +41,21 @@ struct MockBackend {
     flash_state: Mutex<CoreFlashState>,
     /// Toggle to make verify_part fail (for the failure-path test)
     fail_verify: Mutex<bool>,
+    /// Optional gateway-style child sub-entity (drives the C-073
+    /// gateway-child subscription-resource path).
+    child: Option<Arc<MockBackend>>,
+    /// Kept-alive broadcast sender so `subscribe_data` can hand out a live
+    /// (idle) receiver — the C-070 SSE-header test never needs an event,
+    /// only the response headers.
+    data_tx: tokio::sync::broadcast::Sender<sovd_core::DataPoint>,
 }
 
 impl MockBackend {
     fn new(id: &str, shape: &'static str) -> Self {
+        Self::with_child(id, shape, None)
+    }
+
+    fn with_child(id: &str, shape: &'static str, child: Option<Arc<MockBackend>>) -> Self {
         Self {
             info: EntityInfo {
                 id: id.into(),
@@ -63,6 +74,8 @@ impl MockBackend {
             transfer_id: Mutex::new(None),
             flash_state: Mutex::new(CoreFlashState::Transferring),
             fail_verify: Mutex::new(false),
+            child,
+            data_tx: tokio::sync::broadcast::channel(16).0,
         }
     }
 }
@@ -80,10 +93,50 @@ impl DiagnosticBackend for MockBackend {
     }
 
     async fn list_parameters(&self) -> BackendResult<Vec<ParameterInfo>> {
-        Ok(Vec::new())
+        // One GET-able parameter so the C-073 subscription-resource
+        // validation has something to resolve against (mirrors a real
+        // backend exposing at least one data parameter).
+        Ok(vec![ParameterInfo {
+            id: "coolant_temp".into(),
+            name: "Coolant temperature".into(),
+            description: None,
+            unit: Some("degC".into()),
+            data_type: Some("uint8".into()),
+            read_only: true,
+            href: format!("/vehicle/v1/components/{}/data/coolant_temp", self.info.id),
+            did: None,
+        }])
     }
-    async fn read_data(&self, _ids: &[String]) -> BackendResult<Vec<DataValue>> {
-        Ok(Vec::new())
+    async fn read_data(&self, ids: &[String]) -> BackendResult<Vec<DataValue>> {
+        // Echo back any id we "know" so the C-073 read-probe fallback can
+        // confirm GET-ability; unknown ids resolve to an empty vec.
+        Ok(ids
+            .iter()
+            .filter(|id| id.as_str() == "coolant_temp")
+            .map(|id| DataValue::new(id.clone(), "Coolant temperature", serde_json::json!(42)))
+            .collect())
+    }
+
+    async fn list_sub_entities(&self) -> BackendResult<Vec<EntityInfo>> {
+        // Expose a single gateway-style child so the C-073 gateway-child
+        // path (`child/param`) can resolve via get_sub_entity.
+        Ok(self.child.iter().map(|c| c.entity_info().clone()).collect())
+    }
+
+    async fn get_sub_entity(&self, id: &str) -> BackendResult<Arc<dyn DiagnosticBackend>> {
+        match &self.child {
+            Some(child) if child.info.id == id => Ok(child.clone() as Arc<dyn DiagnosticBackend>),
+            _ => Err(BackendError::EntityNotFound(id.into())),
+        }
+    }
+
+    async fn subscribe_data(
+        &self,
+        _param_ids: &[String],
+        _rate_hz: u32,
+    ) -> BackendResult<tokio::sync::broadcast::Receiver<sovd_core::DataPoint>> {
+        // Live but idle receiver — enough for the C-070 SSE-header assertion.
+        Ok(self.data_tx.subscribe())
     }
     async fn get_faults(&self, _: Option<&FaultFilter>) -> BackendResult<FaultsResult> {
         Ok(FaultsResult {
@@ -231,6 +284,18 @@ async fn spawn_with_watchdog(
     let router = create_router(state);
     let server = TestServer::start(router).await.expect("test server");
     (server, backend)
+}
+
+/// Spawn a server whose `dev1` backend has a gateway-style child
+/// sub-entity `childecu` — used by the C-073 gateway-child test.
+async fn spawn_with_child() -> TestServer {
+    let child = Arc::new(MockBackend::new("childecu", "singleshot"));
+    let backend = Arc::new(MockBackend::with_child("dev1", "singleshot", Some(child)));
+    let mut backends = HashMap::new();
+    backends.insert("dev1".to_string(), backend as Arc<dyn DiagnosticBackend>);
+    let state = AppState::new(backends);
+    let router = create_router(state);
+    TestServer::start(router).await.expect("test server")
 }
 
 fn http() -> reqwest::Client {
@@ -863,3 +928,177 @@ fn build_capability_doc_declares_security() {
         assert!(scheme["bearerFormat"].is_string());
     }
 }
+
+// ---------------------------------------------------------------------------
+// C-070 — SSE Content-Type: text/event-stream  (ISO 17978-3 §5.2.2)
+// ---------------------------------------------------------------------------
+
+/// Create a cyclic subscription on `dev1` for `resource`, returning the
+/// raw response so the caller can assert the status / read the body.
+async fn create_subscription(server: &TestServer, resource: &str) -> reqwest::Response {
+    let url = format!(
+        "{}/vehicle/v1/components/dev1/cyclic-subscriptions",
+        server.base_url()
+    );
+    http()
+        .post(url)
+        .json(&serde_json::json!({ "resource": resource, "interval": "slow" }))
+        .send()
+        .await
+        .expect("create subscription")
+}
+
+/// C-070: the inline `streams` SSE responder sets
+/// `Content-Type: text/event-stream`.
+#[tokio::test]
+async fn sse_inline_stream_carries_event_stream_ct() {
+    let (server, _backend) = spawn_with("singleshot").await;
+    let url = format!(
+        "{}/vehicle/v1/components/dev1/streams?parameters=coolant_temp&rate_hz=2",
+        server.base_url()
+    );
+    let resp = http().get(url).send().await.expect("open inline SSE");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let ct = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        ct.starts_with("text/event-stream"),
+        "inline SSE content-type must start with text/event-stream, got {ct:?}"
+    );
+}
+
+/// C-070: the per-subscription `streams/{id}` SSE responder sets
+/// `Content-Type: text/event-stream`.
+#[tokio::test]
+async fn sse_subscription_stream_carries_event_stream_ct() {
+    let (server, _backend) = spawn_with("singleshot").await;
+
+    // Create a subscription on a GET-able direct resource, then attach.
+    let created = create_subscription(&server, "coolant_temp").await;
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let body: Value = created.json().await.unwrap();
+    let sub_id = body["subscription_id"].as_str().unwrap();
+
+    let url = format!(
+        "{}/vehicle/v1/components/dev1/streams/{}",
+        server.base_url(),
+        sub_id
+    );
+    let resp = http().get(url).send().await.expect("open subscription SSE");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let ct = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        ct.starts_with("text/event-stream"),
+        "subscription SSE content-type must start with text/event-stream, got {ct:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// C-073 — subscription resource must be same-entity + GET-able  (§7.10.3)
+// ---------------------------------------------------------------------------
+
+/// C-073: a valid direct resource (a GET-able parameter on the addressed
+/// entity) is accepted → 201.
+#[tokio::test]
+async fn cyclic_subscription_valid_direct_resource_201() {
+    let (server, _backend) = spawn_with("singleshot").await;
+    let resp = create_subscription(&server, "coolant_temp").await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+    // The spec uri-reference form `data/<param>` is tolerated too.
+    let resp = create_subscription(&server, "data/coolant_temp").await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+}
+
+/// C-073: a resource that resolves to nothing on the entity is rejected
+/// with 4xx (400 incomplete-request) — not silently accepted.
+#[tokio::test]
+async fn cyclic_subscription_bogus_resource_4xx() {
+    let (server, _backend) = spawn_with("singleshot").await;
+    let resp = create_subscription(&server, "no_such_parameter").await;
+    assert!(
+        resp.status().is_client_error(),
+        "bogus subscription resource must be a 4xx, got {}",
+        resp.status()
+    );
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error_code"], "incomplete-request");
+}
+
+/// C-073 + regression for `aad70a4`: a gateway-child resource
+/// (`child/param`) still resolves via the sub-entity and is accepted → 201.
+#[tokio::test]
+async fn cyclic_subscription_gateway_child_resource_201() {
+    let server = spawn_with_child().await;
+    let resp = create_subscription(&server, "childecu/coolant_temp").await;
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::CREATED,
+        "gateway-child subscription resource must still succeed (aad70a4)"
+    );
+
+    // A child that doesn't exist is rejected.
+    let resp = create_subscription(&server, "ghostchild/coolant_temp").await;
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // A real child but a bogus param on it is rejected.
+    let resp = create_subscription(&server, "childecu/no_such_parameter").await;
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// C-005 — version-info lists ALL supported versions  (§7.4.2)
+// ---------------------------------------------------------------------------
+
+/// C-005: `/version-info` derives its `versions` array from the shared
+/// `API_VERSIONS` source of truth (v1 / /vehicle/v1 / x-sovd-version 1.1).
+#[tokio::test]
+async fn version_info_lists_all_supported_versions() {
+    let (server, _backend) = spawn_with("singleshot").await;
+    let url = format!("{}/version-info", server.base_url());
+    let resp = http().get(url).send().await.expect("version-info");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+
+    let versions = body["versions"].as_array().expect("versions array");
+    assert_eq!(versions.len(), 1, "exactly the one mounted edition");
+    let v1 = &versions[0];
+    assert_eq!(v1["version_identifier"], "v1");
+    assert_eq!(v1["base_path"], "/vehicle/v1");
+    assert_eq!(v1["x-sovd-version"], "1.1");
+}
+
+/// C-005: the HTTP body is exactly what the shared `API_VERSIONS` builder
+/// produces — proving it's derived, not an independent literal.
+#[tokio::test]
+async fn version_info_is_sourced_from_shared_definition() {
+    use sovd_api::handlers::meta::{build_version_info, API_VERSIONS};
+
+    // The builder reflects the const slice 1:1.
+    let built = build_version_info();
+    assert_eq!(built.versions.len(), API_VERSIONS.len());
+    for (entry, (id, base, sovd)) in built.versions.iter().zip(API_VERSIONS) {
+        assert_eq!(entry.version_identifier, *id);
+        assert_eq!(entry.base_path, *base);
+        assert_eq!(entry.x_sovd_version, *sovd);
+    }
+
+    // …and the served body equals the builder output.
+    let (server, _backend) = spawn_with("singleshot").await;
+    let url = format!("{}/version-info", server.base_url());
+    let served: Value = http().get(url).send().await.unwrap().json().await.unwrap();
+    let expected = serde_json::to_value(&built).unwrap();
+    assert_eq!(served, expected);
+}
+
+// ---------------------------------------------------------------------------
+// (C-110 — /updates ?origin query + reserved 'autonomous' package id are
+// covered by the §7.18 catalog reshape tests, not here.)
+// ---------------------------------------------------------------------------

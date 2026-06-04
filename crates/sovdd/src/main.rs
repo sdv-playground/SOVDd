@@ -170,7 +170,9 @@ async fn main() -> anyhow::Result<()> {
     if auth_enabled {
         tracing::info!("Client authentication enabled");
     } else {
-        tracing::warn!("Client authentication DISABLED (open surface) — set [server.auth] to enable");
+        tracing::warn!(
+            "Client authentication DISABLED (open surface) — set [server.auth] to enable"
+        );
     }
 
     // Create the app state with DID store, output configs, and auth context

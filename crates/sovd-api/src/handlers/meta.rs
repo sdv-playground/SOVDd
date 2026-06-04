@@ -30,15 +30,40 @@ pub struct VersionInfoResponse {
     pub versions: Vec<VersionEntry>,
 }
 
-/// GET /version-info  — list supported SOVD API editions (§7.4, C-005).
+/// Single source of truth for the SOVD API edition(s) this server mounts.
+///
+/// `version_info` (§7.4) derives its `versions` array from this slice, and
+/// the router in `lib.rs::create_router` mounts every base path listed here,
+/// so the advertised list can't drift from the actual surface (C-005).  Add a
+/// row here (and the matching routes) when introducing a new API edition.
+///
+/// Each tuple is `(version_identifier, base_path, x-sovd-version)`:
+///   * `version_identifier` — the URI version segment (`base_uri` §5.6 rule:
+///     value `v1` for this edition).
+///   * `base_path` — where that version serves (`/vehicle/{version}`).
+///   * `x-sovd-version` — the ASAM SOVD protocol version this maps to.
+pub const API_VERSIONS: &[(&str, &str, &str)] = &[("v1", "/vehicle/v1", "1.1")];
+
+/// Build the `version-info` body from [`API_VERSIONS`].
+pub fn build_version_info() -> VersionInfoResponse {
+    VersionInfoResponse {
+        versions: API_VERSIONS
+            .iter()
+            .map(|(id, base, sovd)| VersionEntry {
+                version_identifier: (*id).to_string(),
+                base_path: (*base).to_string(),
+                x_sovd_version: (*sovd).to_string(),
+            })
+            .collect(),
+    }
+}
+
+/// GET /version-info  — list ALL supported SOVD API editions (§7.4.2, C-005).
+///
+/// The path itself is version-independent (mounted at `/version-info`, not
+/// under any `/vehicle/{v}`) so it stays constant across editions per §5.6.
 pub async fn version_info() -> Json<VersionInfoResponse> {
-    Json(VersionInfoResponse {
-        versions: vec![VersionEntry {
-            version_identifier: "v1".to_string(),
-            base_path: "/vehicle/v1".to_string(),
-            x_sovd_version: "1.1".to_string(),
-        }],
-    })
+    Json(build_version_info())
 }
 
 /// Router fallback — dual role.

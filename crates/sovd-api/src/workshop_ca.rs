@@ -98,7 +98,9 @@ impl WorkshopCaValidator {
                 header.alg
             ));
         }
-        let x5c = header.x5c.ok_or("workshop token is missing its x5c chain")?;
+        let x5c = header
+            .x5c
+            .ok_or("workshop token is missing its x5c chain")?;
         // Bound the work an attacker can force (cert parses + ECDSA verifies).
         if x5c.len() > MAX_X5C_LEN {
             return Err(format!(
@@ -151,7 +153,10 @@ impl WorkshopCaValidator {
                 // Topmost x5c cert must be issued by one of the pinned roots.
                 let ok = self.roots.iter().any(|root| {
                     is_ca(root)
-                        && names_match(&subject.tbs_certificate.issuer, &root.tbs_certificate.subject)
+                        && names_match(
+                            &subject.tbs_certificate.issuer,
+                            &root.tbs_certificate.subject,
+                        )
                         && check_validity(root, now).is_ok()
                         && verify_signed_by(subject, root).is_ok()
                 });
