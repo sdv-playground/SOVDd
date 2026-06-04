@@ -949,46 +949,49 @@ async fn create_subscription(server: &TestServer, resource: &str) -> reqwest::Re
         .expect("create subscription")
 }
 
-/// C-070: the inline `streams` SSE responder sets
-/// `Content-Type: text/event-stream`.
-#[tokio::test]
-async fn sse_inline_stream_carries_event_stream_ct() {
-    let (server, _backend) = spawn_with("singleshot").await;
-    let url = format!(
-        "{}/vehicle/v1/components/dev1/streams?parameters=coolant_temp&rate_hz=2",
-        server.base_url()
-    );
-    let resp = http().get(url).send().await.expect("open inline SSE");
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let ct = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default();
-    assert!(
-        ct.starts_with("text/event-stream"),
-        "inline SSE content-type must start with text/event-stream, got {ct:?}"
-    );
-}
-
-/// C-070: the per-subscription `streams/{id}` SSE responder sets
-/// `Content-Type: text/event-stream`.
+/// C-070 + C-025: the cyclic-subscription resource IS the SSE stream.
+/// `GET …/cyclic-subscriptions/{id}` with `Accept: text/event-stream`
+/// returns SSE with `Content-Type: text/event-stream` — there is no
+/// separate non-standard `streams` resource.
 #[tokio::test]
 async fn sse_subscription_stream_carries_event_stream_ct() {
     let (server, _backend) = spawn_with("singleshot").await;
 
-    // Create a subscription on a GET-able direct resource, then attach.
+    // Create a subscription on a GET-able direct resource, then attach to
+    // the SAME resource with the SSE Accept header.
     let created = create_subscription(&server, "coolant_temp").await;
     assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    // C-072: Location points at the cyclic-subscription resource itself.
+    let location = created
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    // C-071/C-025: no separate `streams` Link header is advertised.
+    let has_link = created.headers().get(reqwest::header::LINK).is_some();
     let body: Value = created.json().await.unwrap();
     let sub_id = body["subscription_id"].as_str().unwrap();
+    assert!(
+        location.ends_with(&format!("/cyclic-subscriptions/{sub_id}")),
+        "Location must point at the cyclic-subscription resource, got {location:?}"
+    );
+    assert!(
+        !has_link,
+        "no `streams` Link header — the resource itself is the stream"
+    );
 
     let url = format!(
-        "{}/vehicle/v1/components/dev1/streams/{}",
+        "{}/vehicle/v1/components/dev1/cyclic-subscriptions/{}",
         server.base_url(),
         sub_id
     );
-    let resp = http().get(url).send().await.expect("open subscription SSE");
+    let resp = http()
+        .get(url)
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .send()
+        .await
+        .expect("open subscription SSE");
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let ct = resp
         .headers()
@@ -999,6 +1002,99 @@ async fn sse_subscription_stream_carries_event_stream_ct() {
         ct.starts_with("text/event-stream"),
         "subscription SSE content-type must start with text/event-stream, got {ct:?}"
     );
+}
+
+/// C-025 content negotiation: `GET …/cyclic-subscriptions/{id}` WITHOUT
+/// the SSE `Accept` returns the subscription *details* (JSON), not the
+/// event stream.
+#[tokio::test]
+async fn cyclic_subscription_get_without_sse_accept_returns_details() {
+    let (server, _backend) = spawn_with("singleshot").await;
+
+    let created = create_subscription(&server, "coolant_temp").await;
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let body: Value = created.json().await.unwrap();
+    let sub_id = body["subscription_id"].as_str().unwrap();
+
+    let url = format!(
+        "{}/vehicle/v1/components/dev1/cyclic-subscriptions/{}",
+        server.base_url(),
+        sub_id
+    );
+    let resp = http().get(url).send().await.expect("get subscription");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let ct = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        ct.starts_with("application/json"),
+        "without SSE Accept the resource must serve JSON details, got {ct:?}"
+    );
+    let details: Value = resp.json().await.unwrap();
+    assert_eq!(details["subscription_id"], sub_id);
+    assert_eq!(details["resource"], "coolant_temp");
+    assert_eq!(details["component_id"], "dev1");
+}
+
+/// C-025: the retired non-standard names no longer exist —
+/// `GET/.../streams` + `GET/.../streams/{id}` 404, `POST /discovery`
+/// 404, and `…/modes/link` 404/405. Only standardized collection /
+/// resource names appear on the entity (Tables 8 & 10).
+#[tokio::test]
+async fn retired_nonstandard_names_are_gone() {
+    let (server, _backend) = spawn_with("singleshot").await;
+    let base = server.base_url();
+
+    // Inline `streams` reader — gone.
+    let resp = http()
+        .get(format!(
+            "{base}/vehicle/v1/components/dev1/streams?parameters=coolant_temp&rate_hz=2"
+        ))
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .send()
+        .await
+        .expect("GET inline streams");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "inline /streams must be 404 after C-025 retirement"
+    );
+
+    // Cyclic `streams/{id}` delivery URL — gone (SSE is on the resource).
+    let resp = http()
+        .get(format!("{base}/vehicle/v1/components/dev1/streams/some-id"))
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .send()
+        .await
+        .expect("GET streams/{id}");
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // `POST /vehicle/v1/discovery` — gone (clients use GET /components).
+    let resp = http()
+        .post(format!("{base}/vehicle/v1/discovery"))
+        .send()
+        .await
+        .expect("POST discovery");
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // `modes/link` — UDS 0x87 has no standardized mode name. The route is
+    // gone: GET is 404 (no such resource) and PUT is 404 too.
+    let resp = http()
+        .get(format!("{base}/vehicle/v1/components/dev1/modes/link"))
+        .send()
+        .await
+        .expect("GET modes/link");
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    let resp = http()
+        .put(format!("{base}/vehicle/v1/components/dev1/modes/link"))
+        .json(&serde_json::json!({ "action": "transition" }))
+        .send()
+        .await
+        .expect("PUT modes/link");
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
 }
 
 // ---------------------------------------------------------------------------

@@ -1162,23 +1162,33 @@ async fn test_read_all_configured_parameters() {
 // SSE Streaming Tests
 // =============================================================================
 
-/// Test SSE streaming with PUBLIC DIDs only (no session setup needed)
+/// Test SSE streaming with a PUBLIC DID (no session setup needed).
+///
+/// C-025: the inline `/streams?parameters=` endpoint was retired. SSE is
+/// now the `cyclic-subscriptions/{id}` resource itself — create the
+/// subscription, then GET it with `Accept: text/event-stream`. Spec
+/// subscriptions are single-resource, so this exercises one parameter.
 #[tokio::test]
 #[serial_test::serial]
 async fn test_sse_stream_periodic_data() {
     use futures_util::StreamExt;
+    use sovd_client::SubscriptionInterval;
 
-    let _harness = TestHarness::new()
+    let harness = TestHarness::new()
         .await
         .expect("Failed to setup test harness");
+    let sovd = harness.sovd_client();
 
-    // Open an inline SSE stream for multiple parameters — spec
-    // cyclic-subscriptions are single-resource per sub; for multi-param
-    // streaming we use the inline query-style endpoint that joins N
-    // params into one stream.
+    // Create a cyclic subscription on a public parameter, then attach to
+    // the subscription resource as an SSE stream.
+    let sub = sovd
+        .create_cyclic_subscription("vtx_ecm", "vehicle_speed", SubscriptionInterval::Fast)
+        .await
+        .expect("create cyclic subscription failed");
     let stream_url = format!(
-        "http://localhost:{}/vehicle/v1/components/vtx_ecm/streams?parameters=vehicle_speed&parameters=coolant_temp&parameters=engine_load&rate_hz=10",
-        TestHarness::SERVER_PORT
+        "http://localhost:{}/vehicle/v1/components/vtx_ecm/cyclic-subscriptions/{}",
+        TestHarness::SERVER_PORT,
+        sub.subscription_id
     );
 
     eprintln!("Stream URL: {}", stream_url);
@@ -1192,6 +1202,15 @@ async fn test_sse_stream_periodic_data() {
         .expect("Failed to connect to SSE stream");
 
     assert_eq!(response.status(), 200, "Expected 200 OK for stream");
+    let ct = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        ct.starts_with("text/event-stream"),
+        "SSE content-type must start with text/event-stream, got {ct:?}"
+    );
 
     // Read events from the stream for 3 seconds
     let mut stream = response.bytes_stream();
@@ -1226,12 +1245,13 @@ async fn test_sse_stream_periodic_data() {
                                     let payload = &json["payload"];
                                     let values = &payload["values"];
                                     if events_received % 5 == 1 || events_received <= 3 {
-                                        eprintln!("SSE Event #{}: seq={}, vehicle_speed={}, coolant_temp={}, engine_load={}",
+                                        eprintln!(
+                                            "SSE Event #{}: seq={}, vehicle_speed={}",
                                             events_received,
                                             payload["seq"],
-                                            values.get("vehicle_speed").unwrap_or(&serde_json::Value::Null),
-                                            values.get("coolant_temp").unwrap_or(&serde_json::Value::Null),
-                                            values.get("engine_load").unwrap_or(&serde_json::Value::Null)
+                                            values
+                                                .get("vehicle_speed")
+                                                .unwrap_or(&serde_json::Value::Null),
                                         );
                                     }
                                     assert!(
@@ -1276,7 +1296,11 @@ async fn test_sse_stream_periodic_data() {
         events_received
     );
 
-    // Inline streams close on client disconnect — no cleanup needed.
+    // Closing the EventSource does not delete the (shared) subscription
+    // resource (C-071); delete it explicitly.
+    sovd.delete_cyclic_subscription("vtx_ecm", &sub.subscription_id)
+        .await
+        .expect("delete cyclic subscription failed");
     eprintln!("Test completed - SSE endpoint is functional");
 }
 
@@ -1603,7 +1627,7 @@ async fn test_security_access_failure_wrong_key() {
 #[serial_test::serial]
 async fn test_sse_stream_mixed_access_levels() {
     use futures_util::StreamExt;
-    use sovd_client::{SecurityLevel, SessionType};
+    use sovd_client::{SecurityLevel, SessionType, SubscriptionInterval};
     use std::collections::HashSet;
 
     let harness = TestHarness::new()
@@ -1639,119 +1663,96 @@ async fn test_sse_stream_mixed_access_levels() {
         .expect("security_access_send_key failed");
     eprintln!("Security access granted");
 
-    // Step 3: Open an SSE stream subscribing to parameters from ALL
-    // access levels.  Spec cyclic-subscriptions are single-resource,
-    // so for this multi-param test we use the inline streaming path
-    // (`/components/{id}/streams?parameters=...`) which keeps the
-    // SSE-end-to-end behaviour we want to exercise here.
-    eprintln!("=== Step 3: Opening mixed-access SSE stream ===");
+    // Step 3: Subscribe to parameters from ALL access levels. Spec
+    // cyclic-subscriptions are single-resource (C-025: no inline
+    // multi-param `/streams`), so we open one subscription per parameter
+    // and attach to each subscription resource as its own SSE stream.
+    eprintln!("=== Step 3: Opening per-access-level cyclic subscriptions ===");
     // Public: vehicle_speed, coolant_temp
     // Extended: engine_rpm, oil_pressure
     // Protected: boost_pressure, throttle_position
-    let stream_url = format!(
-        "http://localhost:{}/vehicle/v1/components/vtx_ecm/streams?parameters=vehicle_speed&parameters=coolant_temp&parameters=engine_rpm&parameters=oil_pressure&parameters=boost_pressure&parameters=throttle_position&rate_hz=10",
-        TestHarness::SERVER_PORT
-    );
-
-    // Step 4: Connect to SSE stream and verify data from all access levels
-    eprintln!("=== Step 4: Connecting to SSE stream ===");
-
-    let http_client = reqwest::Client::new();
-    let response = http_client
-        .get(&stream_url)
-        .header("Accept", "text/event-stream")
-        .send()
-        .await
-        .expect("Failed to connect to SSE stream");
-
-    assert_eq!(response.status(), 200, "Expected 200 OK for stream");
-
-    // Track which parameters we've received data for
-    let mut received_params: HashSet<String> = HashSet::new();
-    let expected_params: HashSet<&str> = [
+    let expected_params = [
         "vehicle_speed",
         "coolant_temp", // Public
         "engine_rpm",
         "oil_pressure", // Extended
         "boost_pressure",
         "throttle_position", // Protected
-    ]
-    .into_iter()
-    .collect();
+    ];
 
-    let mut stream = response.bytes_stream();
-    let mut events_received = 0;
-    let mut buffer = Vec::new();
+    let mut sub_ids: Vec<(String, String)> = Vec::new();
+    for param in expected_params {
+        let sub = client
+            .create_cyclic_subscription("vtx_ecm", param, SubscriptionInterval::Fast)
+            .await
+            .unwrap_or_else(|e| panic!("create subscription for {param} failed: {e}"));
+        sub_ids.push((param.to_string(), sub.subscription_id));
+    }
 
-    // Read events until we've seen all parameters or timeout
-    let timeout_result = tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(bytes) => {
-                    buffer.extend_from_slice(&bytes);
+    // Step 4: Attach to each subscription resource (Accept:
+    // text/event-stream) and collect which parameters delivered data.
+    eprintln!("=== Step 4: Reading each subscription's SSE stream ===");
+    let http_client = reqwest::Client::new();
+    let mut received_params: HashSet<String> = HashSet::new();
 
-                    // Parse SSE events from buffer
-                    let text = String::from_utf8_lossy(&buffer);
-                    for line in text.lines() {
-                        if line.starts_with("data:") {
-                            let data = line.strip_prefix("data:").unwrap().trim();
-                            if !data.is_empty() {
-                                events_received += 1;
+    for (param, sub_id) in &sub_ids {
+        let stream_url = format!(
+            "http://localhost:{}/vehicle/v1/components/vtx_ecm/cyclic-subscriptions/{}",
+            TestHarness::SERVER_PORT,
+            sub_id
+        );
+        let response = http_client
+            .get(&stream_url)
+            .header("Accept", "text/event-stream")
+            .send()
+            .await
+            .expect("Failed to connect to SSE stream");
+        assert_eq!(response.status(), 200, "Expected 200 OK for stream");
 
-                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                    // EventEnvelope: payload.values.<param>
-                                    let values = &json["payload"]["values"];
-                                    for param in &expected_params {
-                                        if values[*param].is_number()
-                                            && !received_params.contains(*param)
-                                        {
-                                            eprintln!("  Received {}: {}", param, values[*param]);
-                                            received_params.insert(param.to_string());
-                                        }
-                                    }
-                                }
+        let mut stream = response.bytes_stream();
+        let mut buffer = Vec::new();
+        // Read this subscription's stream until its parameter shows a
+        // numeric value, or the per-stream timeout elapses.
+        let got = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(chunk) = stream.next().await {
+                let Ok(bytes) = chunk else { break };
+                buffer.extend_from_slice(&bytes);
+                let text = String::from_utf8_lossy(&buffer);
+                for line in text.lines() {
+                    if let Some(data) = line.strip_prefix("data:") {
+                        let data = data.trim();
+                        if data.is_empty() {
+                            continue;
+                        }
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                            if json["payload"]["values"][param].is_number() {
+                                eprintln!(
+                                    "  Received {}: {}",
+                                    param, json["payload"]["values"][param]
+                                );
+                                return true;
                             }
                         }
                     }
-
-                    // Clear processed buffer
-                    if let Some(last_newline) = text.rfind('\n') {
-                        buffer = buffer.split_off(last_newline + 1);
-                    }
-
-                    // Stop once we've received all parameters
-                    if received_params.len() >= expected_params.len() {
-                        break;
-                    }
-
-                    // Also stop after enough events even if not all params seen
-                    if events_received >= 20 {
-                        break;
-                    }
                 }
-                Err(e) => {
-                    eprintln!("Stream error: {}", e);
-                    break;
+                if let Some(last_newline) = text.rfind('\n') {
+                    buffer = buffer.split_off(last_newline + 1);
                 }
             }
-        }
-    });
+            false
+        })
+        .await
+        .unwrap_or(false);
 
-    match timeout_result.await {
-        Ok(_) => {
-            eprintln!("=== Results ===");
-            eprintln!("Received {} SSE events", events_received);
-            eprintln!("Parameters received: {:?}", received_params);
-        }
-        Err(_) => {
-            eprintln!(
-                "Timeout - received {} events, params: {:?}",
-                events_received, received_params
-            );
+        if got {
+            received_params.insert(param.clone());
         }
     }
 
-    // Step 5: Verify we received data from all access levels
+    eprintln!("=== Results ===");
+    eprintln!("Parameters received: {:?}", received_params);
+
+    // Step 5: Verify we received data from all access levels.
     eprintln!("=== Step 5: Verifying access level coverage ===");
 
     let public_received =
@@ -1765,9 +1766,15 @@ async fn test_sse_stream_mixed_access_levels() {
     eprintln!("Extended DIDs received: {}", extended_received);
     eprintln!("Protected DIDs received: {}", protected_received);
 
-    // No subscription resource to clean up — inline streams close
-    // automatically when the client disconnects.
-    eprintln!("Stream closed");
+    // Closing the EventSource does not delete the (shared) subscription
+    // resource (C-071); delete each one explicitly.
+    for (_param, sub_id) in &sub_ids {
+        client
+            .delete_cyclic_subscription("vtx_ecm", sub_id)
+            .await
+            .expect("delete cyclic subscription failed");
+    }
+    eprintln!("Streams closed");
 
     // Assert all access levels were covered
     assert!(
@@ -1784,271 +1791,6 @@ async fn test_sse_stream_mixed_access_levels() {
     );
 
     eprintln!("=== Test PASSED: All access levels streaming correctly ===");
-}
-
-// =============================================================================
-// ECU Discovery Tests
-// =============================================================================
-
-/// Test ECU discovery via ISO-TP functional addressing (broadcast)
-///
-/// This test verifies that the discovery endpoint can find ECUs on the CAN bus
-/// using UDS functional addressing (0x18DB33F1 broadcast -> 0x18DAF1xx responses)
-#[tokio::test]
-#[serial_test::serial]
-#[serial_test::serial]
-async fn test_ecu_discovery_isotp() {
-    eprintln!("\n=== Testing ECU Discovery (ISO-TP) ===");
-
-    // Get harness from thread-local or create new
-    let harness = TestHarness::new()
-        .await
-        .expect("Failed to create test harness");
-
-    // Wait a bit for example-ecu's functional listener to start
-    sleep(Duration::from_millis(200)).await;
-
-    // Step 1: Call discovery endpoint with ISO-TP method
-    eprintln!("=== Step 1: Calling POST /vehicle/v1/discovery ===");
-
-    let resp = harness
-        .post_form(
-            "/vehicle/v1/discovery",
-            &[
-                ("method", "isotp"),
-                ("interface", "vcan0"),
-                ("addressing", "extended"),
-                ("timeout_ms", "1000"),
-                ("read_identification", "true"),
-            ],
-        )
-        .await;
-
-    assert!(resp.is_ok(), "Discovery POST failed: {:?}", resp.err());
-    let resp = resp.unwrap();
-
-    eprintln!("Discovery response status: {}", resp.status());
-    assert!(
-        resp.status().is_success(),
-        "Expected success status, got: {}",
-        resp.status()
-    );
-
-    // Parse response
-    let body: Value = resp.json().await.expect("Failed to parse JSON response");
-    eprintln!(
-        "Discovery response: {}",
-        serde_json::to_string_pretty(&body).unwrap()
-    );
-
-    // Step 2: Verify response structure
-    eprintln!("=== Step 2: Verifying response structure ===");
-
-    assert!(
-        body.get("method").is_some(),
-        "Response should have 'method' field"
-    );
-    assert!(
-        body.get("count").is_some(),
-        "Response should have 'count' field"
-    );
-    assert!(
-        body.get("ecus").is_some(),
-        "Response should have 'ecus' field"
-    );
-
-    let method = body["method"].as_str().unwrap();
-    assert_eq!(method, "isotp", "Method should be 'isotp'");
-
-    let count = body["count"].as_u64().unwrap();
-    eprintln!("ECUs discovered: {}", count);
-
-    // Step 3: Verify discovered ECU data (if any ECUs found)
-    eprintln!("=== Step 3: Verifying discovered ECU data ===");
-
-    let ecus = body["ecus"].as_array().expect("ecus should be an array");
-
-    if count > 0 {
-        assert!(
-            !ecus.is_empty(),
-            "ecus array should not be empty when count > 0"
-        );
-
-        let ecu = &ecus[0];
-        eprintln!(
-            "First discovered ECU: {}",
-            serde_json::to_string_pretty(ecu).unwrap()
-        );
-
-        // Verify ECU has required fields
-        assert!(ecu.get("address").is_some(), "ECU should have 'address'");
-        assert!(
-            ecu.get("tx_can_id").is_some(),
-            "ECU should have 'tx_can_id'"
-        );
-        assert!(
-            ecu.get("rx_can_id").is_some(),
-            "ECU should have 'rx_can_id'"
-        );
-        assert!(
-            ecu.get("config_snippet").is_some(),
-            "ECU should have 'config_snippet'"
-        );
-
-        let address = ecu["address"].as_str().unwrap();
-        let tx_can_id = ecu["tx_can_id"].as_str().unwrap();
-        let rx_can_id = ecu["rx_can_id"].as_str().unwrap();
-
-        eprintln!("ECU Address: {}", address);
-        eprintln!("TX CAN ID: {}", tx_can_id);
-        eprintln!("RX CAN ID: {}", rx_can_id);
-
-        // For example-ecu with address 0x00, expect:
-        // - tx_can_id: 0x18DA00F1 (tester -> ECU)
-        // - rx_can_id: 0x18DAF100 (ECU -> tester)
-        // Note: Discovery sees it from the scanner's perspective, not ECU's
-        assert!(
-            address == "0x00" || address == "0xF1",
-            "Expected ECU address 0x00 or 0xF1, got: {}",
-            address
-        );
-
-        // Verify identification DIDs were read
-        if let Some(vin) = ecu.get("vin") {
-            let vin_str = vin.as_str().unwrap();
-            eprintln!("VIN: {}", vin_str);
-            assert_eq!(
-                vin_str, "WF0XXXGCDX1234567",
-                "VIN should match example-ecu's VIN"
-            );
-        }
-
-        if let Some(part_number) = ecu.get("part_number") {
-            eprintln!("Part Number: {}", part_number.as_str().unwrap());
-        }
-
-        if let Some(software_version) = ecu.get("supplier_sw_version") {
-            eprintln!("Software Version: {}", software_version.as_str().unwrap());
-        }
-
-        // Verify config snippet can be used
-        let config_snippet = ecu["config_snippet"].as_str().unwrap();
-        assert!(
-            config_snippet.contains("[transport.isotp]"),
-            "Config snippet should contain [transport.isotp] section"
-        );
-        assert!(
-            config_snippet.contains("tx_id"),
-            "Config snippet should contain tx_id"
-        );
-        assert!(
-            config_snippet.contains("rx_id"),
-            "Config snippet should contain rx_id"
-        );
-    } else {
-        eprintln!("WARNING: No ECUs discovered. This may indicate:");
-        eprintln!("  - example-ecu's functional listener didn't respond in time");
-        eprintln!("  - CAN interface issue");
-        eprintln!("  - Discovery timeout too short");
-        // Don't fail the test if no ECUs found - the API itself worked
-    }
-
-    eprintln!("=== Test PASSED: ECU Discovery API working ===");
-}
-
-/// Test ECU discovery returns proper error for invalid method
-#[tokio::test]
-#[serial_test::serial]
-#[serial_test::serial]
-async fn test_ecu_discovery_invalid_method() {
-    eprintln!("\n=== Testing ECU Discovery with invalid method ===");
-
-    let harness = TestHarness::new()
-        .await
-        .expect("Failed to create test harness");
-
-    // Call discovery with invalid method
-    let resp = harness
-        .post_form(
-            "/vehicle/v1/discovery",
-            &[("method", "invalid_method"), ("interface", "vcan0")],
-        )
-        .await;
-
-    assert!(resp.is_ok(), "POST should succeed at HTTP level");
-    let resp = resp.unwrap();
-
-    // Should return 400 Bad Request
-    assert_eq!(
-        resp.status().as_u16(),
-        400,
-        "Expected 400 Bad Request for invalid method, got: {}",
-        resp.status()
-    );
-
-    let body: Value = resp.json().await.expect("Failed to parse error response");
-    eprintln!(
-        "Error response: {}",
-        serde_json::to_string_pretty(&body).unwrap()
-    );
-
-    // Verify error message mentions the invalid method
-    let error_msg = body["message"].as_str().unwrap_or("");
-    assert!(
-        error_msg.contains("invalid_method") || error_msg.contains("Unknown"),
-        "Error message should mention the invalid method"
-    );
-
-    eprintln!("=== Test PASSED: Invalid method returns proper error ===");
-}
-
-/// Test SOME/IP discovery requires gateway_host parameter
-#[tokio::test]
-#[serial_test::serial]
-#[serial_test::serial]
-async fn test_ecu_discovery_someip_requires_gateway() {
-    eprintln!("\n=== Testing SOME/IP Discovery requires gateway_host ===");
-
-    let harness = TestHarness::new()
-        .await
-        .expect("Failed to create test harness");
-
-    // Call SOME/IP discovery without gateway_host
-    let resp = harness
-        .post_form(
-            "/vehicle/v1/discovery",
-            &[
-                ("method", "someip"),
-                // Missing gateway_host - should fail
-            ],
-        )
-        .await;
-
-    assert!(resp.is_ok(), "POST should succeed at HTTP level");
-    let resp = resp.unwrap();
-
-    // Should return 400 Bad Request
-    assert_eq!(
-        resp.status().as_u16(),
-        400,
-        "Expected 400 Bad Request when gateway_host is missing, got: {}",
-        resp.status()
-    );
-
-    let body: Value = resp.json().await.expect("Failed to parse error response");
-    eprintln!(
-        "Error response: {}",
-        serde_json::to_string_pretty(&body).unwrap()
-    );
-
-    // Verify error message mentions gateway_host
-    let error_msg = body["message"].as_str().unwrap_or("");
-    assert!(
-        error_msg.contains("gateway_host"),
-        "Error message should mention gateway_host is required"
-    );
-
-    eprintln!("=== Test PASSED: SOME/IP discovery validates gateway_host ===");
 }
 
 // =============================================================================
@@ -3353,218 +3095,6 @@ async fn test_io_control_security_required() {
 }
 
 // =============================================================================
-// Link Control Tests (UDS 0x87 LinkControl)
-// =============================================================================
-
-/// Test: Get link status
-#[tokio::test]
-#[serial_test::serial]
-async fn test_get_link_status() {
-    eprintln!("\n=== Testing get link status ===");
-
-    let harness = TestHarness::new()
-        .await
-        .expect("Failed to create test harness");
-    let client = harness.sovd_client();
-
-    let mode = client
-        .get_mode("vtx_ecm", "link")
-        .await
-        .expect("get_mode link failed");
-
-    eprintln!("Mode ID: {}", mode.id);
-    eprintln!("Value: {:?}", mode.value);
-
-    assert_eq!(mode.id, "link");
-
-    eprintln!("=== Test PASSED: Get link status ===");
-}
-
-/// Test: Verify and transition baud rate
-#[tokio::test]
-#[serial_test::serial]
-async fn test_link_control_verify_and_transition() {
-    use sovd_client::SessionType;
-
-    eprintln!("\n=== Testing link control verify and transition ===");
-
-    let harness = TestHarness::new()
-        .await
-        .expect("Failed to create test harness");
-    let client = harness.sovd_client();
-
-    // Switch to extended session
-    client
-        .set_session("vtx_ecm", SessionType::Extended)
-        .await
-        .expect("set_session failed");
-
-    // Verify a fixed baud rate
-    let body = serde_json::json!({
-        "action": "verify_fixed",
-        "baud_rate_id": "250k"
-    });
-
-    let (status, json) = harness
-        .put("/vehicle/v1/components/vtx_ecm/modes/link", body)
-        .await
-        .expect("PUT verify baud rate failed");
-
-    assert_eq!(status, 200, "Verify baud rate failed");
-    assert_eq!(json["success"].as_bool(), Some(true));
-    assert_eq!(json["baud_rate"].as_u64(), Some(250000));
-
-    eprintln!("Verified baud rate: {} bps", json["baud_rate"]);
-
-    // Transition to the verified baud rate
-    let body = serde_json::json!({
-        "action": "transition"
-    });
-
-    let (status, json) = harness
-        .put("/vehicle/v1/components/vtx_ecm/modes/link", body)
-        .await
-        .expect("PUT transition baud rate failed");
-
-    assert_eq!(status, 200, "Transition baud rate failed");
-    assert_eq!(json["success"].as_bool(), Some(true));
-    assert_eq!(json["baud_rate"].as_u64(), Some(250000));
-
-    eprintln!("Transitioned to baud rate: {} bps", json["baud_rate"]);
-
-    // Verify the new status
-    let (status, json) = harness
-        .get_with_status("/vehicle/v1/components/vtx_ecm/modes/link")
-        .await
-        .expect("GET link status failed");
-
-    assert_eq!(status, 200);
-    assert_eq!(json["current_baud_rate"].as_u64(), Some(250000));
-
-    eprintln!(
-        "Current baud rate confirmed: {} bps",
-        json["current_baud_rate"]
-    );
-
-    eprintln!("=== Test PASSED: Link control verify and transition ===");
-}
-
-/// Test: Verify specific baud rate
-#[tokio::test]
-#[serial_test::serial]
-async fn test_link_control_verify_specific() {
-    use sovd_client::SessionType;
-
-    eprintln!("\n=== Testing link control verify specific baud rate ===");
-
-    let harness = TestHarness::new()
-        .await
-        .expect("Failed to create test harness");
-    let client = harness.sovd_client();
-
-    // Switch to extended session
-    client
-        .set_session("vtx_ecm", SessionType::Extended)
-        .await
-        .expect("set_session failed");
-
-    // Verify a specific baud rate
-    let body = serde_json::json!({
-        "action": "verify_specific",
-        "baud_rate": 333333
-    });
-
-    let (status, json) = harness
-        .put("/vehicle/v1/components/vtx_ecm/modes/link", body)
-        .await
-        .expect("PUT verify specific baud rate failed");
-
-    assert_eq!(status, 200, "Verify specific baud rate failed");
-    assert_eq!(json["success"].as_bool(), Some(true));
-    assert_eq!(json["baud_rate"].as_u64(), Some(333333));
-
-    eprintln!("Verified specific baud rate: {} bps", json["baud_rate"]);
-
-    eprintln!("=== Test PASSED: Link control verify specific ===");
-}
-
-/// Test: Link control transition without verify fails
-#[tokio::test]
-#[serial_test::serial]
-async fn test_link_control_transition_without_verify() {
-    use sovd_client::SessionType;
-
-    eprintln!("\n=== Testing link control transition without verify ===");
-
-    let harness = TestHarness::new()
-        .await
-        .expect("Failed to create test harness");
-    let client = harness.sovd_client();
-
-    // Switch to extended session
-    client
-        .set_session("vtx_ecm", SessionType::Extended)
-        .await
-        .expect("set_session failed");
-
-    // Try to transition without verifying first
-    let body = serde_json::json!({
-        "action": "transition"
-    });
-
-    let (status, _) = harness
-        .put("/vehicle/v1/components/vtx_ecm/modes/link", body)
-        .await
-        .expect("PUT transition failed");
-
-    // Should fail because no baud rate was verified
-    assert_eq!(status, 400, "Expected bad request (400)");
-    eprintln!(
-        "Transition without verify failed as expected (status {})",
-        status
-    );
-
-    eprintln!("=== Test PASSED: Transition without verify fails ===");
-}
-
-/// Test: Link control requires extended session
-#[tokio::test]
-#[serial_test::serial]
-async fn test_link_control_requires_extended_session() {
-    eprintln!("\n=== Testing link control requires extended session ===");
-
-    let harness = TestHarness::new()
-        .await
-        .expect("Failed to create test harness");
-
-    // Don't switch to extended session - stay in default
-
-    // Try to verify baud rate in default session
-    let body = serde_json::json!({
-        "action": "verify_fixed",
-        "baud_rate_id": "500k"
-    });
-
-    let (status, _) = harness
-        .put("/vehicle/v1/components/vtx_ecm/modes/link", body)
-        .await
-        .expect("PUT verify baud rate failed");
-
-    // ECU returns ConditionsNotCorrect (0x22) — UDS NRC maps to spec
-    // error-response (409 Conflict per Phase F.3 status-code remap).
-    assert_eq!(
-        status, 409,
-        "Expected 409 (Conflict / error-response) for session requirement"
-    );
-    eprintln!(
-        "Link control in default session failed as expected (status {})",
-        status
-    );
-
-    eprintln!("=== Test PASSED: Link control requires extended session ===");
-}
-
-// =============================================================================
 // Software Update Tests (Full Cycle with Firmware Verification)
 // =============================================================================
 
@@ -4417,15 +3947,29 @@ async fn test_updates_register_and_part_upload() {
     assert!(part_ids.contains(&"manifest"), "manifest part missing");
     assert!(part_ids.contains(&"payload-0"), "payload-0 part missing");
 
-    // GET /updates/{id} — top-level status surfaces parts_uploaded.
+    // GET /updates/{id} — Table 261 package descriptor. `id`, `update_name`
+    // and `size` are the mandatory fields; the per-part upload count is
+    // verified above via GET /bulk-data (the descriptor carries no parts
+    // count — uploaded parts feed `size`, summed across the upload).
     let status_path = format!("/vehicle/v1/components/vtx_ecm/updates/{}", update_id);
     let (status, body) = harness
         .get_with_status(&status_path)
         .await
         .expect("GET /updates/{id} failed");
     assert_eq!(status, 200);
-    assert_eq!(body["parts_uploaded"].as_u64(), Some(2));
-    assert_eq!(body["update_id"].as_str(), Some(update_id.as_str()));
+    assert_eq!(
+        body["id"].as_str(),
+        Some(update_id.as_str()),
+        "descriptor `id` must equal the package id, body = {body}"
+    );
+    assert!(
+        body["update_name"].as_str().is_some(),
+        "Table 261 `update_name` is mandatory, body = {body}"
+    );
+    assert!(
+        body["size"].as_u64().is_some(),
+        "Table 261 `size` is mandatory, body = {body}"
+    );
 
     // DELETE — cleans up SOVD-side state + asks backend to abort.
     let del_status = harness

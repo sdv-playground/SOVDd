@@ -1,13 +1,20 @@
-//! Mode handlers (UDS session, security, and link control)
+//! Mode handlers (UDS session + security)
 //!
-//! Implements SOVD standard mode endpoints as defined in ASAM SOVD specification.
+//! Implements SOVD standard mode endpoints as defined in ASAM SOVD
+//! specification.
+//!
+//! C-025 / C-130: only the standardized mode names are served here.
+//! UDS LinkControl (0x87) has no entry in the Table 343 service→mode
+//! mapping ("not represented"), so there is no `modes/link` resource —
+//! the former link-control handlers + request/response types were
+//! removed.
 
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use sovd_core::{DiagnosticBackend, LinkControlResult, SecurityState};
+use sovd_core::{DiagnosticBackend, SecurityState};
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -100,18 +107,6 @@ pub struct SecurityModeGetResponse {
     /// Current security state as value (e.g., "locked", "level1")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct LinkControlRequest {
-    /// Action: "verify_fixed", "verify_specific", or "transition"
-    pub action: String,
-    /// Baud rate identifier for verify_fixed (e.g., "500k", "0x12")
-    #[serde(default)]
-    pub baud_rate_id: Option<String>,
-    /// Baud rate in bps for verify_specific
-    #[serde(default)]
-    pub baud_rate: Option<u32>,
 }
 
 // =============================================================================
@@ -248,58 +243,4 @@ pub async fn put_security_mode(
         })
         .into_response())
     }
-}
-
-// =============================================================================
-// Link Control Handlers
-// =============================================================================
-
-/// SOVD standard GET response for link mode
-#[derive(Debug, Serialize)]
-pub struct LinkModeGetResponse {
-    /// Mode identifier (always "link")
-    pub id: String,
-    /// Current baud rate in bps
-    pub current_baud_rate: u32,
-    /// Pending baud rate (verified but not transitioned)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pending_baud_rate: Option<u32>,
-    /// Link state description
-    pub link_state: String,
-}
-
-/// GET /vehicle/v1/components/:component_id/modes/link
-/// Get current link status
-pub async fn get_link_mode(
-    State(state): State<AppState>,
-    Path(component_id): Path<String>,
-) -> Result<Json<LinkModeGetResponse>, ApiError> {
-    let backend = state.get_backend(&component_id)?;
-    let mode = backend.get_link_mode().await?;
-    Ok(Json(LinkModeGetResponse {
-        id: "link".to_string(),
-        current_baud_rate: mode.current_baud_rate,
-        pending_baud_rate: mode.pending_baud_rate,
-        link_state: mode.link_state,
-    }))
-}
-
-/// PUT /vehicle/v1/components/:component_id/modes/link
-/// Control link baud rate
-pub async fn put_link_mode(
-    State(state): State<AppState>,
-    Path(component_id): Path<String>,
-    Json(request): Json<LinkControlRequest>,
-) -> Result<Json<LinkControlResult>, ApiError> {
-    let backend = state.get_backend(&component_id)?;
-
-    let result = backend
-        .set_link_mode(
-            &request.action,
-            request.baud_rate_id.as_deref(),
-            request.baud_rate,
-        )
-        .await?;
-
-    Ok(Json(result))
 }

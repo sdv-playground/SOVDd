@@ -11,25 +11,37 @@
 //!     → list of `CyclicSubscription`.
 //!
 //!   `GET  /vehicle/v1/components/{id}/cyclic-subscriptions/{id}`
-//!     → `CyclicSubscription`.
+//!     → content-negotiated:
+//!         * `Accept: text/event-stream` → the SSE event stream (§7.10.3
+//!           — the cyclic-subscription resource IS the stream).
+//!         * otherwise → the `CyclicSubscription` details (§7.10).
 //!
 //!   `DELETE /vehicle/v1/components/{id}/cyclic-subscriptions/{id}`
 //!     → 204 No Content.
 //!
-//! SSE stream delivery happens on a separate `streams` resource
-//! (`GET /vehicle/v1/components/{id}/streams/{subscription_id}`).
-//! Single resource per subscription per spec; for multi-parameter
+//! There is no separate `streams` resource: per ISO 17978-3 §7.10.3 the
+//! temporary subscription resource the create returns (`Location:
+//! …/cyclic-subscriptions/{id}`) is itself the SSE stream — clients
+//! attach with `Accept: text/event-stream`. C-025: only standardized
+//! collection/resource names appear on the entity (Tables 8 & 10);
+//! `cyclic-subscriptions` is one such name, the retired `streams` was
+//! not. Single resource per subscription per spec; for multi-parameter
 //! consumers, open N subscriptions and join the streams client-side.
 
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::convert::Infallible;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt;
 use uuid::Uuid;
 
 use crate::error::ApiError;
@@ -231,7 +243,7 @@ async fn param_is_get_able(
 
 /// C-073 (§7.10.3): the subscribed `resource` must be a same-entity resource
 /// the client can GET.  Resolve it exactly the way the SSE delivery path
-/// (`streams::stream_subscription`) and the data path do:
+/// (`stream_subscription`, above) and the data path do:
 ///
 ///   * `child/param` → resolve `child` as a sub-entity (same-entity tree),
 ///     then validate `param` is GET-able on the child.
@@ -334,28 +346,21 @@ pub async fn create_cyclic_subscription(
         .create(component_id.clone(), request)
         .await;
 
-    let stream_path = format!(
-        "/vehicle/v1/components/{}/streams/{}",
-        component_id, subscription.subscription_id
-    );
     let resource_path = format!(
         "/vehicle/v1/components/{}/cyclic-subscriptions/{}",
         component_id, subscription.subscription_id
     );
 
-    // Spec: Location header points at the created subscription
-    // resource.  Add an additional `Link` header advertising the SSE
-    // stream (custom but harmless) so clients can discover where to
-    // attach without an extra round-trip.
+    // Spec §7.10.3 / C-072: `Location` points at the created temporary
+    // subscription resource — which IS the SSE stream. Clients GET it
+    // with `Accept: text/event-stream` to receive events, or without to
+    // read the details. No separate `streams` URL (C-025).
     let mut headers = HeaderMap::new();
     headers.insert(
         header::LOCATION,
         HeaderValue::from_str(&resource_path)
             .map_err(|e| ApiError::Internal(format!("bad Location header: {e}")))?,
     );
-    if let Ok(link) = HeaderValue::from_str(&format!("<{}>; rel=\"stream\"", stream_path)) {
-        headers.insert(header::LINK, link);
-    }
 
     Ok((StatusCode::CREATED, headers, Json(subscription)))
 }
@@ -396,16 +401,214 @@ pub async fn update_cyclic_subscription(
 }
 
 /// GET /vehicle/v1/components/:component_id/cyclic-subscriptions/:subscription_id
+///
+/// Content-negotiated per ISO 17978-3 §7.10.3 — the cyclic-subscription
+/// resource itself is the SSE stream:
+///
+///   * `Accept: text/event-stream` → the SSE event stream (the events
+///     this subscription's cadence produces).
+///   * any other `Accept` → the `CyclicSubscription` details (JSON).
+///
+/// This is why there is no separate non-standard `streams` resource
+/// (C-025: only standardized names on the entity).
 pub async fn get_cyclic_subscription(
     State(state): State<AppState>,
-    Path((_component_id, subscription_id)): Path<(String, String)>,
-) -> Result<Json<CyclicSubscription>, ApiError> {
+    Path((component_id, subscription_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<axum::response::Response, ApiError> {
+    if wants_event_stream(&headers) {
+        return stream_subscription(&state, &component_id, &subscription_id)
+            .await
+            .map(IntoResponse::into_response);
+    }
+
     state
         .subscription_manager
         .get(&subscription_id)
         .await
-        .map(Json)
+        .map(|sub| Json(sub).into_response())
         .ok_or_else(|| ApiError::NotFound(format!("Subscription not found: {}", subscription_id)))
+}
+
+/// True when the request's `Accept` header asks for `text/event-stream`
+/// (the SSE media type). Matches a bare `text/event-stream` token in the
+/// comma-separated header, ignoring `;q=` weights.
+fn wants_event_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|accept| {
+            accept.split(',').any(|part| {
+                part.split(';')
+                    .next()
+                    .map(str::trim)
+                    .map(str::to_ascii_lowercase)
+                    .as_deref()
+                    == Some("text/event-stream")
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// SSE EventEnvelope — ISO 17978-3 §5.2.2 / Table 5.
+///
+/// Each event SHALL carry one envelope via the SSE `data:` line.
+/// `payload` is the success payload; `error` is mutually exclusive and
+/// carries a `GenericError` if the publisher hit a transient producer
+/// error.
+#[derive(Debug, Serialize)]
+struct StreamEvent {
+    /// RFC 3339 UTC time the server emitted this event (C-050).
+    timestamp: String,
+    /// Conditional success payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payload: Option<serde_json::Value>,
+    /// Conditional error payload (mutually exclusive with `payload`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<sovd_core::GenericError>,
+}
+
+/// SSE delivery for a cyclic subscription (§7.10.3). Invoked by
+/// [`get_cyclic_subscription`] when the client sends
+/// `Accept: text/event-stream`; the subscription resource IS the stream.
+async fn stream_subscription(
+    state: &AppState,
+    component_id: &str,
+    subscription_id: &str,
+) -> Result<impl IntoResponse, ApiError> {
+    // Look up the cyclic subscription.
+    let subscription = state
+        .subscription_manager
+        .get(subscription_id)
+        .await
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("Subscription not found: {}", subscription_id))
+        })?;
+
+    if subscription.component_id != component_id {
+        return Err(ApiError::NotFound(format!(
+            "Subscription {} not registered on component {}",
+            subscription_id, component_id
+        )));
+    }
+
+    let backend = state.get_backend(&subscription.component_id)?;
+
+    // Spec subscriptions carry a single `resource` (path or param-id).
+    // Resolve it against DidStore the same way as the data flow — DID hex
+    // strings pass through unchanged.
+    let did_store = state.did_store_arc();
+    let mut did_to_info: HashMap<String, (String, u16)> = HashMap::new();
+    let resource_param = subscription.resource.clone();
+    // Resolve the resource to the id handed to the backend. A gateway
+    // child resource is `child/param`: resolve the `param` to its DID but
+    // KEEP the `child/` prefix so GatewayBackend::subscribe_data can route
+    // it to the child. The forwarded data points come back keyed by the
+    // child-local id (the gateway does not re-prefix them), so did_to_info
+    // is keyed on that local id, not the prefixed resource.
+    let did_str = if let Some((child, param)) = resource_param.split_once('/') {
+        if let Some(did) = did_store.resolve_did(param) {
+            let did_hex = format!("{:04X}", did);
+            did_to_info.insert(did_hex.clone(), (param.to_string(), did));
+            format!("{child}/{did_hex}")
+        } else {
+            did_to_info.insert(param.to_string(), (param.to_string(), 0));
+            format!("{child}/{param}")
+        }
+    } else if let Some(did) = did_store.resolve_did(&resource_param) {
+        let did_hex = format!("{:04X}", did);
+        did_to_info.insert(did_hex.clone(), (resource_param.clone(), did));
+        did_hex
+    } else {
+        did_to_info.insert(resource_param.clone(), (resource_param.clone(), 0));
+        resource_param.clone()
+    };
+
+    let rate_hz = subscription.interval.rate_hz();
+    let receiver = backend
+        .subscribe_data(std::slice::from_ref(&did_str), rate_hz)
+        .await
+        .map_err(|e| {
+            tracing::error!(?e, did = %did_str, rate_hz, "subscribe_data failed");
+            ApiError::from(e)
+        })?;
+
+    // Sequence counter for events.
+    let seq_counter = Arc::new(AtomicU64::new(1));
+
+    // Convert the broadcast receiver to an SSE stream of EventEnvelopes.
+    let stream = BroadcastStream::new(receiver).filter_map(move |result| {
+        let did_to_info = did_to_info.clone();
+        let seq_counter = seq_counter.clone();
+        let did_store = did_store.clone();
+
+        match result {
+            Ok(data_point) => {
+                let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
+                let timestamp = Utc::now().to_rfc3339();
+
+                // Look up parameter name and DID from the data point ID.
+                let (param_name, did) = did_to_info
+                    .get(&data_point.id)
+                    .cloned()
+                    .unwrap_or_else(|| (data_point.id.clone(), 0));
+
+                // Convert hex value to typed value using DidStore.
+                let converted_value = if let Some(hex_str) = data_point.value.as_str() {
+                    if let Ok(bytes) = hex::decode(hex_str) {
+                        if did != 0 {
+                            did_store.decode_or_raw(did, &bytes)
+                        } else {
+                            data_point.value
+                        }
+                    } else {
+                        data_point.value
+                    }
+                } else {
+                    data_point.value
+                };
+
+                // EventEnvelope.payload: {seq, values{<param>: <val>}}.
+                let payload = serde_json::json!({
+                    "seq": seq,
+                    "values": { param_name: converted_value },
+                });
+                let event = StreamEvent {
+                    timestamp,
+                    payload: Some(payload),
+                    error: None,
+                };
+
+                Some(Ok::<_, Infallible>(
+                    Event::default().data(serde_json::to_string(&event).unwrap_or_default()),
+                ))
+            }
+            Err(lag) => {
+                // Broadcast lag — consumer can't keep up. Spec
+                // EventEnvelope (Table 5) carries error events; surface
+                // the lag rather than dropping it silently.
+                let timestamp = Utc::now().to_rfc3339();
+                let err = sovd_core::GenericError::vendor(
+                    "broadcast-lag",
+                    format!("subscriber lagged behind producer ({})", lag),
+                );
+                let event = StreamEvent {
+                    timestamp,
+                    payload: None,
+                    error: Some(err),
+                };
+                Some(Ok::<_, Infallible>(
+                    Event::default().data(serde_json::to_string(&event).unwrap_or_default()),
+                ))
+            }
+        }
+    });
+
+    // C-070 (§5.2.2): axum's `Sse` responder emits `Content-Type:
+    // text/event-stream`; `KeepAlive` adds the comment-line heartbeat the
+    // spec's `Connection: keep-alive` requirement maps to. Both asserted in
+    // `spec_update_flow::sse_subscription_stream_carries_event_stream_ct`.
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 /// DELETE /vehicle/v1/components/:component_id/cyclic-subscriptions/:subscription_id

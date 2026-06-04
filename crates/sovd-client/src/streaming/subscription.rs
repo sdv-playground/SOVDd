@@ -18,7 +18,8 @@ use super::types::{StreamError, StreamEvent, StreamResult};
 ///
 /// # Lifecycle
 ///
-/// - Created via `SovdClient::subscribe()` or `SovdClient::subscribe_inline()`
+/// - Created via `SovdClient::subscribe()` (attaches to the
+///   `cyclic-subscriptions/{id}` resource with `Accept: text/event-stream`)
 /// - Events are consumed via `next()` or the `Stream` trait
 /// - Call `cancel()` for explicit cleanup, or let it drop
 ///
@@ -130,19 +131,20 @@ impl Subscription {
         self.cleanup().await
     }
 
-    /// Internal cleanup - delete the subscription from the server
+    /// Internal cleanup - delete the subscription from the server.
+    ///
+    /// Targets the spec cyclic-subscription resource
+    /// (`DELETE …/cyclic-subscriptions/{id}`, ISO 17978-3 §7.10) — the
+    /// same resource the SSE stream is served from.
     async fn cleanup(&self) -> StreamResult<()> {
-        // Determine the correct cleanup URL
-        let delete_url = if let Some(comp_id) = &self.component_id {
-            // Component-level subscription
-            format!(
-                "/vehicle/v1/components/{}/subscriptions/{}",
-                comp_id, self.subscription_id
-            )
-        } else {
-            // Global subscription
-            format!("/vehicle/v1/subscriptions/{}", self.subscription_id)
+        let Some(comp_id) = &self.component_id else {
+            // No component scope ⇒ nothing addressable to delete.
+            return Ok(());
         };
+        let delete_url = format!(
+            "/vehicle/v1/components/{}/cyclic-subscriptions/{}",
+            comp_id, self.subscription_id
+        );
 
         let url = self
             .base_url
@@ -211,21 +213,21 @@ impl Stream for Subscription {
 impl Drop for Subscription {
     fn drop(&mut self) {
         if !self.cancelled {
-            // Spawn cleanup task
+            // Spawn cleanup task — DELETE the cyclic-subscription
+            // resource (ISO 17978-3 §7.10) the stream was served from.
             let http_client = self.http_client.clone();
             let base_url = self.base_url.clone();
             let subscription_id = self.subscription_id.clone();
             let component_id = self.component_id.clone();
 
             tokio::spawn(async move {
-                let delete_url = if let Some(comp_id) = &component_id {
-                    format!(
-                        "/vehicle/v1/components/{}/subscriptions/{}",
-                        comp_id, subscription_id
-                    )
-                } else {
-                    format!("/vehicle/v1/subscriptions/{}", subscription_id)
+                let Some(comp_id) = component_id else {
+                    return;
                 };
+                let delete_url = format!(
+                    "/vehicle/v1/components/{}/cyclic-subscriptions/{}",
+                    comp_id, subscription_id
+                );
 
                 if let Ok(url) = base_url.join(&delete_url) {
                     let _ = http_client.delete(url).send().await;

@@ -815,26 +815,10 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
 
-        // P0 fix: discovery is scope-filtered too — an engine-scoped token sees
-        // exactly one ECU, never body_ecu's identity.
-        let r = app
-            .clone()
-            .oneshot(
-                Request::post("/vehicle/v1/discovery")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(r.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(r.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            json["count"], 1,
-            "discovery must not enumerate out-of-scope ECUs"
-        );
+        // (The bus-discovery `POST /vehicle/v1/discovery` endpoint was
+        // removed for C-025 — it was not a SOVD entity resource. C-031
+        // non-leakage is now exercised solely through the `/components`
+        // enumeration filter asserted above.)
 
         // P0 fix: /admin requires an admin scope — a component-only token is denied.
         let r = app

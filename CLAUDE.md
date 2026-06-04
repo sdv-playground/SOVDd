@@ -88,7 +88,7 @@ Three library implementations — `UdsBackend` (sovd-uds), `GatewayBackend` (sov
 
 ### API Layer (sovd-api)
 
-`crates/sovd-api/src/lib.rs` builds the axum router (one flat `Router` with `GenericError` 404/405 fallbacks and CORS/trace/no-body-limit layers — no auth/TLS today). `AppState` holds: backends map, `DidStore`, `SubscriptionManager`, plus per-domain caches (operation executions, `/updates` tracking, log/clear-data config). Handlers are in `crates/sovd-api/src/handlers/` — one file per domain (data.rs, faults.rs, operations.rs, modes.rs, reset.rs, updates.rs, streams.rs, subscriptions.rs, sub_entity.rs, stubs.rs, …). The retired `flash.rs`/`files.rs`/`outputs.rs` handlers are gone: flash/OTA is the `/updates` wire and I/O control (0x2F) lives under `/operations` (C-133).
+`crates/sovd-api/src/lib.rs` builds the axum router (one flat `Router` with `GenericError` 404/405 fallbacks and CORS/trace/no-body-limit layers — no auth/TLS today). `AppState` holds: backends map, `DidStore`, `SubscriptionManager`, plus per-domain caches (operation executions, `/updates` tracking, log/clear-data config). Handlers are in `crates/sovd-api/src/handlers/` — one file per domain (data.rs, faults.rs, operations.rs, modes.rs, reset.rs, updates.rs, subscriptions.rs, sub_entity.rs, stubs.rs, …). The retired `flash.rs`/`files.rs`/`outputs.rs`/`streams.rs`/`discovery.rs` handlers are gone: flash/OTA is the `/updates` wire, I/O control (0x2F) lives under `/operations` (C-133), streaming is `cyclic-subscriptions` (the SSE is content-negotiated on the subscription resource), and bus-discovery (`POST /discovery`) was dropped (C-025).
 
 ### UDS Backend (sovd-uds)
 

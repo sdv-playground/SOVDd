@@ -1262,12 +1262,10 @@ impl SovdClient {
         }
     }
 
-    /// Get the stream URL for a component (for SSE connection)
-    pub fn stream_url(&self, component_id: &str) -> Result<Url> {
-        self.base_url
-            .join(&format!("/vehicle/v1/components/{}/streams", component_id))
-            .map_err(Into::into)
-    }
+    // `stream_url` (the inline `/streams` endpoint helper) was removed
+    // for C-025: `streams` is not a standardized resource name. SSE is
+    // delivered from the `cyclic-subscriptions/{id}` resource via
+    // `subscribe` below.
 
     /// Subscribe to real-time parameter data with automatic SSE streaming
     ///
@@ -1305,10 +1303,12 @@ impl SovdClient {
             .create_cyclic_subscription(component_id, resource, interval)
             .await?;
 
-        // Cyclic subscriptions deliver SSE on the matching `streams/{id}`
-        // path (per the Link header SOVDd emits — we derive it locally).
+        // ISO 17978-3 §7.10.3 / C-025: the cyclic-subscription resource
+        // IS the SSE stream. Attach to it with `Accept: text/event-stream`
+        // (set by `Subscription::connect`). There is no separate
+        // non-standard `streams/{id}` delivery URL.
         let stream_url = format!(
-            "/vehicle/v1/components/{}/streams/{}",
+            "/vehicle/v1/components/{}/cyclic-subscriptions/{}",
             component_id, response.subscription_id
         );
 
@@ -1323,55 +1323,11 @@ impl SovdClient {
         .map_err(|e| SovdClientError::StreamError(e.to_string()))
     }
 
-    /// Subscribe using inline parameters (no subscription ID, direct stream)
-    ///
-    /// Connects directly to the stream endpoint with query parameters.
-    /// Simpler but doesn't create a trackable subscription on the server.
-    ///
-    /// # Arguments
-    /// * `component_id` - ECU/component identifier
-    /// * `parameters` - List of parameter names to subscribe to
-    /// * `rate_hz` - Desired update rate in Hz
-    #[instrument(skip(self, parameters))]
-    pub async fn subscribe_inline(
-        &self,
-        component_id: &str,
-        parameters: Vec<String>,
-        rate_hz: u32,
-    ) -> Result<crate::streaming::Subscription> {
-        use crate::streaming::Subscription;
-
-        // Build stream URL with explode=true repeated keys (C-064).
-        let params_q: String = parameters
-            .iter()
-            .map(|p| format!("parameters={p}"))
-            .collect::<Vec<_>>()
-            .join("&");
-        let stream_path = format!(
-            "/vehicle/v1/components/{}/streams?{}&rate_hz={}",
-            component_id, params_q, rate_hz
-        );
-
-        // Generate a pseudo subscription ID for tracking
-        let subscription_id = format!("inline-{}", uuid::Uuid::new_v4());
-
-        // Connect directly to the stream
-        let subscription = Subscription::connect(
-            self.base_url.clone(),
-            self.client.clone(),
-            subscription_id,
-            Some(component_id.to_string()),
-            &stream_path,
-        )
-        .await
-        .map_err(|e| SovdClientError::StreamError(e.to_string()))?;
-
-        Ok(subscription)
-    }
-
-    // Global flat-namespace subscriptions were a non-spec pre-Phase-E
-    // convenience; they're gone now.  Use cyclic_subscription methods
-    // above per ISO 17978-3 §7.10.
+    // `subscribe_inline` (the non-spec inline `?parameters=` streamer) and
+    // the global flat-namespace subscriptions were retired for C-025 —
+    // `streams` is not a standardized resource name. All streaming goes
+    // through `subscribe` / the `cyclic_subscription` methods above per
+    // ISO 17978-3 §7.10.
 
     // =========================================================================
     // Dynamic Data Identifiers (DDID)
@@ -1675,15 +1631,5 @@ mod tests {
         assert_eq!(SecurityLevel::LEVEL_3.key_send(), 0x04);
         assert_eq!(SecurityLevel::PROGRAMMING.seed_request(), 0x11);
         assert_eq!(SecurityLevel::PROGRAMMING.key_send(), 0x12);
-    }
-
-    #[test]
-    fn test_stream_url() {
-        let client = SovdClient::new("http://localhost:9080").unwrap();
-        let url = client.stream_url("engine_ecu").unwrap();
-        assert_eq!(
-            url.as_str(),
-            "http://localhost:9080/vehicle/v1/components/engine_ecu/streams"
-        );
     }
 }

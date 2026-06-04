@@ -371,11 +371,9 @@ const PATHS: &[PathEntry] = &[
         path: "/vehicle/v1/components/{component_id}/cyclic-subscriptions/{subscription_id}",
         summary: "Cancel a subscription — 204.",
     },
-    PathEntry {
-        method: "GET",
-        path: "/vehicle/v1/components/{component_id}/streams/{subscription_id}",
-        summary: "SSE stream for a cyclic subscription.",
-    },
+    // C-025: no `streams/{id}` entry — SSE delivery is the
+    // `cyclic-subscriptions/{id}` resource itself (GET with
+    // `Accept: text/event-stream`), not a separate non-standard name.
     // reset (§7.19)
     PathEntry {
         method: "PUT",

@@ -59,6 +59,14 @@ pub fn create_router(state: AppState) -> Router {
         // Vendor-extension discovery (Phase B).  Conformance scanners
         // enumerate documented deviations here rather than flag them
         // as unknown surface.  tasks/spec-aligned-updates-wire.md §4.1.
+        //
+        // C-025 scope note: `.well-known/sovd-extensions` is NOT an
+        // entity-resource collection from Tables 8/10 — it's a
+        // server-level resource published under the RFC 8615
+        // (`/.well-known/`) standard mechanism, off the
+        // `/vehicle/v1/components/{id}/…` entity tree. C-025 governs the
+        // collection/resource names that hang off entities; this is
+        // outside that surface, so it does not violate it.
         .route(
             "/.well-known/sovd-extensions",
             get(handlers::meta::sovd_extensions),
@@ -333,8 +341,14 @@ pub fn create_router(state: AppState) -> Router {
                 .delete(handlers::sub_entity::stop_sub_entity_operation_execution),
         )
         // Cyclic subscriptions — ISO 17978-3 §7.10. The subscription
-        // resource itself is component-scoped (one `resource` per sub);
-        // SSE delivery is on the matching `streams/{id}` URL.
+        // resource itself is component-scoped (one `resource` per sub).
+        // Per §7.10.3 the temporary subscription resource IS the SSE
+        // stream: GET it with `Accept: text/event-stream` for the event
+        // stream, or without for the subscription details (content
+        // negotiation in `get_cyclic_subscription`). There is no separate
+        // `streams` resource — `streams` is not a standardized name
+        // (C-025); both the inline-`?parameters=` reader and the cyclic
+        // `streams/{id}` delivery URL were retired.
         .route(
             "/vehicle/v1/components/{component_id}/cyclic-subscriptions",
             get(handlers::subscriptions::list_cyclic_subscriptions)
@@ -345,17 +359,6 @@ pub fn create_router(state: AppState) -> Router {
             get(handlers::subscriptions::get_cyclic_subscription)
                 .put(handlers::subscriptions::update_cyclic_subscription)
                 .delete(handlers::subscriptions::delete_cyclic_subscription),
-        )
-        // SSE stream delivery for a cyclic subscription.
-        .route(
-            "/vehicle/v1/components/{component_id}/streams/{subscription_id}",
-            get(handlers::streams::stream_subscription),
-        )
-        // Inline `streams` reader (non-spec convenience kept for the
-        // query-style "subscribe without state" use case).
-        .route(
-            "/vehicle/v1/components/{component_id}/streams",
-            get(handlers::streams::stream_data),
         )
         // ECU Reset — ISO 17978-3 §7.19. PUT returns 202 + Location to
         // the status sub-resource; the GET on the sub-resource is a stub
@@ -369,7 +372,13 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/status/restart/{exec_id}",
             get(handlers::reset::status_restart_execution),
         )
-        // Mode routes (session, security, link control)
+        // Mode routes (session, security).  Per ISO 17978-3 Table 343 /
+        // C-130 the UDS service→mode mapping covers session (0x10),
+        // security (0x27/0x29), comm-control (0x28) and dtc-setting
+        // (0x85). LinkControl (0x87) has NO standardized mode name — it
+        // is "not represented" — so the former `modes/link` route was
+        // dropped for C-025 (only standardized mode names on the entity)
+        // and C-130 (no special UDS methods).
         .route(
             "/vehicle/v1/components/{component_id}/modes/session",
             get(handlers::modes::get_session_mode).put(handlers::modes::put_session_mode),
@@ -378,15 +387,9 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/modes/security",
             get(handlers::modes::get_security_mode).put(handlers::modes::put_security_mode),
         )
-        .route(
-            "/vehicle/v1/components/{component_id}/modes/link",
-            get(handlers::modes::get_link_mode).put(handlers::modes::put_link_mode),
-        )
-        // Discovery routes
-        .route(
-            "/vehicle/v1/discovery",
-            post(handlers::discovery::discover_ecus),
-        )
+        // C-025: no `POST /vehicle/v1/discovery`. Bus discovery is not a
+        // SOVD entity resource; clients enumerate the entity tree via
+        // `GET /vehicle/v1/components`. The handler + module were removed.
         // /flash + /files retired in F.D8b — sovd-client::FlashClient
         // routes via /updates internally now.  See
         // commit history if you need the legacy handlers.
@@ -456,7 +459,16 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/x-sumo-force-rollback",
             put(handlers::updates::put_x_sumo_force_rollback),
         )
-        // Admin routes - DID definitions management
+        // Admin routes - DID definitions management.
+        //
+        // C-025 scope note: `/admin/*` is a server administration API,
+        // NOT an entity-resource collection from Tables 8/10. It is
+        // rooted off the `/vehicle/v1/components/{id}/…` entity tree (no
+        // `{entity-path}` prefix) and manages server-global DID
+        // definitions, not a resource of any one entity. C-025 constrains
+        // the names that appear *on entities*; the admin surface is
+        // outside that scope (and is gated by an `admin:*` scope under
+        // C-030). So `admin`/`definitions` here is not a C-025 violation.
         .route(
             "/admin/definitions",
             get(handlers::definitions::list_definitions)

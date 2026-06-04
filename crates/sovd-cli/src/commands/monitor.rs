@@ -10,39 +10,28 @@ use crate::output::{OutputContext, OutputFormat, StreamRow};
 
 /// Active event source for the monitor loop.
 ///
-/// Direct (no `/` in any param) multi-parameter requests use the inline
-/// query-style streamer, which joins N params into ONE SSE stream.
-/// Gateway-child params (`child/param`) are not handled by the inline
-/// streamer — they go through the spec cyclic-subscription path, one
-/// subscription per param, merged client-side so the same event loop
-/// drives both shapes.
-enum MonitorStream {
-    /// One inline stream (direct multi-param).
-    Inline(Subscription),
-    /// N cyclic subscriptions merged into one (gateway children).
-    Cyclic(SelectAll<Subscription>),
+/// ISO 17978-3 cyclic-subscriptions are single-resource (one parameter
+/// per subscription), and the inline multi-param `/streams` endpoint was
+/// retired for C-025. So every parameter — direct or gateway-child
+/// (`child/param`) — gets its own cyclic subscription; the streams are
+/// merged client-side so one event loop drives them all.
+struct MonitorStream {
+    /// N cyclic subscriptions merged into one.
+    streams: SelectAll<Subscription>,
 }
 
 impl MonitorStream {
-    /// Next event, regardless of the underlying shape.
+    /// Next event from any underlying subscription.
     async fn next(&mut self) -> Option<Result<StreamEvent, StreamError>> {
-        match self {
-            MonitorStream::Inline(sub) => StreamExt::next(sub).await,
-            MonitorStream::Cyclic(set) => StreamExt::next(set).await,
-        }
+        StreamExt::next(&mut self.streams).await
     }
 
     /// Explicitly cancel every underlying subscription (DELETE on the
     /// server).  Without this, `Subscription::drop` still cleans up, but
     /// Ctrl-C asks for a deterministic teardown.
     async fn cancel(self) -> Result<()> {
-        match self {
-            MonitorStream::Inline(sub) => sub.cancel().await?,
-            MonitorStream::Cyclic(set) => {
-                for sub in set.into_iter() {
-                    sub.cancel().await?;
-                }
-            }
+        for sub in self.streams.into_iter() {
+            sub.cancel().await?;
         }
         Ok(())
     }
@@ -76,19 +65,16 @@ pub async fn monitor(
     ));
     ctx.info("Press Ctrl+C to stop");
 
-    // Gateway children (`child/param`) can no longer ride the inline
-    // streamer — fan them out over the spec cyclic-subscription path and
-    // merge.  Pure direct requests keep the single-stream inline shape.
-    let is_gateway = params.iter().any(|p| p.contains('/'));
-    let mut stream = if is_gateway {
-        let interval = rate_to_interval(rate);
-        let mut subs = Vec::with_capacity(params.len());
-        for param in &params {
-            subs.push(client.subscribe(ecu, param, interval).await?);
-        }
-        MonitorStream::Cyclic(select_all(subs))
-    } else {
-        MonitorStream::Inline(client.subscribe_inline(ecu, params.clone(), rate).await?)
+    // Every parameter (direct or gateway-child `child/param`) gets its
+    // own spec cyclic-subscription; the per-subscription SSE streams are
+    // merged client-side. C-025 retired the inline multi-param streamer.
+    let interval = rate_to_interval(rate);
+    let mut subs = Vec::with_capacity(params.len());
+    for param in &params {
+        subs.push(client.subscribe(ecu, param, interval).await?);
+    }
+    let mut stream = MonitorStream {
+        streams: select_all(subs),
     };
 
     // Set up Ctrl+C handler
