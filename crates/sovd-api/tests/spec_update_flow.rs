@@ -1099,6 +1099,225 @@ async fn version_info_is_sourced_from_shared_definition() {
 }
 
 // ---------------------------------------------------------------------------
-// (C-110 — /updates ?origin query + reserved 'autonomous' package id are
-// covered by the §7.18 catalog reshape tests, not here.)
+// §7.18 catalog reshape — package-id catalog (Table 257), Table 261 detail,
+// origin filter (C-110), reserved `autonomous` (§7.18.1.5), collision, and
+// reserved-char ids.
 // ---------------------------------------------------------------------------
+
+async fn register(server: &TestServer, body: Value) -> reqwest::Response {
+    let url = format!("{}/vehicle/v1/components/dev1/updates", server.base_url());
+    http().post(url).json(&body).send().await.expect("register")
+}
+
+/// §7.18.2 Table 257: `GET /updates` is a `string[]` catalog of package ids,
+/// filtered by `origin` (Table 254/255). `remote` (the default) lists nothing
+/// on SOVDd; `proximity` / custom `x-<ext>-` list the staged ids; `x-sovd-`
+/// → 400.
+#[tokio::test]
+async fn list_updates_is_string_catalog_filtered_by_origin() {
+    let (server, _b) = spawn_with("singleshot").await;
+    let resp = register(&server, serde_json::json!({ "id": "pkg-cat-1" })).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+
+    let (st, body) = get_json(
+        &server,
+        "/vehicle/v1/components/dev1/updates?origin=proximity",
+    )
+    .await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+    let items = body["items"].as_array().unwrap();
+    assert!(
+        items.iter().all(|i| i.is_string()),
+        "Table 257 items must be id strings, not objects"
+    );
+    assert!(items.iter().any(|i| i == "pkg-cat-1"));
+
+    // remote (and omitted → default remote) → empty (no SOVDd-pulled catalog).
+    let (_st, body) = get_json(&server, "/vehicle/v1/components/dev1/updates?origin=remote").await;
+    assert!(body["items"].as_array().unwrap().is_empty());
+    let (_st, body) = get_json(&server, "/vehicle/v1/components/dev1/updates").await;
+    assert!(body["items"].as_array().unwrap().is_empty());
+
+    // reserved x-sovd- → 400; custom x-<ext>- → lists.
+    let (st, _b) = get_json(
+        &server,
+        "/vehicle/v1/components/dev1/updates?origin=x-sovd-foo",
+    )
+    .await;
+    assert_eq!(st, reqwest::StatusCode::BAD_REQUEST);
+    let (st, body) = get_json(
+        &server,
+        "/vehicle/v1/components/dev1/updates?origin=x-acme-bench",
+    )
+    .await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+    assert!(body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| i == "pkg-cat-1"));
+}
+
+/// §7.18.3 Table 261: `GET /updates/{id}` returns the package detail (mandatory
+/// id/update_name/size), not the old session body. `size` is derived from the
+/// uploaded parts.
+#[tokio::test]
+async fn get_update_returns_table_261_detail() {
+    let (server, _b) = spawn_with("singleshot").await;
+    let id = open_update(&server).await; // server-minted id, empty body
+    upload_part(&server, &id, "manifest", b"hsm-manifest-bytes").await;
+
+    let (st, body) = get_json(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}"),
+    )
+    .await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+    assert_eq!(body["id"], id);
+    assert_eq!(body["update_name"], id, "update_name defaults to the id");
+    assert!(body["size"].is_number(), "size is mandatory (Table 261)");
+    // The legacy session fields are gone (reshape; lifecycle lives at /status).
+    assert!(
+        body.get("state").is_none() && body.get("parts").is_none(),
+        "Table 261 body must not carry the legacy session fields"
+    );
+}
+
+/// Declared Table 261 fields in the register `manifest` are reflected by the
+/// default describer.
+#[tokio::test]
+async fn get_update_detail_reflects_declared_fields() {
+    let (server, _b) = spawn_with("singleshot").await;
+    let resp = register(
+        &server,
+        serde_json::json!({
+            "id": "ADAS-v2-03-2154",
+            "manifest": { "update_name": "ADAS feature update", "automated": true, "duration": 900 }
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+
+    let (st, body) = get_json(
+        &server,
+        "/vehicle/v1/components/dev1/updates/ADAS-v2-03-2154",
+    )
+    .await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+    assert_eq!(body["id"], "ADAS-v2-03-2154");
+    assert_eq!(body["update_name"], "ADAS feature update");
+    assert_eq!(body["automated"], true);
+    assert_eq!(body["duration"], 900);
+}
+
+/// A client-declared id is the stable catalog key (URL id + Table 261 `id`).
+#[tokio::test]
+async fn register_with_declared_id_is_stable_key() {
+    let (server, _b) = spawn_with("singleshot").await;
+    let resp = register(&server, serde_json::json!({ "id": "pkg-stable" })).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+    assert_eq!(
+        resp.json::<Value>().await.unwrap()["update_id"],
+        "pkg-stable"
+    );
+    let (st, body) = get_json(&server, "/vehicle/v1/components/dev1/updates/pkg-stable").await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+    assert_eq!(body["id"], "pkg-stable");
+}
+
+/// `autonomous` is reserved (§7.18.1.5): not registrable (400) and reported as
+/// not-applicable on read (404) since SOVDd does not self-select.
+#[tokio::test]
+async fn autonomous_is_reserved() {
+    let (server, _b) = spawn_with("singleshot").await;
+    let resp = register(&server, serde_json::json!({ "id": "autonomous" })).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let (st, body) = get_json(&server, "/vehicle/v1/components/dev1/updates/autonomous").await;
+    assert_eq!(st, reqwest::StatusCode::NOT_FOUND);
+    assert!(body["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("autonomous"));
+}
+
+/// Re-registering an in-progress package id conflicts (409
+/// update-process-in-progress, C-111).
+#[tokio::test]
+async fn repost_active_id_conflicts() {
+    let (server, _b) = spawn_with("singleshot").await;
+    assert_eq!(
+        register(&server, serde_json::json!({ "id": "pkg-reflash" }))
+            .await
+            .status(),
+        reqwest::StatusCode::CREATED
+    );
+    // Upload a part → Uploading (active).
+    upload_part(&server, "pkg-reflash", "manifest", b"banked-manifest").await;
+    let resp = register(&server, serde_json::json!({ "id": "pkg-reflash" })).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(
+        resp.json::<Value>().await.unwrap()["error_code"],
+        "update-process-in-progress"
+    );
+}
+
+/// Re-registering an untouched/terminal id replaces it (idempotent re-open) —
+/// the replaceable branch of the collision check.
+#[tokio::test]
+async fn repost_untouched_id_replaces() {
+    let (server, _b) = spawn_with("singleshot").await;
+    assert_eq!(
+        register(&server, serde_json::json!({ "id": "pkg-x" }))
+            .await
+            .status(),
+        reqwest::StatusCode::CREATED
+    );
+    // Freshly-registered (no parts) → untouched → re-POST replaces (201).
+    assert_eq!(
+        register(&server, serde_json::json!({ "id": "pkg-x" }))
+            .await
+            .status(),
+        reqwest::StatusCode::CREATED
+    );
+}
+
+/// A package id carrying reserved chars (`#`) round-trips: the Location/href is
+/// percent-encoded, and the encoded path resolves to the raw stored id.
+#[tokio::test]
+async fn reserved_char_id_round_trips_encoded() {
+    let (server, _b) = spawn_with("singleshot").await;
+    let resp = register(&server, serde_json::json!({ "id": "#kernel-v1" })).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+    let loc = resp
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        loc.contains("%23kernel-v1"),
+        "Location must encode '#': {loc}"
+    );
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["update_id"], "#kernel-v1", "raw id echoed in body");
+    assert!(body["href"].as_str().unwrap().contains("%23kernel-v1"));
+
+    // GET via the encoded path resolves (axum decodes → matches stored key).
+    let (st, body) = get_json(&server, "/vehicle/v1/components/dev1/updates/%23kernel-v1").await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+    assert_eq!(body["id"], "#kernel-v1");
+
+    // The catalog lists the raw id.
+    let (_st, body) = get_json(
+        &server,
+        "/vehicle/v1/components/dev1/updates?origin=proximity",
+    )
+    .await;
+    assert!(body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| i == "#kernel-v1"));
+}

@@ -28,13 +28,41 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use futures::StreamExt;
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sovd_core::PackageStream;
+use sovd_core::{PackageStream, UpdatePackageContext, UpdatePackageDescriptor, UpdatePartRef};
 use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::state::{AppState, Phase, Status, UpdatePart, UpdateState, UpdatesEntry};
+
+/// Reserved update-package id (§7.18.1.5). On servers that self-select,
+/// `GET /updates/autonomous` resolves to a concrete installable id; SOVDd
+/// performs no self-governed selection, so `autonomous` is never a real
+/// package and is refused as a registrable installable id.
+const AUTONOMOUS_PACKAGE_ID: &str = "autonomous";
+
+/// Percent-encode set for a package-id (or part-id) URL path segment. Mirrors
+/// the client's `PART_SEGMENT_ENCODE` so server-emitted hrefs round-trip ids
+/// carrying reserved chars (e.g. SUIT ids like `#kernel`).
+const ID_SEGMENT_ENCODE: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}')
+    .add(b'/')
+    .add(b'%');
+
+/// Percent-encode an id for safe interpolation into an href/Location path.
+fn enc(segment: &str) -> String {
+    utf8_percent_encode(segment, ID_SEGMENT_ENCODE).to_string()
+}
 
 // ---------------------------------------------------------------------------
 // Wire types
@@ -53,14 +81,20 @@ use crate::state::{AppState, Phase, Status, UpdatePart, UpdateState, UpdatesEntr
 /// downstream backend.
 #[derive(Debug, Deserialize, Default)]
 pub struct RegisterUpdateRequest {
+    /// Client-declared stable package id (§7.18 Table 261 `id`). When present
+    /// it becomes the catalog key / URL id; absent → the server mints a UUID.
+    /// The reserved id `autonomous` is refused (400, §7.18.1.5).
+    #[serde(default)]
+    pub id: Option<String>,
     /// Optional component id the manifest is addressed to.  When
     /// present, MUST match the path's `{component_id}` — otherwise the
     /// server returns 415 Unsupported Media Type before allocating an
     /// update_id.  Absent means "trust the path" (F.D2 behaviour).
     #[serde(default)]
     pub target: Option<String>,
-    /// Pass-through manifest document.  Schema is intentionally open
-    /// in F.D2/F.D3 — the dispatcher (F.D4+) tightens it.
+    /// Pass-through register document.  The §7.18.3 descriptor default impl
+    /// reads declared `update_name`/`size`/`automated`/`notes`/`duration`/
+    /// `preconditions` from it; a format-aware backend may parse more.
     #[serde(default)]
     pub manifest: Option<serde_json::Value>,
 }
@@ -73,29 +107,12 @@ pub struct RegisterUpdateResponse {
     pub executions_href: String,
 }
 
+/// `GET /updates` — ISO 17978-3 §7.18.2 Table 257: a catalog of update
+/// package ids. (`autonomous` is included only on servers that self-select;
+/// SOVDd does not, so it never appears here.)
 #[derive(Debug, Serialize)]
 pub struct UpdatesListResponse {
-    pub items: Vec<UpdateSummary>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct UpdateSummary {
-    pub update_id: String,
-    pub state: String,
-    pub href: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct UpdateStatusResponse {
-    pub update_id: String,
-    pub state: String,
-    pub parts_uploaded: usize,
-    pub parts: Vec<PartStatusEntry>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub manifest: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transfer_id: Option<String>,
-    pub href: String,
+    pub items: Vec<String>,
 }
 
 /// ISO 17978-3 §7.18.7 Table 270 — body of `GET /updates/{id}/status`.
@@ -186,8 +203,62 @@ pub async fn register_update(
         }
     }
 
-    let update_id = Uuid::new_v4().to_string();
+    // Resolve the stable package id: a client-declared id (Table 261 `id`)
+    // becomes the catalog key; absent → mint a UUID. `autonomous` is reserved
+    // (§7.18.1.5) and cannot be registered as an installable package.
+    let update_id = match req.id.as_deref() {
+        Some(AUTONOMOUS_PACKAGE_ID) => {
+            return Err(ApiError::BadRequest(
+                "'autonomous' is a reserved update-package id and cannot be registered \
+                 (§7.18.1.5)"
+                    .into(),
+            ));
+        }
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => Uuid::new_v4().to_string(),
+    };
     let manifest = req.manifest;
+
+    // Collision handling on a (now possibly client-stable) id, scoped to the
+    // component. A still-active package → 409 update-process-in-progress
+    // (C-111). A terminal or untouched-Registered entry → tear down any
+    // residue and replace (idempotent re-flash).
+    let prior = {
+        let store = state.updates.0.lock();
+        store
+            .get(&update_id)
+            .filter(|e| e.component_id == component_id)
+            .map(|e| {
+                (
+                    e.status,
+                    e.state,
+                    e.substate,
+                    e.transfer_id.clone(),
+                    e.task_handle.clone(),
+                )
+            })
+    };
+    if let Some((status, ustate, substate, prior_tid, prior_task)) = prior {
+        let terminal = matches!(
+            ustate,
+            UpdateState::Committed | UpdateState::RolledBack | UpdateState::Aborted
+        ) || status == Status::Failed;
+        let untouched =
+            ustate == UpdateState::Registered && status == Status::Pending && substate.is_none();
+        if !(terminal || untouched) {
+            return Err(ApiError::UpdateInProgress(format!(
+                "update package {update_id:?} on {component_id:?} is in progress; \
+                 finish, abort, or roll it back before re-registering"
+            )));
+        }
+        // Replaceable: tear down any residue before re-inserting fresh.
+        if let Some(handle) = prior_task {
+            handle.abort();
+        }
+        if let Some(tid) = prior_tid {
+            let _ = backend.abort_flash(&tid).await;
+        }
+    }
 
     // Open the backend's flash session up-front. Backends such as
     // `VmBackend` need to be in their `AwaitingManifest` state
@@ -229,7 +300,8 @@ pub async fn register_update(
 
     let base = format!(
         "/vehicle/v1/components/{}/updates/{}",
-        component_id, update_id
+        component_id,
+        enc(&update_id)
     );
     let resp = RegisterUpdateResponse {
         update_id: update_id.clone(),
@@ -248,53 +320,120 @@ pub async fn register_update(
     Ok((StatusCode::CREATED, headers, Json(resp)))
 }
 
-/// GET /vehicle/v1/components/{component_id}/updates
+/// `GET /updates` query (§7.18.2 / Table 255). `origin` (Table 254) selects
+/// the environment; `target-version` is accepted for wire-compat (SOVDd's
+/// staged packages are version-pinned by their manifest, not filtered here).
+#[derive(Debug, Deserialize, Default)]
+pub struct ListUpdatesQuery {
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(rename = "target-version", default)]
+    pub target_version: Option<String>,
+}
+
+/// Validate a Table 254 `UpdateOrigins` token and report whether SOVDd's
+/// (proximity-origin) staged catalog applies. `None` defaults to `remote`
+/// (Table 255) → not applicable. The reserved `x-sovd-` prefix and malformed
+/// tokens are rejected with 400 (§7.18.1.2 / C-026).
+fn origin_lists_catalog(raw: Option<&str>) -> Result<bool, ApiError> {
+    let Some(value) = raw else {
+        return Ok(false); // default `remote` — no SOVDd-pulled remote catalog
+    };
+    match value {
+        "remote" => Ok(false),
+        "proximity" => Ok(true),
+        other if other.starts_with("x-sovd-") => Err(ApiError::BadRequest(format!(
+            "origin {other:?} uses the reserved x-sovd- prefix (§7.18.1.2)"
+        ))),
+        other
+            if other.starts_with("x-")
+                && other.matches('-').count() >= 2
+                && other
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') =>
+        {
+            Ok(true) // custom x-<ext>- origin: workshop-defined → applies
+        }
+        other => Err(ApiError::BadRequest(format!(
+            "origin {other:?} is not a valid UpdateOrigins value \
+             (remote|proximity|x-<ext>-<name>)"
+        ))),
+    }
+}
+
+/// GET /vehicle/v1/components/{component_id}/updates — §7.18.2 Table 257.
+/// Returns the catalog of update-package ids (strings) for this component.
 pub async fn list_updates(
     State(state): State<AppState>,
     Path(component_id): Path<String>,
+    Query(query): Query<ListUpdatesQuery>,
 ) -> Result<Json<UpdatesListResponse>, ApiError> {
     let _ = state.get_backend(&component_id)?;
+
+    // SOVDd's `/updates` tracks workshop-pushed (proximity) staging sessions;
+    // there is no server-pulled `remote` catalog, so a `remote` query (the
+    // Table 255 default) lists nothing (200, C-044).
+    if !origin_lists_catalog(query.origin.as_deref())? {
+        return Ok(Json(UpdatesListResponse { items: Vec::new() }));
+    }
+
     let store = state.updates.0.lock();
-    let items: Vec<UpdateSummary> = store
+    let mut items: Vec<String> = store
         .iter()
         .filter(|(_, e)| e.component_id == component_id)
-        .map(|(id, e)| UpdateSummary {
-            update_id: id.clone(),
-            state: e.state.as_str().to_string(),
-            href: format!("/vehicle/v1/components/{}/updates/{}", component_id, id),
-        })
+        .map(|(id, _)| id.clone())
         .collect();
+    items.sort(); // deterministic (HashMap iteration order is not)
     Ok(Json(UpdatesListResponse { items }))
 }
 
-/// GET /vehicle/v1/components/{component_id}/updates/{update_id}
+/// GET /vehicle/v1/components/{component_id}/updates/{update_id} — §7.18.3
+/// Table 261 detail body, resolved via the backend's package describer.
 pub async fn get_update(
     State(state): State<AppState>,
     Path((component_id, update_id)): Path<(String, String)>,
-) -> Result<Json<UpdateStatusResponse>, ApiError> {
-    let _ = state.get_backend(&component_id)?;
-    let store = state.updates.0.lock();
-    let entry = store
-        .get(&update_id)
-        .filter(|e| e.component_id == component_id)
-        .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
-    let parts: Vec<PartStatusEntry> = entry
-        .parts
+) -> Result<Json<UpdatePackageDescriptor>, ApiError> {
+    let backend = state.get_backend(&component_id)?;
+
+    // §7.18.1.5: `autonomous` is a read-only indirection to a concrete id on
+    // servers that self-select. SOVDd performs no self-governed selection, so
+    // it is never a real package here → not applicable.
+    if update_id == AUTONOMOUS_PACKAGE_ID {
+        return Err(ApiError::NotFound(format!(
+            "autonomous update package not supported on component {component_id:?} \
+             (this entity does not perform self-governed updates)"
+        )));
+    }
+
+    // Snapshot what the describer needs, then DROP the lock before the
+    // (async, possibly I/O-bound) describe call — never hold a parking_lot
+    // guard across `.await`.
+    let (register_body, parts): (Option<serde_json::Value>, Vec<UpdatePart>) = {
+        let store = state.updates.0.lock();
+        let entry = store
+            .get(&update_id)
+            .filter(|e| e.component_id == component_id)
+            .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+        (entry.manifest.clone(), entry.parts.clone())
+    };
+
+    let part_refs: Vec<UpdatePartRef<'_>> = parts
         .iter()
-        .map(|p| part_status_entry(&component_id, &update_id, p))
+        .map(|p| UpdatePartRef {
+            part_id: &p.part_id,
+            size: p.size,
+            sha256: &p.sha256,
+            file_id: &p.file_id,
+        })
         .collect();
-    Ok(Json(UpdateStatusResponse {
-        update_id: update_id.clone(),
-        state: entry.state.as_str().to_string(),
-        parts_uploaded: parts.len(),
-        parts,
-        manifest: entry.manifest.clone(),
-        transfer_id: entry.transfer_id.clone(),
-        href: format!(
-            "/vehicle/v1/components/{}/updates/{}",
-            component_id, update_id
-        ),
-    }))
+    let ctx = UpdatePackageContext {
+        id: &update_id,
+        component_id: &component_id,
+        register_body: register_body.as_ref(),
+        parts: &part_refs,
+    };
+    let descriptor = backend.describe_update_package(&ctx).await?;
+    Ok(Json(descriptor))
 }
 
 /// DELETE /vehicle/v1/components/{component_id}/updates/{update_id}
@@ -334,7 +473,8 @@ fn accepted_with_status_location(
 ) -> Result<(StatusCode, HeaderMap), ApiError> {
     let location = format!(
         "/vehicle/v1/components/{}/updates/{}/status",
-        component_id, update_id
+        component_id,
+        enc(update_id)
     );
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -1129,7 +1269,9 @@ pub async fn put_bulk_data_part(
 
     let href = format!(
         "/vehicle/v1/components/{}/updates/{}/bulk-data/{}",
-        component_id, update_id, part_id
+        component_id,
+        enc(&update_id),
+        enc(&part_id)
     );
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
@@ -1157,7 +1299,9 @@ fn part_status_entry(component_id: &str, update_id: &str, p: &UpdatePart) -> Par
         sha256: p.sha256.clone(),
         href: format!(
             "/vehicle/v1/components/{}/updates/{}/bulk-data/{}",
-            component_id, update_id, p.part_id
+            component_id,
+            enc(update_id),
+            enc(&p.part_id)
         ),
     }
 }

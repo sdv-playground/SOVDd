@@ -27,6 +27,7 @@ tracing.workspace = true
 async-trait.workspace = true
 hex.workspace = true
 sha2.workspace = true
+percent-encoding.workspace = true
 crc32fast = "1.4"
 parking_lot.workspace = true
 jsonwebtoken.workspace = true
