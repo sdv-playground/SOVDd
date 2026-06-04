@@ -118,6 +118,32 @@ struct PathEntry {
     summary: &'static str,
 }
 
+/// ISO 17978-3 Table 23 `x-sovd-data-category` — best-effort annotation for a
+/// path item, computed from the path template.
+///
+/// Table 23 marks `x-sovd-data-category` **M** for a data resource. Returns
+/// the annotation for the `/data/{param_id}` resource and `None` for every
+/// other path.
+///
+/// NOTE (C-024): the `/data/{param_id}` template is shared by *every* DID, so
+/// a single precise per-DID category isn't expressible on one templated path
+/// item. We emit the placeholder token `"x-sovd-multiple"` to signal "this
+/// resource is category-tagged; the concrete category varies per DID — read
+/// `ValueMetaData.category` from `GET /data`". A per-DID-accurate
+/// `x-sovd-data-category` would require the doc emitter to introspect the
+/// router/DidStore and emit one concrete path item per registered DID. The
+/// `/data` LIST item carries the precise category today; only this templated
+/// per-resource path item is imprecise. Tracked under C-024.
+fn x_sovd_data_category_for(path: &str) -> Option<&'static str> {
+    if path.ends_with("/data/{param_id}") {
+        // Custom-extension category token (Table 70 `x-<ext>-…` form) meaning
+        // "varies per DID"; not one of the four standard values on purpose.
+        Some("x-sovd-multiple")
+    } else {
+        None
+    }
+}
+
 /// Curated path inventory.  Maintained alongside the router in
 /// `lib.rs::create_router`; the doc emitter walks this slice rather
 /// than the axum Router (axum 0.8 doesn't expose its routing table).
@@ -454,10 +480,17 @@ pub fn build_capability_doc(scope: Option<&str>) -> serde_json::Value {
         let path_entry = paths
             .entry(emitted)
             .or_insert_with(|| serde_json::json!({}));
-        path_entry
-            .as_object_mut()
-            .unwrap()
-            .insert(entry.method.to_ascii_lowercase(), op);
+        let path_obj = path_entry.as_object_mut().unwrap();
+        path_obj.insert(entry.method.to_ascii_lowercase(), op);
+        // ISO 17978-3 Table 23: `x-sovd-data-category` is a Path Item Object
+        // extension (sibling to the verbs). Best-effort per
+        // `x_sovd_data_category_for` — see its C-024 note.
+        if let Some(cat) = x_sovd_data_category_for(entry.path) {
+            path_obj.insert(
+                "x-sovd-data-category".to_string(),
+                serde_json::Value::String(cat.to_string()),
+            );
+        }
     }
 
     serde_json::json!({

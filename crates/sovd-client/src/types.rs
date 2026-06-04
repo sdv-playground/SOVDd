@@ -95,6 +95,9 @@ pub struct ParameterInfo {
     /// Unit
     #[serde(default)]
     pub unit: Option<String>,
+    /// ISO 17978-3 §7.9 data category (Table 70 `ValueMetaData.category`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<sovd_core::DataCategory>,
     /// Whether this parameter supports writing
     #[serde(default)]
     pub writable: bool,

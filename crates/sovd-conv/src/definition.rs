@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use sovd_core::DataCategory;
 
 use crate::types::{Axis, BitField, ByteOrder, DataType};
 
@@ -97,6 +98,14 @@ pub struct DidDefinition {
     #[serde(default)]
     pub writable: bool,
 
+    /// ISO 17978-3 §7.9 data category (Table 70). When present in a YAML
+    /// definition (a `category:` key, e.g. `category: identData`), it is
+    /// authoritative for this DID; otherwise the category is derived from the
+    /// DID number via [`DataCategory::from_did`] (`0xF180..=0xF19E` →
+    /// `identData`, else `currentData`). See [`DidDefinition::resolve_category`].
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub category: Option<DataCategory>,
+
     /// Component ID this DID belongs to (set automatically from file meta)
     /// None = global (available to all components)
     #[serde(skip)]
@@ -131,6 +140,7 @@ impl Default for DidDefinition {
             bit_mask: None,
             bit_shift: None,
             writable: false,
+            category: None,
             component_id: None,
         }
     }
@@ -219,6 +229,17 @@ impl DidDefinition {
             None => true, // Global - available to all
             Some(cid) => cid == component_id,
         }
+    }
+
+    /// Resolve the ISO 17978-3 §7.9 data category for this DID.
+    ///
+    /// An explicit [`category`](Self::category) on the definition wins;
+    /// otherwise the category is derived from the DID number
+    /// ([`DataCategory::from_did`]): the identification range
+    /// `0xF180..=0xF19E` → [`DataCategory::IdentData`], everything else →
+    /// [`DataCategory::CurrentData`].
+    pub fn resolve_category(&self, did: u16) -> DataCategory {
+        self.category.unwrap_or_else(|| DataCategory::from_did(did))
     }
 
     /// Check if this is an array type
@@ -388,6 +409,47 @@ mod tests {
         let mut def = DidDefinition::scaled(DataType::Uint16, 0.01, 0.0);
         def.precision = Some(3); // Override
         assert_eq!(def.get_precision(), 3);
+    }
+
+    #[test]
+    fn test_resolve_category_defaults_by_did_number() {
+        // No explicit category → derived from the DID number.
+        let def = DidDefinition::scalar(DataType::String);
+        // Identification range boundaries 0xF180..=0xF19E.
+        assert_eq!(def.resolve_category(0xF180), DataCategory::IdentData);
+        assert_eq!(def.resolve_category(0xF190), DataCategory::IdentData);
+        assert_eq!(def.resolve_category(0xF19E), DataCategory::IdentData);
+        // Just outside the range → measurement.
+        assert_eq!(def.resolve_category(0xF17F), DataCategory::CurrentData);
+        assert_eq!(def.resolve_category(0xF19F), DataCategory::CurrentData);
+        assert_eq!(def.resolve_category(0xF40C), DataCategory::CurrentData);
+    }
+
+    #[test]
+    fn test_resolve_category_explicit_overrides_did_default() {
+        // Explicit category wins even for a non-identification DID.
+        let mut def = DidDefinition::scalar(DataType::Bytes);
+        def.category = Some(DataCategory::IdentData);
+        assert_eq!(def.resolve_category(0xF40C), DataCategory::IdentData);
+
+        // And can downgrade an identification-range DID to a measurement.
+        let mut def = DidDefinition::scalar(DataType::Bytes);
+        def.category = Some(DataCategory::CurrentData);
+        assert_eq!(def.resolve_category(0xF190), DataCategory::CurrentData);
+    }
+
+    #[test]
+    fn test_category_deserializes_from_yaml_key() {
+        // `category:` key in a definition is parsed into the typed enum.
+        let yaml = "id: cpu_load\nname: CPU Load\ntype: uint8\ncategory: sysInfo\n";
+        let def: DidDefinition = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(def.category, Some(DataCategory::SysInfo));
+        assert_eq!(def.resolve_category(0xF190), DataCategory::SysInfo);
+
+        // Absent `category:` → None (falls through to the DID-number default).
+        let yaml = "id: vin\nname: VIN\ntype: string\n";
+        let def: DidDefinition = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(def.category, None);
     }
 
     #[test]

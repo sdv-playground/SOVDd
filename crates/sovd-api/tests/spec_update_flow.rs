@@ -105,6 +105,7 @@ impl DiagnosticBackend for MockBackend {
             read_only: true,
             href: format!("/vehicle/v1/components/{}/data/coolant_temp", self.info.id),
             did: None,
+            category: Some(sovd_core::DataCategory::CurrentData),
         }])
     }
     async fn read_data(&self, ids: &[String]) -> BackendResult<Vec<DataValue>> {

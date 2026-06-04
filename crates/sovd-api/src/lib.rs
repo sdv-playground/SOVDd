@@ -203,10 +203,10 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/scripts/{script_id}/executions",
             post(handlers::stubs::execute_script),
         )
-        // Table 9 data-categories + data-groups
+        // §7.9 data-categories (real, DID-derived) + Table 9 data-groups stub
         .route(
             "/vehicle/v1/components/{component_id}/data-categories",
-            get(handlers::stubs::list_data_categories),
+            get(handlers::data::list_data_categories),
         )
         .route(
             "/vehicle/v1/components/{component_id}/data-groups",

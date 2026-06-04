@@ -323,25 +323,17 @@ pub async fn execute_script(
 }
 
 // =============================================================================
-// data-categories + data-groups — Table 9
+// data-groups — Table 9
 // =============================================================================
-
-#[derive(Debug, Serialize)]
-pub struct DataCategory {
-    pub id: String,
-}
+//
+// `data-categories` (§7.9.2.1) is no longer a stub — it is served by
+// `handlers::data::list_data_categories`, which enumerates the distinct
+// §7.9 categories present across the component's data resources. `data-groups`
+// stays an empty stub until grouping metadata is modelled.
 
 #[derive(Debug, Serialize)]
 pub struct DataGroup {
     pub id: String,
-}
-
-pub async fn list_data_categories(
-    State(state): State<AppState>,
-    Path(component_id): Path<String>,
-) -> Result<Json<EmptyListResponse<DataCategory>>, ApiError> {
-    require_component(&state, &component_id)?;
-    Ok(Json(EmptyListResponse::default()))
 }
 
 pub async fn list_data_groups(

@@ -272,6 +272,8 @@ pub async fn list_sub_entity_parameters(
             .map(|(did, def)| {
                 let did_hex = sovd_conv::format_did(did);
                 let id = def.id.clone().unwrap_or_else(|| did_hex.clone());
+                // §7.9 category (explicit def category or DID-number default).
+                let category = Some(def.resolve_category(did));
                 DidInfoResponse {
                     id: id.clone(),
                     did: did_hex,
@@ -279,6 +281,7 @@ pub async fn list_sub_entity_parameters(
                     translation_id: None,
                     data_type: Some(def.data_type.to_string()),
                     unit: def.unit,
+                    category,
                     writable: def.writable,
                     href: format!("{}/{}", base, id),
                 }
@@ -293,15 +296,27 @@ pub async fn list_sub_entity_parameters(
     let params = backend.list_parameters().await.map_err(ApiError::from)?;
     let items: Vec<DidInfoResponse> = params
         .into_iter()
-        .map(|p| DidInfoResponse {
-            id: p.id.clone(),
-            did: p.did.unwrap_or_default(),
-            name: Some(p.name),
-            translation_id: None,
-            data_type: p.data_type,
-            unit: p.unit,
-            writable: !p.read_only,
-            href: format!("{}/{}", base, p.id),
+        .map(|p| {
+            let did = p.did.unwrap_or_default();
+            // §7.9 category from the backend, or DID-number default.
+            let category = p.category.or_else(|| {
+                if did.is_empty() {
+                    None
+                } else {
+                    Some(sovd_core::DataCategory::from_did_str(&did))
+                }
+            });
+            DidInfoResponse {
+                id: p.id.clone(),
+                did,
+                name: Some(p.name),
+                translation_id: None,
+                data_type: p.data_type,
+                unit: p.unit,
+                category,
+                writable: !p.read_only,
+                href: format!("{}/{}", base, p.id),
+            }
         })
         .collect();
     let count = items.len();

@@ -10,8 +10,8 @@ use std::time::Instant;
 use async_trait::async_trait;
 use chrono::Utc;
 use sovd_core::{
-    BackendError, BackendResult, Capabilities, DataValue, DiagnosticBackend, EntityInfo,
-    FaultFilter, FaultsResult, OperationExecution, OperationInfo, ParameterInfo,
+    BackendError, BackendResult, Capabilities, DataCategory, DataValue, DiagnosticBackend,
+    EntityInfo, FaultFilter, FaultsResult, OperationExecution, OperationInfo, ParameterInfo,
 };
 use tokio::sync::RwLock;
 
@@ -268,6 +268,9 @@ impl DiagnosticBackend for ExampleAppBackend {
                 read_only: true,
                 href: String::new(),
                 did: None,
+                // §7.9: synthetic app values are dynamically-changing
+                // measurements (no DID, not identifications).
+                category: Some(DataCategory::CurrentData),
             })
             .collect())
     }

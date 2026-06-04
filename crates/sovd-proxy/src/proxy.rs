@@ -8,11 +8,11 @@ use sovd_client::SovdClient;
 use sovd_core::models::{FaultSeverity, LogPriority, OperationStatus};
 use sovd_core::routing;
 use sovd_core::{
-    ActivationState, BackendError, BackendResult, Capabilities, ClearFaultsResult, DataValue,
-    DiagnosticBackend, EntityInfo, Fault, FaultFilter, FaultsResult, FlashStatus, IoControlAction,
-    IoControlResult, LogEntry, LogFilter, OperationExecution, OperationInfo, OutputDetail,
-    OutputInfo, PackageInfo, PackageStream, ParameterInfo, SecurityMode, SecurityState,
-    SessionMode, VerifyResult,
+    ActivationState, BackendError, BackendResult, Capabilities, ClearFaultsResult, DataCategory,
+    DataValue, DiagnosticBackend, EntityInfo, Fault, FaultFilter, FaultsResult, FlashStatus,
+    IoControlAction, IoControlResult, LogEntry, LogFilter, OperationExecution, OperationInfo,
+    OutputDetail, OutputInfo, PackageInfo, PackageStream, ParameterInfo, SecurityMode,
+    SecurityState, SessionMode, VerifyResult,
 };
 
 /// Convert client-side capabilities to core Capabilities.
@@ -397,15 +397,25 @@ impl DiagnosticBackend for SovdProxyBackend {
         let params = resp
             .items
             .into_iter()
-            .map(|p| ParameterInfo {
-                id: p.id,
-                name: p.name.unwrap_or_default(),
-                description: None,
-                unit: p.unit,
-                data_type: p.data_type,
-                read_only: !p.writable,
-                href: String::new(),
-                did: if p.did.is_empty() { None } else { Some(p.did) },
+            .map(|p| {
+                let did = if p.did.is_empty() { None } else { Some(p.did) };
+                // §7.9 category: classify by the upstream DID when present
+                // (identification range vs measurement); default otherwise.
+                let category = Some(match &did {
+                    Some(d) => DataCategory::from_did_str(d),
+                    None => DataCategory::CurrentData,
+                });
+                ParameterInfo {
+                    id: p.id,
+                    name: p.name.unwrap_or_default(),
+                    description: None,
+                    unit: p.unit,
+                    data_type: p.data_type,
+                    read_only: !p.writable,
+                    href: String::new(),
+                    did,
+                    category,
+                }
             })
             .collect();
 

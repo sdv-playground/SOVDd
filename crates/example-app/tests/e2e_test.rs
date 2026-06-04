@@ -87,6 +87,7 @@ impl DiagnosticBackend for MockUpstreamBackend {
                 read_only: true,
                 href: String::new(),
                 did: None,
+                category: Some(sovd_core::DataCategory::CurrentData),
             },
             ParameterInfo {
                 id: "coolant_temperature".to_string(),
@@ -97,6 +98,7 @@ impl DiagnosticBackend for MockUpstreamBackend {
                 read_only: true,
                 href: String::new(),
                 did: None,
+                category: Some(sovd_core::DataCategory::CurrentData),
             },
             ParameterInfo {
                 id: "vin".to_string(),
@@ -107,6 +109,7 @@ impl DiagnosticBackend for MockUpstreamBackend {
                 read_only: true,
                 href: String::new(),
                 did: None,
+                category: Some(sovd_core::DataCategory::IdentData),
             },
             ParameterInfo {
                 id: "vehicle_speed".to_string(),
@@ -117,6 +120,7 @@ impl DiagnosticBackend for MockUpstreamBackend {
                 read_only: true,
                 href: String::new(),
                 did: None,
+                category: Some(sovd_core::DataCategory::CurrentData),
             },
         ])
     }

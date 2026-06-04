@@ -11,11 +11,11 @@ use async_trait::async_trait;
 use chrono::Utc;
 use sovd_client::FlashClient;
 use sovd_core::{
-    ActivationState, BackendError, BackendResult, Capabilities, ClearFaultsResult, DataValue,
-    DiagnosticBackend, EntityInfo, Fault, FaultFilter, FaultsResult, FlashState, FlashStatus,
-    IoControlAction, IoControlResult, LogEntry, LogFilter, OperationExecution, OperationInfo,
-    OutputDetail, OutputInfo, PackageInfo, PackageStatus, ParameterInfo, SecurityMode, SessionMode,
-    SoftwareInfo, VerifyResult,
+    ActivationState, BackendError, BackendResult, Capabilities, ClearFaultsResult, DataCategory,
+    DataValue, DiagnosticBackend, EntityInfo, Fault, FaultFilter, FaultsResult, FlashState,
+    FlashStatus, IoControlAction, IoControlResult, LogEntry, LogFilter, OperationExecution,
+    OperationInfo, OutputDetail, OutputInfo, PackageInfo, PackageStatus, ParameterInfo,
+    SecurityMode, SessionMode, SoftwareInfo, VerifyResult,
 };
 use sovd_proxy::SovdProxyBackend;
 use sovd_uds::config::{OperationConfig, OutputConfig};
@@ -238,6 +238,9 @@ impl DiagnosticBackend for ManagedEcuBackend {
                     read_only: !pd.writable,
                     href: String::new(),
                     did: Some(pd.did.clone()),
+                    // §7.9 category from the configured DID (identification
+                    // range vs measurement).
+                    category: Some(DataCategory::from_did_str(&pd.did)),
                 })
                 .collect())
         } else {

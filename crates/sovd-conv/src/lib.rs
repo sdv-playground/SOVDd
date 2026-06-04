@@ -92,8 +92,12 @@ pub mod types;
 
 // Re-export main types
 pub use definition::{BitFieldDef, DidDefinition, HistogramDefinition, MapDefinition};
+// §7.9 DataCategory is owned by sovd-core; re-export so sovd-conv consumers
+// (e.g. the API data handler) can name it through one crate.
 pub use error::{format_did, parse_did, ConvError, ConvResult};
 pub use precision::{precision_from_scale, round_for_scale, to_json_number};
+#[doc(no_inline)]
+pub use sovd_core::DataCategory;
 pub use store::{DidStore, StoreMeta};
 pub use types::{Axis, BitField, ByteOrder, DataType, Shape};
 
