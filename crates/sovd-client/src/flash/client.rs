@@ -17,6 +17,12 @@
 //! Each `FlashClient` instance is bound to one component (top-level via
 //! `for_sovd`, sub-entity via `for_sovd_sub_entity`) and keeps a single
 //! in-flight update_id.  Multiple cloned handles share state.
+//!
+//! Post-reset callers (orchestrators) that lose the in-process state but
+//! must drive an already-registered update re-bind with [`attach`] using
+//! the stable update_id they captured at registration.
+//!
+//! [`attach`]: FlashClient::attach
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -117,30 +123,6 @@ pub struct PartUploadResponse {
     pub href: String,
 }
 
-/// Reply from `GET /updates/{id}`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct UpdateStatus {
-    pub update_id: String,
-    pub state: String,
-    #[serde(default)]
-    pub parts_uploaded: usize,
-    #[serde(default)]
-    pub parts: Vec<PartStatusEntry>,
-    #[serde(default)]
-    pub manifest: Option<serde_json::Value>,
-    #[serde(default)]
-    pub transfer_id: Option<String>,
-    pub href: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PartStatusEntry {
-    pub part_id: String,
-    pub size: u64,
-    pub sha256: String,
-    pub href: String,
-}
-
 /// ISO 17978-3 §7.18.7 Table 270 — body of `GET /updates/{id}/status`.
 /// Returned by the spec verbs (`prepare` / `execute` / `automated`).
 #[derive(Debug, Clone, Deserialize)]
@@ -177,19 +159,12 @@ impl UpdateStatusBody {
     }
 }
 
-/// Reply from `GET /updates`.
+/// Reply from `GET /updates` — ISO 17978-3 Table 257: a bare list of
+/// package-id strings (origin-filtered server-side).
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdatesList {
     #[serde(default)]
-    pub items: Vec<UpdateSummary>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct UpdateSummary {
-    pub update_id: String,
-    pub state: String,
-    #[serde(default)]
-    pub href: String,
+    pub items: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -283,12 +258,29 @@ impl FlashClient {
 // ---------------------------------------------------------------------------
 
 impl FlashClient {
-    /// `POST /vehicle/v1/components/{id}/updates`.
-    /// Allocates a fresh update_id; subsequent lifecycle calls
+    /// `POST /vehicle/v1/components/{id}/updates` with an empty body —
+    /// the server mints a fresh update_id.  Subsequent lifecycle calls
     /// operate on it.  Errors if a session is already open — call
     /// `commit` / `rollback` / `abort` first.
     #[instrument(skip(self))]
     pub async fn open_update(&self) -> Result<OpenUpdateResponse> {
+        self.post_open(&serde_json::json!({})).await
+    }
+
+    /// `POST /vehicle/v1/components/{id}/updates` with `{"id": id}` —
+    /// registers the update under a caller-chosen stable catalog key
+    /// instead of a server-minted UUID.  Returns the registered id (the
+    /// server echoes it back).  Same single-session guard as
+    /// [`open_update`](Self::open_update).
+    #[instrument(skip(self))]
+    pub async fn open_update_with_id(&self, id: &str) -> Result<String> {
+        let body = self.post_open(&serde_json::json!({ "id": id })).await?;
+        Ok(body.update_id)
+    }
+
+    /// Shared `POST /updates` issuance: enforces the single-session
+    /// guard, posts `body`, and latches the returned update_id.
+    async fn post_open(&self, body: &serde_json::Value) -> Result<OpenUpdateResponse> {
         {
             let g = self.update_id.lock().await;
             if let Some(id) = &*g {
@@ -299,7 +291,7 @@ impl FlashClient {
             }
         }
         let url = self.build_url(&self.config.updates_collection_path())?;
-        let mut req = self.client.post(url).json(&serde_json::json!({}));
+        let mut req = self.client.post(url).json(body);
         req = self.add_auth(req);
         let resp = req.send().await?;
         let body: OpenUpdateResponse = self.handle_response(resp).await?;
@@ -374,52 +366,30 @@ impl FlashClient {
         Ok(())
     }
 
-    /// Attach this client to the most-recent /updates entry on the
-    /// server.  Used by post-reset callers (orchestrators) that
-    /// construct a fresh FlashClient after the device reboots — the
-    /// in-process `update_id` is gone but the server-side entry
-    /// survives across the reset.
+    /// Bind this client to a known `update_id`.  Local and infallible —
+    /// just latches the held id so the lifecycle/status methods address
+    /// the right `/updates` entry.
+    ///
+    /// Used by post-reset callers (orchestrators) that construct a fresh
+    /// FlashClient after the device reboots: the in-process `update_id`
+    /// is gone, but the server-side entry survives the reset and the
+    /// caller still holds the stable id it captured at registration.
     #[instrument(skip(self))]
-    pub async fn attach_to_latest(&self) -> Result<String> {
-        let list = self.list_updates().await?;
-        let summary = list.items.into_iter().last().ok_or(FlashError::NoSession)?;
-        *self.update_id.lock().await = Some(summary.update_id.clone());
-        Ok(summary.update_id)
+    pub async fn attach(&self, update_id: &str) -> Result<()> {
+        *self.update_id.lock().await = Some(update_id.to_string());
+        Ok(())
     }
 
-    /// `GET /updates/{id}`.
+    /// `GET /updates` — ISO 17978-3 Table 257 catalog: the list of
+    /// package-id strings on this component (origin-filtered server-side).
+    /// Retained for diagnostics / recovery; lifecycle callers address a
+    /// specific id via [`attach`](Self::attach).
     #[instrument(skip(self))]
-    pub async fn status(&self) -> Result<UpdateStatus> {
-        let update_id = self
-            .current_update_id()
-            .await
-            .ok_or(FlashError::NoSession)?;
-        let url = self.build_url(&self.config.updates_status_path(&update_id))?;
-        let resp = self.request_get(url).await?;
-        self.handle_response(resp).await
-    }
-
-    /// `GET /updates` — list all /updates entries on this component.
-    /// Used by post-reset callers that don't carry the original
-    /// FlashClient instance and need to rediscover the latest update_id.
-    #[instrument(skip(self))]
-    pub async fn list_updates(&self) -> Result<UpdatesList> {
+    pub async fn list_updates(&self) -> Result<Vec<String>> {
         let url = self.build_url(&self.config.updates_collection_path())?;
         let resp = self.request_get(url).await?;
-        self.handle_response(resp).await
-    }
-
-    /// `GET /updates/{id}` for the *last* update on this component,
-    /// without requiring a locally-held update_id. Useful after an ECU
-    /// reset where the original FlashClient has gone out of scope but
-    /// the server-side entry still carries the post-finalize state.
-    #[instrument(skip(self))]
-    pub async fn latest_status(&self) -> Result<UpdateStatus> {
-        let list = self.list_updates().await?;
-        let summary = list.items.into_iter().last().ok_or(FlashError::NoSession)?;
-        let url = self.build_url(&self.config.updates_status_path(&summary.update_id))?;
-        let resp = self.request_get(url).await?;
-        self.handle_response(resp).await
+        let list: UpdatesList = self.handle_response(resp).await?;
+        Ok(list.items)
     }
 
     /// Reset the ECU (PUT `status/restart`) — unchanged by the
@@ -446,9 +416,10 @@ impl FlashClient {
 
 impl FlashClient {
     /// `GET /vehicle/v1/components/{id}/updates/{update_id}/status` — returns
-    /// the Table 270 `UpdateStatusBody`.  Distinct from the legacy
-    /// `status()` which hits `GET /updates/{id}` and returns the
-    /// vendor-extension shape.
+    /// the ISO 17978-3 §7.18.7 Table 270 `UpdateStatusBody`
+    /// (`{phase, status, progress?, step?, error?, x-sumo-substate?}`).
+    /// This is the lifecycle-state source of truth; `GET /updates/{id}`
+    /// (Table 261) is the package *catalog* descriptor, not state.
     #[instrument(skip(self))]
     pub async fn spec_status(&self) -> Result<UpdateStatusBody> {
         let update_id = self

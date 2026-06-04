@@ -5,6 +5,7 @@
 //! The app entity delegates to this backend for ECU operations.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -37,6 +38,11 @@ struct PackageData {
 pub struct ManagedEcuBackend {
     proxy: SovdProxyBackend,
     flash_client: FlashClient,
+    /// Stable update_id returned by `open_update` in `start_flash`.
+    /// Held so post-reset `commit_flash` can re-`attach` the fresh
+    /// FlashClient to the surviving server-side `/updates` entry, and
+    /// so the status readers can describe the in-flight update.
+    current_update_id: Arc<RwLock<Option<String>>>,
     entity_info: EntityInfo,
     capabilities: Capabilities,
     packages: RwLock<HashMap<String, PackageData>>,
@@ -111,6 +117,7 @@ impl ManagedEcuBackend {
         Ok(Self {
             proxy,
             flash_client,
+            current_update_id: Arc::new(RwLock::new(None)),
             entity_info,
             capabilities,
             packages: RwLock::new(HashMap::new()),
@@ -624,14 +631,15 @@ impl DiagnosticBackend for ManagedEcuBackend {
             "Uploading verified package to upstream ECU"
         );
 
-        // F.D8b /updates-native flow: open session → upload as a
-        // single "manifest" part → return the update_id as the
-        // legacy `transfer_id` for the rest of the DiagnosticBackend
-        // contract.
+        // /updates-native flow: open session → upload as a single
+        // "manifest" part → return the update_id as the `transfer_id`
+        // for the rest of the DiagnosticBackend contract.  The id is
+        // also retained so post-reset `commit_flash` can re-attach.
         let opened =
             self.flash_client.open_update().await.map_err(|e| {
                 BackendError::Transport(format!("Upstream open_update failed: {e}"))
             })?;
+        *self.current_update_id.write().await = Some(opened.update_id.clone());
         self.flash_client
             .upload_part("manifest", &pkg.data)
             .await
@@ -642,46 +650,17 @@ impl DiagnosticBackend for ManagedEcuBackend {
     }
 
     async fn get_flash_status(&self, _transfer_id: &str) -> BackendResult<FlashStatus> {
-        let status = self
-            .flash_client
-            .status()
-            .await
-            .map_err(|e| BackendError::Transport(format!("Upstream status failed: {e}")))?;
-        Ok(FlashStatus {
-            transfer_id: status.update_id,
-            package_id: status
-                .parts
-                .first()
-                .map(|p| p.part_id.clone())
-                .unwrap_or_default(),
-            state: map_update_state(&status.state),
-            progress: None,
-            error: None,
-        })
+        self.current_flash_status()
+            .await?
+            .ok_or_else(|| BackendError::Transport("No /updates session open".to_string()))
     }
 
     async fn list_flash_transfers(&self) -> BackendResult<Vec<FlashStatus>> {
-        // /updates doesn't (yet) expose a "list active updates" API
-        // through the typed client.  Surface the current session if
-        // any; the gateway / app-mgr managed-ecu proxy isn't expected
-        // to enumerate multiple concurrent transfers.
-        match self.flash_client.status().await {
-            Ok(status) => Ok(vec![FlashStatus {
-                transfer_id: status.update_id,
-                package_id: status
-                    .parts
-                    .first()
-                    .map(|p| p.part_id.clone())
-                    .unwrap_or_default(),
-                state: map_update_state(&status.state),
-                progress: None,
-                error: None,
-            }]),
-            Err(sovd_client::flash::FlashError::NoSession) => Ok(vec![]),
-            Err(e) => Err(BackendError::Transport(format!(
-                "Upstream list transfers failed: {e}"
-            ))),
-        }
+        // /updates doesn't expose a "list active updates" API through
+        // the typed client.  Surface the current session if any; the
+        // gateway / app-mgr managed-ecu proxy isn't expected to
+        // enumerate multiple concurrent transfers.
+        Ok(self.current_flash_status().await?.into_iter().collect())
     }
 
     async fn abort_flash(&self, _transfer_id: &str) -> BackendResult<()> {
@@ -753,8 +732,18 @@ impl DiagnosticBackend for ManagedEcuBackend {
         // If the upstream's in awaiting-verdict (orchestrated path),
         // spec_commit drives it; otherwise it's a no-op.  Idempotent
         // for our purposes; ignore "not in awaiting-verdict" 409s.
+        //
+        // The FlashClient may be a fresh handle after an ECU reset, so
+        // re-attach to the update_id captured at start_flash before
+        // posting the verdict.
+        let update_id = self.current_update_id.read().await.clone().ok_or_else(|| {
+            BackendError::Transport(
+                "commit_flash called with no open /updates session (start_flash not run?)"
+                    .to_string(),
+            )
+        })?;
         self.flash_client
-            .attach_to_latest()
+            .attach(&update_id)
             .await
             .map_err(|e| BackendError::Transport(format!("Upstream attach failed: {e}")))?;
         match self.flash_client.spec_commit().await {
@@ -788,14 +777,14 @@ impl DiagnosticBackend for ManagedEcuBackend {
     }
 
     async fn get_activation_state(&self) -> BackendResult<ActivationState> {
-        // Synthesise a legacy ActivationState from the /updates state
-        // string.  /updates "finalized" maps to legacy "Activated"
-        // (because /executions{finalize} bundles finalize + validate +
-        // activate on the server).
-        let status = self.flash_client.status().await.map_err(|e| {
+        // Synthesise an ActivationState from the Table 270 lifecycle
+        // status (phase + status + substate).  awaiting-verdict maps to
+        // Activated (firmware up, pending commit); execute/completed
+        // maps to Committed (auto-commit drove it).
+        let body = self.flash_client.spec_status().await.map_err(|e| {
             BackendError::Transport(format!("Upstream activation state failed: {e}"))
         })?;
-        let state = map_update_state(&status.state);
+        let state = map_phase_status(&body.phase, &body.status, body.substate.as_deref());
         Ok(ActivationState {
             supports_rollback: true,
             state,
@@ -806,20 +795,45 @@ impl DiagnosticBackend for ManagedEcuBackend {
     }
 }
 
-/// Map an /updates state string to a sovd-core FlashState.
-fn map_update_state(s: &str) -> FlashState {
-    match s {
-        "registered" | "uploading" => FlashState::Preparing,
-        "verified" => FlashState::AwaitingActivation,
-        "finalized" => FlashState::Activated,
-        "committed" => FlashState::Committed,
-        "rolledback" => FlashState::RolledBack,
-        "aborted" => FlashState::Failed,
-        "failed" => FlashState::Failed,
-        _ => FlashState::Failed,
+impl ManagedEcuBackend {
+    /// Build a [`FlashStatus`] for the currently-held update from the
+    /// Table 270 lifecycle status, or `None` if no session is open.
+    async fn current_flash_status(&self) -> BackendResult<Option<FlashStatus>> {
+        let Some(update_id) = self.current_update_id.read().await.clone() else {
+            return Ok(None);
+        };
+        match self.flash_client.spec_status().await {
+            Ok(body) => Ok(Some(FlashStatus {
+                transfer_id: update_id.clone(),
+                package_id: update_id,
+                state: map_phase_status(&body.phase, &body.status, body.substate.as_deref()),
+                progress: None,
+                error: None,
+            })),
+            Err(sovd_client::flash::FlashError::NoSession) => Ok(None),
+            Err(e) => Err(BackendError::Transport(format!(
+                "Upstream status failed: {e}"
+            ))),
+        }
     }
 }
 
-// F.D8b: convert_transfer_state was the legacy TransferState →
-// FlashState bridge; with FlashClient migrated to /updates strings,
-// `map_update_state` above replaces it.
+/// Map an ISO 17978-3 Table 270 lifecycle `(phase, status, substate)`
+/// to a sovd-core [`FlashState`].  Preserves the intent of the retired
+/// `map_update_state` string mapping:
+///   prepare/*                        → Preparing   (was registered/uploading/verified)
+///   execute/inProgress/awaiting-verdict → Activated (was finalized — firmware up, pending commit)
+///   execute/completed                → Committed   (auto-commit)
+///   */failed                         → Failed
+fn map_phase_status(phase: &str, status: &str, substate: Option<&str>) -> FlashState {
+    match (phase, status, substate) {
+        (_, "failed", _) => FlashState::Failed,
+        ("prepare", _, _) => FlashState::Preparing,
+        ("execute", "inProgress", Some("awaiting-verdict")) => FlashState::Activated,
+        ("execute", "completed", _) => FlashState::Committed,
+        // execute in flight without the awaiting-verdict pause (singleshot
+        // mid-run) — still preparing the activation from the caller's view.
+        ("execute", _, _) => FlashState::Preparing,
+        _ => FlashState::Failed,
+    }
+}
