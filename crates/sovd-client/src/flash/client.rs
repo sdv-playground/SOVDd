@@ -253,6 +253,34 @@ impl FlashClient {
     }
 }
 
+/// Form a URL-clean, spec-exemplar §7.18 package-id from a human `name` +
+/// `version`: slugify the name (lowercase; each run of non-alphanumerics
+/// collapses to a single `-`, edges trimmed) and suffix `-{version}`.
+/// e.g. `("ADAS feature update", "2.3.0")` → `"adas-feature-update-2.3.0"`.
+/// A symbol-only/empty name falls back to the bare version (all-empty → `""`,
+/// which the server then replaces with a minted UUID).
+fn package_id_from(name: &str, version: &str) -> String {
+    let mut slug = String::with_capacity(name.len());
+    let mut pending_dash = false;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_dash {
+                slug.push('-');
+                pending_dash = false;
+            }
+            slug.extend(ch.to_lowercase());
+        } else if !slug.is_empty() {
+            // Defer the separator so a trailing run leaves no dangling dash.
+            pending_dash = true;
+        }
+    }
+    match (slug.is_empty(), version.is_empty()) {
+        (true, _) => version.to_string(),
+        (false, true) => slug,
+        (false, false) => format!("{slug}-{version}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // /updates lifecycle
 // ---------------------------------------------------------------------------
@@ -267,15 +295,24 @@ impl FlashClient {
         self.post_open(&serde_json::json!({})).await
     }
 
-    /// `POST /vehicle/v1/components/{id}/updates` with `{"id": id}` —
-    /// registers the update under a caller-chosen stable catalog key
-    /// instead of a server-minted UUID.  Returns the registered id (the
-    /// server echoes it back).  Same single-session guard as
+    /// `POST /vehicle/v1/components/{id}/updates` declaring a meaningful
+    /// package identity.  Forms a stable, spec-exemplar §7.18 package-id from
+    /// the human `name` + `version` (e.g. `("ADAS feature update", "2.3.0")`
+    /// → `adas-feature-update-2.3.0`) and declares `name` as the Table 261
+    /// `update_name`, so `GET /updates` lists a meaningful id and
+    /// `GET /updates/{id}` carries a human name even on backends without a
+    /// SUIT-aware describer (vm-mgr's override then layers components on top).
+    ///
+    /// Returns the **derived** package-id — deterministic, so a post-reset
+    /// caller can re-form it from the same `name` + `version` and
+    /// [`attach`](Self::attach) to it.  Same single-session guard as
     /// [`open_update`](Self::open_update).
     #[instrument(skip(self))]
-    pub async fn open_update_with_id(&self, id: &str) -> Result<String> {
-        let body = self.post_open(&serde_json::json!({ "id": id })).await?;
-        Ok(body.update_id)
+    pub async fn open_update_with(&self, name: &str, version: &str) -> Result<String> {
+        let id = package_id_from(name, version);
+        let body = serde_json::json!({ "id": id, "manifest": { "update_name": name } });
+        let resp = self.post_open(&body).await?;
+        Ok(resp.update_id)
     }
 
     /// Shared `POST /updates` issuance: enforces the single-session
@@ -796,5 +833,28 @@ pub async fn system_restart(
             status: status.as_u16(),
             message: resp.text().await.unwrap_or_default(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::package_id_from;
+
+    #[test]
+    fn package_id_slugifies_name_and_appends_version() {
+        assert_eq!(
+            package_id_from("ADAS feature update", "2.3.0"),
+            "adas-feature-update-2.3.0"
+        );
+        // collapses non-alnum runs, trims edges, lowercases
+        assert_eq!(
+            package_id_from("  Vortex/Engine  ", "v1"),
+            "vortex-engine-v1"
+        );
+        // empty name → bare version; empty version → bare slug
+        assert_eq!(package_id_from("", "1.0.0"), "1.0.0");
+        assert_eq!(package_id_from("Kernel", ""), "kernel");
+        // all-empty → "" (server then mints a UUID)
+        assert_eq!(package_id_from("", ""), "");
     }
 }
