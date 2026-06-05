@@ -2286,11 +2286,29 @@ async fn test_write_parameter_security_required() {
 
     eprintln!("Response: status={}, body={}", status, json);
 
-    // Spec §5.8 401 covers "insufficient access rights" (no 403 in set).
+    // C-131 through the REAL UdsBackend: the ECU rejects the protected write
+    // with NRC 0x33 (securityAccessDenied), which surfaces as `error-response`
+    // mapped via the single-source `nrc_to_status` to 403 (§8.4 security gate),
+    // carrying the Table-18 service+nrc+http_code body. (Previously the UDS
+    // converter short-circuited 0x33 → 401 with no service/nrc — the dual-mapper
+    // bug this asserts is gone.)
     assert_eq!(
-        status, 401,
-        "Expected 401 (insufficient-access-rights) without security, got {}",
+        status, 403,
+        "Expected 403 (security gate, NRC 0x33 via nrc_to_status) without security, got {}",
         status
+    );
+    assert_eq!(
+        json["error_code"], "error-response",
+        "error_code must be error-response: {json}"
+    );
+    assert_eq!(
+        json["parameters"]["service"][0], "0x2E",
+        "service param: {json}"
+    );
+    assert_eq!(json["parameters"]["nrc"][0], "0x33", "nrc param: {json}");
+    assert_eq!(
+        json["parameters"]["http_code"][0], "403",
+        "http_code param must match the mapped status: {json}"
     );
     let message = json["message"].as_str().unwrap_or("");
     assert!(
@@ -2299,7 +2317,7 @@ async fn test_write_parameter_security_required() {
         message
     );
 
-    eprintln!("=== Test PASSED: Write without security correctly rejected ===");
+    eprintln!("=== Test PASSED: Write without security correctly rejected (0x33 → 403) ===");
 }
 
 // =============================================================================

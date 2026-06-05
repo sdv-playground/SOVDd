@@ -75,75 +75,140 @@ pub fn convert_uds_error(err: UdsError) -> BackendError {
     err.into()
 }
 
-/// Map NRC to appropriate backend error
+/// Map a UDS Negative Response Code (NRC) to a [`BackendError`].
 ///
-/// This function maps UDS Negative Response Codes (NRCs) to appropriate
-/// backend errors, following the SOVD specification for HTTP status codes:
+/// **Every** NRC surfaces as [`BackendError::EcuError`] carrying the NRC and
+/// rejected service ID. The NRC→HTTP status is owned *solely* by
+/// [`sovd_core::error::nrc_to_status`] (consumed by both
+/// [`BackendError::status_code`] and the `sovd-api` `EcuErrorResponse`
+/// `IntoResponse`), and the resulting `error-response` body carries
+/// `service` + `nrc` + `http_code` (ISO 17978-3 §8.4 Table 18, C-131).
 ///
-/// - 0x11, 0x12: Service/subfunction not supported → 501 Not Implemented
-/// - 0x13, 0x31: Message format/range errors → 400 Bad Request
-/// - 0x22, 0x7E, 0x7F: Session-related conditions → 409 Conflict
-/// - 0x33: Security access denied → 403 Forbidden
-/// - 0x36, 0x37: Exceeded attempts / time delay → 429 Too Many Requests
-/// - All others: ECU error response → 502 Bad Gateway (with SOVD format)
+/// This function deliberately does **not** branch per NRC. An earlier version
+/// short-circuited specific NRCs (0x11/0x12→NotSupported, 0x13/0x31→
+/// InvalidRequest, 0x22/0x7E/0x7F→SessionRequired, 0x33→SecurityRequired,
+/// 0x36/0x37→RateLimited) *before* `nrc_to_status` ran. On the live
+/// `UdsBackend` write path that bypassed the single-source table entirely and
+/// dropped the Table-18 body — e.g. 0x33 surfaced as 401 (not 403) with no
+/// `service`/`nrc`, and 0x36/0x37 as 429 (not an RFC-9110 §15 status). Routing
+/// all NRCs through `EcuError` removes that divergent path.
 fn map_nrc_to_backend_error(service: u8, nrc: u8, message: &str) -> BackendError {
-    match nrc {
-        // Service not supported → 501 Not Implemented
-        0x11 | 0x12 => BackendError::NotSupported(format!(
-            "Service not supported: {} (NRC 0x{:02X})",
-            message, nrc
-        )),
-
-        // Message format/range errors → 400 Bad Request
-        0x13 => {
-            BackendError::InvalidRequest(format!("Incorrect message length or format: {}", message))
-        }
-        0x31 => BackendError::InvalidRequest(format!("Request out of range: {}", message)),
-
-        // Session-related conditions → 409 Conflict (preconditions)
-        0x22 => BackendError::SessionRequired("appropriate session".to_string()),
-        0x7E => BackendError::SessionRequired(
-            "subfunction not supported in current session".to_string(),
-        ),
-        0x7F => {
-            BackendError::SessionRequired("service not supported in current session".to_string())
-        }
-
-        // Security access denied → 403 Forbidden
-        0x33 => BackendError::SecurityRequired(1),
-
-        // Rate limiting → 429 Too Many Requests
-        0x36 => BackendError::RateLimited("Exceeded number of attempts".to_string()),
-        0x37 => BackendError::RateLimited("Required time delay not expired".to_string()),
-
-        // All other NRCs → ECU error response (502 with SOVD-compliant format)
-        _ => BackendError::EcuError {
-            nrc,
-            sid: service,
-            message: format!("Negative response: {} (NRC 0x{:02X})", message, nrc),
-        },
+    BackendError::EcuError {
+        nrc,
+        sid: service,
+        message: format!("Negative response: {} (NRC 0x{:02X})", message, nrc),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::uds::NegativeResponseCode;
+    use crate::config::MockConfig;
+    use crate::transport::mock::MockTransportAdapter;
+    use crate::uds::{NegativeResponseCode, UdsService};
+    use sovd_core::error::nrc_to_status;
+    use std::sync::Arc;
 
+    /// Every NRC — including the ones the old per-NRC `match` short-circuited
+    /// (0x11/0x13/0x22/0x33/0x36/0x37/0x7F) — must now surface as
+    /// `BackendError::EcuError`, never as NotSupported / InvalidRequest /
+    /// SessionRequired / SecurityRequired / RateLimited. That is what lets the
+    /// single-source `nrc_to_status` own the status and the Table-18 body carry
+    /// `service` + `nrc`.
     #[test]
-    fn test_security_access_denied_conversion() {
+    fn every_nrc_surfaces_as_ecu_error() {
+        // Previously intercepted NRCs + a representative fallthrough (0x10).
+        for nrc in [
+            0x11u8, 0x12, 0x13, 0x31, 0x22, 0x33, 0x36, 0x37, 0x7E, 0x7F, 0x10,
+        ] {
+            let err = map_nrc_to_backend_error(0x2E, nrc, "rejected");
+            match err {
+                BackendError::EcuError {
+                    nrc: got_nrc, sid, ..
+                } => {
+                    assert_eq!(got_nrc, nrc, "EcuError must carry the NRC");
+                    assert_eq!(sid, 0x2E, "EcuError must carry the rejected service ID");
+                }
+                other => panic!(
+                    "NRC 0x{nrc:02X} must map to EcuError, got {other:?} \
+                     (the per-NRC short-circuit must be gone)"
+                ),
+            }
+        }
+    }
+
+    /// `0x33` securityAccessDenied used to become `SecurityRequired(1)` (→401);
+    /// it must now be `EcuError { nrc: 0x33 }` so the api layer maps it to 403
+    /// via `nrc_to_status` and emits the `error-response` body.
+    #[test]
+    fn security_access_denied_is_ecu_error_not_security_required() {
         let uds_err = UdsError::NegativeResponse {
-            service_id: 0x22,
+            service_id: 0x2E,
             nrc: NegativeResponseCode::SecurityAccessDenied,
         };
 
-        let backend_err: BackendError = uds_err.into();
-
-        match backend_err {
-            BackendError::SecurityRequired(level) => {
-                assert_eq!(level, 1);
+        match convert_uds_error(uds_err) {
+            BackendError::EcuError { nrc, sid, .. } => {
+                assert_eq!(nrc, 0x33);
+                assert_eq!(sid, 0x2E);
+                // The status the api layer will use comes from the single source.
+                assert_eq!(nrc_to_status(nrc), 403);
             }
-            other => panic!("Expected SecurityRequired, got {:?}", other),
+            other => panic!("Expected EcuError, got {other:?}"),
         }
+    }
+
+    /// Integration test through the **real** `UdsBackend` write call chain:
+    /// `UdsService::write_data_by_id` (the exact service the backend's
+    /// `write_raw_did` invokes at backend.rs) over the Mock transport, with the
+    /// ECU answering a `0x2E` WriteDataByIdentifier with `7F 2E <nrc>`. The
+    /// resulting `BackendError` must be an `EcuError` whose `status_code()`
+    /// (i.e. `nrc_to_status`) matches the table — for 0x33→403 and 0x13→400,
+    /// the two NRCs the old short-circuit would have mis-mapped (401 / 400-but-
+    /// no-body). This is the test the mock-`EcuError` unit test could not catch.
+    async fn write_real_path_nrc(nrc: u8) -> BackendError {
+        let transport = Arc::new(MockTransportAdapter::new(&MockConfig::default()));
+        // ECU rejects the 0x2E write with a UDS negative response.
+        transport.add_response(vec![0x2E], vec![0x7F, 0x2E, nrc]);
+
+        // This is byte-for-byte the chain `UdsBackend::write_raw_did` runs:
+        //   self.uds.write_data_by_id(did, data).map_err(convert_uds_error)
+        let uds = UdsService::new(transport);
+        uds.write_data_by_id(0xF40C, &[0x0F, 0xA0])
+            .await
+            .map_err(convert_uds_error)
+            .expect_err("ECU rejected the write; expected an error")
+    }
+
+    #[tokio::test]
+    async fn real_write_path_security_denied_maps_to_403() {
+        let err = write_real_path_nrc(0x33).await;
+        match &err {
+            BackendError::EcuError { nrc, sid, .. } => {
+                assert_eq!(*nrc, 0x33);
+                assert_eq!(*sid, 0x2E);
+            }
+            other => panic!("Expected EcuError on the real path, got {other:?}"),
+        }
+        // status_code() routes through nrc_to_status — the single source.
+        assert_eq!(
+            err.status_code(),
+            403,
+            "0x33 → 403 on the real UdsBackend path"
+        );
+    }
+
+    #[tokio::test]
+    async fn real_write_path_incorrect_length_maps_to_400() {
+        let err = write_real_path_nrc(0x13).await;
+        match &err {
+            BackendError::EcuError { nrc, .. } => assert_eq!(*nrc, 0x13),
+            other => panic!("Expected EcuError on the real path, got {other:?}"),
+        }
+        assert_eq!(
+            err.status_code(),
+            400,
+            "0x13 → 400 on the real UdsBackend path"
+        );
     }
 }

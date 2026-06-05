@@ -241,6 +241,95 @@ async fn unlisted_nrc_defaults_to_409() {
 }
 
 // ---------------------------------------------------------------------------
+// Part C — REAL UDS converter into the api error body
+//
+// Part B's mock backend fabricates `EcuError` directly, so it never exercises
+// `sovd_uds::error::convert_uds_error` (the function the live `UdsBackend`
+// write path runs to turn a UDS negative response into a `BackendError`). That
+// converter used to short-circuit specific NRCs (0x33→SecurityRequired→401,
+// 0x13→InvalidRequest, …) *before* the single-source `nrc_to_status` ran,
+// bypassing the NRC→HTTP table and the Table-18 body. These tests drive the
+// **real** converter end-to-end into `ApiError`'s `IntoResponse` and assert the
+// mapped status + `error-response` body — the path the mock could not catch.
+// ---------------------------------------------------------------------------
+
+/// Drive `UdsError::NegativeResponse` through the real `convert_uds_error`
+/// (live `UdsBackend` write path) → `ApiError` → HTTP response, and return the
+/// status + parsed body.
+async fn ecu_nrc_response(
+    service_id: u8,
+    nrc: sovd_uds::NegativeResponseCode,
+) -> (u16, serde_json::Value) {
+    use axum::response::IntoResponse;
+
+    let backend_err = sovd_uds::error::convert_uds_error(sovd_uds::UdsError::NegativeResponse {
+        service_id,
+        nrc,
+    });
+    let api_err: sovd_api::ApiError = backend_err.into();
+    let resp = api_err.into_response();
+
+    let status = resp.status().as_u16();
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .expect("read body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("body json");
+    (status, body)
+}
+
+/// 0x33 securityAccessDenied — the old converter made this `SecurityRequired`
+/// → 401 with no `service`/`nrc`. The real path must now yield 403 + the
+/// Table-18 `error-response` body.
+#[tokio::test]
+async fn real_path_security_denied_maps_to_403_with_body() {
+    let (status, body) =
+        ecu_nrc_response(0x2E, sovd_uds::NegativeResponseCode::SecurityAccessDenied).await;
+
+    assert_eq!(status, 403, "0x33 → 403 through the real converter: {body}");
+    assert_eq!(body["error_code"], "error-response", "{body}");
+    assert_eq!(body["parameters"]["service"][0], "0x2E", "{body}");
+    assert_eq!(body["parameters"]["nrc"][0], "0x33", "{body}");
+    assert_eq!(body["parameters"]["http_code"][0], "403", "{body}");
+}
+
+/// 0x13 incorrectMessageLengthOrInvalidFormat — old converter made this
+/// `InvalidRequest` (400 but no service/nrc body). Real path must be 400 + the
+/// full Table-18 body.
+#[tokio::test]
+async fn real_path_incorrect_length_maps_to_400_with_body() {
+    let (status, body) = ecu_nrc_response(
+        0x2E,
+        sovd_uds::NegativeResponseCode::IncorrectMessageLengthOrFormat,
+    )
+    .await;
+
+    assert_eq!(status, 400, "0x13 → 400 through the real converter: {body}");
+    assert_eq!(body["error_code"], "error-response", "{body}");
+    assert_eq!(body["parameters"]["service"][0], "0x2E", "{body}");
+    assert_eq!(body["parameters"]["nrc"][0], "0x13", "{body}");
+    assert_eq!(body["parameters"]["http_code"][0], "400", "{body}");
+}
+
+/// 0x36 exceededNumberOfAttempts — old converter made this `RateLimited` →
+/// 429 (not an RFC-9110 §15 status). Real path must be 403 (security gate) +
+/// the Table-18 body.
+#[tokio::test]
+async fn real_path_exceeded_attempts_maps_to_403_not_429() {
+    let (status, body) = ecu_nrc_response(
+        0x2E,
+        sovd_uds::NegativeResponseCode::ExceededNumberOfAttempts,
+    )
+    .await;
+
+    assert_eq!(
+        status, 403,
+        "0x36 → 403 (was 429) through the real converter: {body}"
+    );
+    assert_eq!(body["error_code"], "error-response", "{body}");
+    assert_eq!(body["parameters"]["nrc"][0], "0x36", "{body}");
+}
+
+// ---------------------------------------------------------------------------
 // Part A — spec `{value}` body, raw-vs-converted inference
 // ---------------------------------------------------------------------------
 
