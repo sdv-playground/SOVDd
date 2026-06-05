@@ -615,17 +615,46 @@ impl FlashClient {
     ) -> Result<UpdateStatusBody> {
         let interval = Duration::from_millis(self.config.timeouts.flash_poll_ms);
         let deadline = std::time::Instant::now() + budget;
+        // The server can briefly become unreachable mid-poll — the device
+        // resets/reboots, or the SOVD host is momentarily starved during a
+        // commit. A transport error (FlashError::Http) is therefore not
+        // fatal: keep retrying for up to RECONNECT_GRACE so a verdict that
+        // already landed on the device isn't aborted by a transient drop
+        // (mirrors the orchestrator's wait_for_activation reboot window).
+        // A real HTTP *response* (FlashError::Server, 4xx/5xx) is not
+        // transient and propagates immediately.
+        const RECONNECT_GRACE: Duration = Duration::from_secs(120);
+        let mut unreachable_since: Option<std::time::Instant> = None;
         loop {
-            let body = self.spec_status().await?;
-            if body.phase == expected_phase && body.is_terminal() {
-                return Ok(body);
+            // Last phase/status seen this round, for the timeout message.
+            let last_seen: Option<(String, String)>;
+            match self.spec_status().await {
+                Ok(body) => {
+                    unreachable_since = None;
+                    if body.phase == expected_phase && body.is_terminal() {
+                        return Ok(body);
+                    }
+                    last_seen = Some((body.phase, body.status));
+                }
+                // Transport-level failure: server momentarily unreachable.
+                // Tolerate within the grace window, then surface it.
+                Err(e @ FlashError::Http(_)) => {
+                    let since = *unreachable_since.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() > RECONNECT_GRACE {
+                        return Err(e);
+                    }
+                    tracing::debug!(error = %e, "status poll: server unreachable, retrying");
+                    last_seen = None;
+                }
+                // Definitive response — don't mask it.
+                Err(e) => return Err(e),
             }
             if std::time::Instant::now() > deadline {
+                let detail = last_seen
+                    .map(|(p, s)| format!("still {p}/{s}"))
+                    .unwrap_or_else(|| "server unreachable".to_string());
                 return Err(FlashError::Timeout {
-                    operation: format!(
-                        "{} phase: still {}/{} after {:?}",
-                        expected_phase, body.phase, body.status, budget
-                    ),
+                    operation: format!("{expected_phase} phase: {detail} after {budget:?}"),
                 });
             }
             tokio::time::sleep(interval).await;
