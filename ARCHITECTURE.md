@@ -271,6 +271,22 @@ and `meta` (version-info, docs, `.well-known`, the 404/405 fallbacks).
 6. **Respond:** a `DidResponse` (id, value, unit, raw, length, converted, RFC-3339 timestamp), or an
    error funneled through §11.
 
+### 6.5 Vendor data parameters (`x-<ext>-…`)
+
+Backends may expose vendor-specific parameters over the generic `/data` wire:
+`list_parameters` advertises them with custom `x-<ext>-` ids (ISO 17978-3 §5.4.5)
+and `read_data` serves them. SOVDd routes these with **zero** special-casing — no
+vendor name is baked into the server, so it stays spec-pure (cf. §2). The value
+may be a structured object, not just a scalar.
+
+Canonical example — **`x-sumo-installed-manifest`** (served by
+sumo-machine-manager's `VmBackend`): `GET …/components/{vm}/data/x-sumo-installed-manifest`
+returns the committed bank's **signature-verified IVD manifest** — per-file
+`{path, sha256}`, the release `identity`, and the signed bytes for independent
+verification — the read a SW-mapping / update tool uses to inventory "what is
+installed" per VM. Producer-side contract + verification details:
+`sumo-machine-manager/specs/sovd-vm-app-installation.md` §17.
+
 ---
 
 ## 7. Multi-component, gateways & sub-entities
