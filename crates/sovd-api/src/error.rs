@@ -11,13 +11,26 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use sovd_core::error::nrc_to_status;
 use sovd_core::{error_code, BackendError, GenericError};
+
+/// HTTP status for a UDS Negative Response Code (NRC).
+///
+/// Thin axum-typed wrapper over [`sovd_core::error::nrc_to_status`], which is
+/// the single source of truth for the NRC→HTTP table (ISO 17978-3 §8.4,
+/// C-131). Keeping the table in one place guarantees this `IntoResponse`
+/// status and [`BackendError::status_code`] never diverge.
+pub fn nrc_status(nrc: u8) -> StatusCode {
+    StatusCode::from_u16(nrc_to_status(nrc)).unwrap_or(StatusCode::CONFLICT)
+}
 
 /// API error type that converts to HTTP responses.
 ///
-/// Status codes restricted to ISO 17978-3 §5.8 set:
+/// Most arms stay within the ISO 17978-3 §5.8 status set:
 /// 200/201/202/204/400/401/404/405/406/409/415/500/501/503/504.
-/// 403/412/502/429 are NOT in the spec set and were removed.
+/// The one exception is `EcuErrorResponse`, whose status is the NRC→HTTP
+/// mapping (ISO 17978-3 §8.4, C-131) — §8.4 may add per-method codes
+/// (403/502 for security / ECU-side-failure NRCs) on top of §5.8's set.
 #[derive(Debug)]
 pub enum ApiError {
     /// 400 Bad Request — `incomplete-request`
@@ -52,9 +65,10 @@ pub enum ApiError {
     ServiceUnavailable(String),
     /// 504 Gateway Timeout — upstream didn't respond in time.
     GatewayTimeout(String),
-    /// 409 Conflict — `error-response` (UDS NRC).  The ECU answered
-    /// but rejected the request given its current state; surface as
-    /// a state-conflict to the client.
+    /// `error-response` (UDS NRC).  The ECU answered but rejected the
+    /// request; the HTTP status is the NRC→HTTP mapping ([`nrc_status`],
+    /// C-131) — 400/403/502/503 for specific NRC classes, else 409
+    /// (state conflict).
     EcuErrorResponse { message: String, nrc: u8, sid: u8 },
     /// 415 Unsupported Media Type — F.D3 dispatcher rejects a payload
     /// whose target doesn't match the addressed component.  Carries
@@ -68,13 +82,20 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, body) = match self {
             ApiError::EcuErrorResponse { message, nrc, sid } => {
-                tracing::debug!(nrc, sid, %message, "ECU error response");
+                // NRC→HTTP per the single-source table (ISO 17978-3 §8.4,
+                // C-131): the ECU answered but rejected — map the NRC to the
+                // status that best models *why* (400 malformed, 403 security,
+                // 502 ECU-side failure, 503 busy, else 409 state conflict).
+                let status = nrc_status(nrc);
+                tracing::debug!(nrc, sid, status = status.as_u16(), %message, "ECU error response");
+                // error-response body MUST carry service + nrc; add http_code
+                // (yaml:156 lists it as a parameter) so the client sees the
+                // mapped status in the body too.
                 let body = GenericError::new(error_code::ERROR_RESPONSE, message)
                     .with_param("service", format!("0x{:02X}", sid))
-                    .with_param("nrc", format!("0x{:02X}", nrc));
-                // 409 (Conflict): ECU answered but rejected — the
-                // resource is in a state incompatible with the request.
-                (StatusCode::CONFLICT, body)
+                    .with_param("nrc", format!("0x{:02X}", nrc))
+                    .with_param("http_code", status.as_u16().to_string());
+                (status, body)
             }
             ApiError::BadRequest(msg) => (
                 StatusCode::BAD_REQUEST,
@@ -186,5 +207,27 @@ impl From<BackendError> for ApiError {
             BackendError::UnsupportedMediaType(msg) => ApiError::UnsupportedMediaType(msg),
             BackendError::Internal(msg) => ApiError::Internal(msg),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nrc_status;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn nrc_status_representatives() {
+        // The axum-typed wrapper agrees with the C-131 table (single source
+        // of truth in sovd_core::error::nrc_to_status).
+        assert_eq!(nrc_status(0x31), StatusCode::BAD_REQUEST); // 400
+        assert_eq!(nrc_status(0x13), StatusCode::BAD_REQUEST); // 400
+        assert_eq!(nrc_status(0x33), StatusCode::FORBIDDEN); // 403
+        assert_eq!(nrc_status(0x35), StatusCode::FORBIDDEN); // 403
+        assert_eq!(nrc_status(0x36), StatusCode::FORBIDDEN); // 403
+        assert_eq!(nrc_status(0x10), StatusCode::BAD_GATEWAY); // 502
+        assert_eq!(nrc_status(0x72), StatusCode::BAD_GATEWAY); // 502
+        assert_eq!(nrc_status(0x21), StatusCode::SERVICE_UNAVAILABLE); // 503
+        assert_eq!(nrc_status(0x22), StatusCode::CONFLICT); // 409 default
+        assert_eq!(nrc_status(0x99), StatusCode::CONFLICT); // 409 default
     }
 }

@@ -123,18 +123,20 @@ pub struct DidResponse {
     pub timestamp: String,
 }
 
-/// Request for DID write operations
+/// Request for a DID write — spec `{value}` body (ISO 17978-2 ≈line 489:
+/// "the value(s) to be written").
+///
+/// Whether `value` is a physical/converted value or a raw byte
+/// representation is inferred from the DID definition (a registered
+/// conversion → physical; none → raw), not from a body hint. The
+/// previous non-spec `format` field was removed for C-131 — no consumer
+/// sent it, and SOVDd stays spec-pure. Any extra keys in the body (e.g.
+/// a stray `format`) are ignored by serde, so an old client doesn't 500.
 #[derive(Deserialize)]
 pub struct WriteDidRequest {
-    /// Value to write (number for converted, hex string/array for raw)
+    /// Value to write (physical value for a converted DID; hex string or
+    /// byte array for a raw DID).
     pub value: serde_json::Value,
-    /// Format hint: "hex", "raw", or "auto"
-    #[serde(default = "default_format")]
-    pub format: String,
-}
-
-fn default_format() -> String {
-    "auto".to_string()
 }
 
 // =============================================================================
@@ -505,28 +507,32 @@ async fn write_did_internal(
         .and_then(|def| def.id.clone())
         .unwrap_or_else(|| param_id.to_string());
 
-    // Encode the value
-    let data = if component_def.is_some() {
-        // If definition exists, try to encode using it
+    // Raw-vs-converted inference (C-131): a DID whose definition carries a
+    // real conversion → `value` is the physical value, encoded via the
+    // definition; a DID with no definition (or a bare raw-`Bytes` passthrough)
+    // → `value` is a raw byte representation. This replaces the old `format`
+    // body hint.
+    let has_conversion = component_def.as_ref().is_some_and(|d| d.has_conversion());
+    let data = if has_conversion {
         match did_store.encode(did_u16, &request.value) {
             Ok(bytes) => bytes,
-            Err(_) => convert_value_to_bytes(&request)?,
+            Err(_) => convert_value_to_bytes(&request.value)?,
         }
     } else {
-        convert_value_to_bytes(&request)?
+        convert_value_to_bytes(&request.value)?
     };
 
     // Write via backend
     backend.write_raw_did(did_u16, &data).await?;
 
-    // Return response with decoded value
-    let (value, unit, converted) = if let Some(def) = component_def {
-        match did_store.decode(did_u16, &data) {
+    // Return response with the value as it round-trips: decoded physical for a
+    // converted DID, raw hex for a raw/undefined DID.
+    let (value, unit, converted) = match component_def {
+        Some(def) if def.has_conversion() => match did_store.decode(did_u16, &data) {
             Ok(decoded) => (decoded, def.unit, true),
             Err(_) => (serde_json::json!(hex::encode(&data)), None, false),
-        }
-    } else {
-        (serde_json::json!(hex::encode(&data)), None, false)
+        },
+        _ => (serde_json::json!(hex::encode(&data)), None, false),
     };
 
     Ok(Json(DidResponse {
@@ -554,69 +560,55 @@ fn synthesize_entity_did(did: u16, info: &sovd_core::models::EntityInfo) -> Opti
     }
 }
 
-/// Convert request value to bytes based on format
-pub fn convert_value_to_bytes(request: &WriteDidRequest) -> Result<Vec<u8>, ApiError> {
-    match request.format.as_str() {
-        "hex" => {
-            let hex_str = request.value.as_str().ok_or_else(|| {
-                ApiError::BadRequest("hex format requires a string value".to_string())
-            })?;
-            hex::decode(hex_str)
-                .map_err(|e| ApiError::BadRequest(format!("Invalid hex string: {}", e)))
-        }
-        "raw" => {
-            let arr = request.value.as_array().ok_or_else(|| {
-                ApiError::BadRequest("raw format requires an array of byte values".to_string())
-            })?;
-            arr.iter()
-                .map(|v| {
-                    v.as_u64()
-                        .and_then(|n| if n <= 255 { Some(n as u8) } else { None })
-                        .ok_or_else(|| {
-                            ApiError::BadRequest("raw array values must be 0-255".to_string())
-                        })
-                })
-                .collect()
-        }
-        _ => match &request.value {
-            serde_json::Value::String(s) => {
-                // Try hex first if it looks like hex
-                if s.len() % 2 == 0 && s.chars().all(|c| c.is_ascii_hexdigit()) && s.len() >= 2 {
-                    hex::decode(s).or_else(|_| Ok(s.as_bytes().to_vec()))
-                } else {
-                    Ok(s.as_bytes().to_vec())
-                }
+/// Convert a *raw* write `value` to bytes — the path taken when the DID has
+/// no conversion definition (so `value` is a raw byte representation, not a
+/// physical value).
+///
+/// The raw-vs-converted decision is made by the caller from the DID
+/// definition (`write_did_internal` tries `did_store.encode` first when a
+/// definition exists); this function is the raw fallback and infers the byte
+/// encoding from the JSON value shape:
+///   * string → hex if it parses as hex (even length, all hex digits), else
+///     the UTF-8 bytes;
+///   * number → minimal big-endian unsigned encoding;
+///   * array  → each element a byte (0-255).
+pub fn convert_value_to_bytes(value: &serde_json::Value) -> Result<Vec<u8>, ApiError> {
+    match value {
+        serde_json::Value::String(s) => {
+            // Treat as hex if it looks like hex; otherwise raw UTF-8 bytes.
+            if s.len() % 2 == 0 && s.chars().all(|c| c.is_ascii_hexdigit()) && s.len() >= 2 {
+                hex::decode(s).or_else(|_| Ok(s.as_bytes().to_vec()))
+            } else {
+                Ok(s.as_bytes().to_vec())
             }
-            serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_u64() {
-                    if i <= 0xFF {
-                        Ok(vec![i as u8])
-                    } else if i <= 0xFFFF {
-                        Ok((i as u16).to_be_bytes().to_vec())
-                    } else if i <= 0xFFFFFFFF {
-                        Ok((i as u32).to_be_bytes().to_vec())
-                    } else {
-                        Ok(i.to_be_bytes().to_vec())
-                    }
+        }
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_u64() {
+                if i <= 0xFF {
+                    Ok(vec![i as u8])
+                } else if i <= 0xFFFF {
+                    Ok((i as u16).to_be_bytes().to_vec())
+                } else if i <= 0xFFFFFFFF {
+                    Ok((i as u32).to_be_bytes().to_vec())
                 } else {
-                    Err(ApiError::BadRequest(
-                        "Numeric value out of range".to_string(),
-                    ))
+                    Ok(i.to_be_bytes().to_vec())
                 }
+            } else {
+                Err(ApiError::BadRequest(
+                    "Numeric value out of range".to_string(),
+                ))
             }
-            serde_json::Value::Array(arr) => arr
-                .iter()
-                .map(|v| {
-                    v.as_u64()
-                        .and_then(|n| if n <= 255 { Some(n as u8) } else { None })
-                        .ok_or_else(|| {
-                            ApiError::BadRequest("Array values must be 0-255".to_string())
-                        })
-                })
-                .collect(),
-            _ => Err(ApiError::BadRequest(
-                "Value must be a string, number, or array".to_string(),
-            )),
-        },
+        }
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .map(|v| {
+                v.as_u64()
+                    .and_then(|n| if n <= 255 { Some(n as u8) } else { None })
+                    .ok_or_else(|| ApiError::BadRequest("Array values must be 0-255".to_string()))
+            })
+            .collect(),
+        _ => Err(ApiError::BadRequest(
+            "Value must be a string, number, or array".to_string(),
+        )),
     }
 }

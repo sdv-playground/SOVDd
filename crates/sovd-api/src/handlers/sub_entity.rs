@@ -426,13 +426,17 @@ pub async fn write_sub_entity_parameter(
     if has_local_dids {
         if let Some(did_u16) = did_store.resolve_did(&param_id) {
             let component_def = did_store.get_for_component(did_u16, &sub_entity_id);
-            let data = if component_def.is_some() {
+            // Raw-vs-converted inference (C-131): encode physical values only
+            // when the DID carries a real conversion; otherwise treat `value`
+            // as a raw byte representation.
+            let has_conversion = component_def.as_ref().is_some_and(|d| d.has_conversion());
+            let data = if has_conversion {
                 match did_store.encode(did_u16, &request.value) {
                     Ok(bytes) => bytes,
-                    Err(_) => super::data::convert_value_to_bytes(&request)?,
+                    Err(_) => super::data::convert_value_to_bytes(&request.value)?,
                 }
             } else {
-                super::data::convert_value_to_bytes(&request)?
+                super::data::convert_value_to_bytes(&request.value)?
             };
             backend.write_raw_did(did_u16, &data).await?;
             return Ok(StatusCode::NO_CONTENT);
@@ -440,7 +444,7 @@ pub async fn write_sub_entity_parameter(
     }
 
     // Fall back to backend.write_data() for proxy backends
-    let data = super::data::convert_value_to_bytes(&request)?;
+    let data = super::data::convert_value_to_bytes(&request.value)?;
     backend.write_data(&param_id, &data).await?;
     Ok(StatusCode::NO_CONTENT)
 }

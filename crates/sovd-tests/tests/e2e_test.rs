@@ -2109,10 +2109,7 @@ async fn test_write_parameter_wrong_session() {
         .expect("Failed to create test harness");
 
     // Harness setup resets to default session, so write should fail (extended required)
-    let body = serde_json::json!({
-        "value": "20250130",
-        "format": "hex"
-    });
+    let body = serde_json::json!({ "value": "20250130" });
 
     let (status, json) = harness
         .put("/vehicle/v1/components/vtx_ecm/data/programming_date", body)
@@ -2142,10 +2139,7 @@ async fn test_write_parameter_security_required() {
         .expect("Failed to create test harness");
 
     // installation_date (0xF19D) requires security access
-    let body = serde_json::json!({
-        "value": "20250130",
-        "format": "hex"
-    });
+    let body = serde_json::json!({ "value": "20250130" });
 
     let (status, json) = harness
         .put(

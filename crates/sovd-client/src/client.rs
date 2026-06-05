@@ -401,13 +401,14 @@ impl SovdClient {
             encode_path_segment(param_id)
         ))?;
 
-        // Send as hex string with explicit format hint
-        let body = serde_json::json!({
-            "value": hex::encode(data),
-            "format": "hex"
-        });
+        // Send the spec `{value}` body (C-131). The bytes go as a hex
+        // string; the server infers the raw-hex encoding from the value
+        // shape (no non-spec `format` hint).
+        let request = WriteDataRequest {
+            value: serde_json::json!(hex::encode(data)),
+        };
 
-        let response = self.client.put(url).json(&body).send().await?;
+        let response = self.client.put(url).json(&request).send().await?;
 
         if response.status().is_success() {
             Ok(())

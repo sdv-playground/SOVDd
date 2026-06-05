@@ -267,6 +267,45 @@ impl DidDefinition {
         self.enum_map.is_some() && !self.enum_map.as_ref().unwrap().is_empty()
     }
 
+    /// Whether this definition carries a meaningful byte↔physical *conversion*
+    /// (as opposed to being a trivial raw-`Bytes` passthrough).
+    ///
+    /// Used to decide the raw-vs-converted interpretation of a written
+    /// `value` (ISO 17978-3 §8.4, C-131): a DID *with* a conversion expects a
+    /// physical value (encoded via the definition); a DID *without* one
+    /// (a `Bytes` blob with no scaling/structure) expects a raw byte
+    /// representation (hex string or byte array).
+    ///
+    /// Any structured shape (array/map/histogram/bitfield/enum/labels) or any
+    /// numeric/string scalar counts as a conversion; so does a `Bytes` field
+    /// that nonetheless declares scaling or a bit mask. Only a bare `Bytes`
+    /// scalar (default scale, no mask/structure) is treated as raw — for it,
+    /// `encode` would yield empty bytes, so the raw path must be used instead.
+    pub fn has_conversion(&self) -> bool {
+        // Structured shapes always imply a conversion.
+        if self.is_array()
+            || self.is_map()
+            || self.is_histogram()
+            || self.is_bitfield()
+            || self.is_enum()
+            || self.labels.is_some()
+        {
+            return true;
+        }
+        match self.data_type {
+            // A raw byte blob: a conversion only if it declares scaling or a
+            // bit mask (otherwise `encode` produces nothing — it's a passthrough).
+            DataType::Bytes => {
+                self.scale != default_scale()
+                    || self.offset != 0.0
+                    || self.bit_mask.is_some()
+                    || self.bit_shift.is_some()
+            }
+            // Numeric and string scalars are always conversions.
+            _ => true,
+        }
+    }
+
     /// Get the precision to use (explicit or derived from scale)
     pub fn get_precision(&self) -> u8 {
         self.precision
@@ -466,5 +505,29 @@ mod tests {
         assert!(def.is_available_for("engine_ecu"));
         assert!(!def.is_available_for("transmission_ecu"));
         assert!(!def.is_available_for("body_ecu"));
+    }
+
+    #[test]
+    fn test_has_conversion() {
+        // Numeric / string scalars are conversions.
+        assert!(DidDefinition::scaled(DataType::Uint16, 0.25, 0.0).has_conversion());
+        assert!(DidDefinition::scalar(DataType::Uint8).has_conversion());
+        assert!(DidDefinition::scalar(DataType::String).has_conversion());
+
+        // A bare raw-Bytes scalar is a passthrough → NOT a conversion.
+        assert!(!DidDefinition::scalar(DataType::Bytes).has_conversion());
+
+        // A Bytes field that declares scaling or a mask IS a conversion.
+        assert!(DidDefinition::scaled(DataType::Bytes, 2.0, 0.0).has_conversion());
+        let mut masked = DidDefinition::scalar(DataType::Bytes);
+        masked.bit_mask = Some(0x0F);
+        assert!(masked.has_conversion());
+
+        // Structured shapes are conversions regardless of base type.
+        assert!(DidDefinition::array(DataType::Uint8, 4).has_conversion());
+        assert!(DidDefinition::map(DataType::Uint8, 2, 2).has_conversion());
+        let mut enumd = DidDefinition::scalar(DataType::Bytes);
+        enumd.enum_map = Some([(0, "off".to_string()), (1, "on".to_string())].into());
+        assert!(enumd.has_conversion());
     }
 }
