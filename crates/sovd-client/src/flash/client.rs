@@ -140,6 +140,12 @@ pub struct UpdateStatusBody {
     /// `rolling-back`.
     #[serde(default, rename = "x-sumo-substate")]
     pub substate: Option<String>,
+    /// Vendor extension: the component's declared `ResetKind`, captured
+    /// server-side at register time. Lets the campaign orchestrator
+    /// coalesce RT/host-os ECU resets instead of defaulting to `Local`.
+    /// Absent on servers that haven't migrated → `None`.
+    #[serde(default, rename = "x-sumo-reset-kind")]
+    pub reset_kind: Option<sovd_core::ResetKind>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

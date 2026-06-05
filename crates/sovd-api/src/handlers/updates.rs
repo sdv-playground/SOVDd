@@ -130,6 +130,16 @@ pub struct UpdateStatusBody {
     /// orchestrated (Phase B).
     #[serde(rename = "x-sumo-substate", skip_serializing_if = "Option::is_none")]
     pub substate: Option<&'static str>,
+    /// Vendor extension (ISO 17978-3 §5.4.5 permits `x-<ext>-` fields):
+    /// the component's declared `ResetKind` from its `ActivationState`,
+    /// captured once at register time. Lets the campaign orchestrator
+    /// route RT/host-os components through a coalesced ECU reset instead
+    /// of defaulting every component to `Local`.
+    #[serde(
+        rename = "x-sumo-reset-kind",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reset_kind: Option<sovd_core::ResetKind>,
 }
 
 #[derive(Debug, Serialize)]
@@ -276,6 +286,17 @@ pub async fn register_update(
     // `verify` action or at `PUT /prepare`).
     let transfer_id = backend.start_flash().await.ok();
 
+    // Capture the component's declared ResetKind once, while it's idle
+    // (cheap here; `get_activation_state` can be slow mid-flash, so we
+    // never re-read it per status-poll). Surfaced on the wire as
+    // `x-sumo-reset-kind` for the campaign orchestrator. Done before
+    // taking the `state.updates` lock — never `.await` while holding it.
+    let reset_kind = backend
+        .get_activation_state()
+        .await
+        .ok()
+        .map(|a| a.reset_kind);
+
     {
         let mut store = state.updates.0.lock();
         store.insert(
@@ -291,6 +312,7 @@ pub async fn register_update(
                 step: None,
                 error: None,
                 substate: None,
+                reset_kind,
                 transfer_id,
                 task_handle: None,
                 verdict_tx: None,
@@ -1175,6 +1197,7 @@ pub async fn get_status(
             None
         },
         substate: entry.substate,
+        reset_kind: entry.reset_kind,
     }))
 }
 

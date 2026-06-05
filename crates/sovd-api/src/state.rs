@@ -123,6 +123,13 @@ pub struct UpdatesEntry {
     /// when control mode is orchestrated.  See
     /// `tasks/spec-aligned-updates-wire.md` §2.2.
     pub substate: Option<&'static str>,
+    /// Component's declared `ResetKind`, captured from
+    /// `get_activation_state()` once at register time (the component is
+    /// idle then, so the call is cheap — never re-read per status-poll).
+    /// Surfaced on the wire as `x-sumo-reset-kind` so the campaign
+    /// orchestrator can coalesce RT/host-os ECU resets. `None` when the
+    /// backend doesn't report activation state at register.
+    pub reset_kind: Option<sovd_core::ResetKind>,
     /// Backend's transfer_id, populated once `start_flash` runs.
     pub transfer_id: Option<String>,
     /// Abort handle for the in-flight prepare/execute task, so
