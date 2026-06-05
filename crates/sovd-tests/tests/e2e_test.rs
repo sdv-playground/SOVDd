@@ -1546,6 +1546,141 @@ async fn test_security_access_success() {
     eprintln!("Security access granted!");
 }
 
+// =============================================================================
+// modes/comm-ctrl (UDS 0x28) + modes/dtcsetting (UDS 0x85)
+// ISO 17978-3 §8.3.4/§8.3.5 + Table 343 (C-130/C-135) — drives the real
+// example-ecu CommunicationControl / ControlDTCSetting handlers end-to-end.
+// =============================================================================
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_dtc_setting_off_then_on() {
+    let harness = TestHarness::new()
+        .await
+        .expect("Failed to setup test harness");
+
+    // PUT off → 200, body echoes the new value.
+    let (status, json) = harness
+        .put(
+            "/vehicle/v1/components/vtx_ecm/modes/dtcsetting",
+            serde_json::json!({ "value": "off" }),
+        )
+        .await
+        .expect("PUT dtcsetting off failed");
+    assert_eq!(
+        status, 200,
+        "PUT dtcsetting off → 200, got {}: {}",
+        status, json
+    );
+    assert_eq!(json["id"], "dtcsetting");
+    assert_eq!(json["value"], "off", "PUT off echoes value: {}", json);
+
+    // GET reflects the last-set value (0x85 is write-only on the wire).
+    let (status, json) = harness
+        .get_with_status("/vehicle/v1/components/vtx_ecm/modes/dtcsetting")
+        .await
+        .expect("GET dtcsetting failed");
+    assert_eq!(
+        status, 200,
+        "GET dtcsetting → 200, got {}: {}",
+        status, json
+    );
+    assert_eq!(json["value"], "off", "GET reflects off: {}", json);
+
+    // Flip back on → 200.
+    let (status, json) = harness
+        .put(
+            "/vehicle/v1/components/vtx_ecm/modes/dtcsetting",
+            serde_json::json!({ "value": "on" }),
+        )
+        .await
+        .expect("PUT dtcsetting on failed");
+    assert_eq!(
+        status, 200,
+        "PUT dtcsetting on → 200, got {}: {}",
+        status, json
+    );
+    assert_eq!(json["value"], "on", "PUT on echoes value: {}", json);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_comm_ctrl_disable_rx_tx() {
+    let harness = TestHarness::new()
+        .await
+        .expect("Failed to setup test harness");
+
+    // PUT disable-rx-tx → 200, body echoes value.
+    let (status, json) = harness
+        .put(
+            "/vehicle/v1/components/vtx_ecm/modes/comm-ctrl",
+            serde_json::json!({ "value": "disable-rx-tx" }),
+        )
+        .await
+        .expect("PUT comm-ctrl failed");
+    assert_eq!(
+        status, 200,
+        "PUT comm-ctrl disable-rx-tx → 200, got {}: {}",
+        status, json
+    );
+    assert_eq!(json["id"], "comm-ctrl");
+    assert_eq!(json["value"], "disable-rx-tx", "PUT echoes value: {}", json);
+
+    // GET reflects the last-set value and carries the ECU-specific enum.
+    let (status, json) = harness
+        .get_with_status("/vehicle/v1/components/vtx_ecm/modes/comm-ctrl")
+        .await
+        .expect("GET comm-ctrl failed");
+    assert_eq!(status, 200, "GET comm-ctrl → 200, got {}: {}", status, json);
+    assert_eq!(
+        json["value"], "disable-rx-tx",
+        "GET reflects last set: {}",
+        json
+    );
+    let supported = json["supported"]
+        .as_array()
+        .expect("comm-ctrl GET carries supported[]");
+    assert!(
+        supported.iter().any(|v| v == "enable-rx-tx"),
+        "supported enum includes enable-rx-tx: {}",
+        json
+    );
+
+    // Restore full comms so the shared ECU is clean for subsequent tests.
+    let (status, _json) = harness
+        .put(
+            "/vehicle/v1/components/vtx_ecm/modes/comm-ctrl",
+            serde_json::json!({ "value": "enable-rx-tx" }),
+        )
+        .await
+        .expect("PUT comm-ctrl restore failed");
+    assert_eq!(status, 200, "PUT comm-ctrl restore → 200");
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_modes_old_route_names_are_404() {
+    let harness = TestHarness::new()
+        .await
+        .expect("Failed to setup test harness");
+
+    // C-130: the pre-rename routes must no longer exist.
+    for path in [
+        "/vehicle/v1/components/vtx_ecm/modes/communication-control",
+        "/vehicle/v1/components/vtx_ecm/modes/dtc-setting",
+    ] {
+        let (status, json) = harness
+            .get_with_status(path)
+            .await
+            .expect("GET old route failed");
+        assert_eq!(
+            status, 404,
+            "old route {} must be gone (404), got {}: {}",
+            path, status, json
+        );
+    }
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn test_security_access_failure_wrong_key() {

@@ -344,53 +344,7 @@ pub async fn list_data_groups(
     Ok(Json(EmptyListResponse::default()))
 }
 
-// =============================================================================
-// modes/communication-control + modes/dtc-setting — §7.16
-// =============================================================================
-
-// modes/communication-control and modes/dtc-setting return 501 on both
-// verbs until the backend exposes UDS 0x28 / 0x85.  Returning a
-// fabricated GET value would be worse than 501 — conformance checkers
-// would treat the cached "normal"/"on" as a real ECU read.
-
-pub async fn get_comm_control_mode(
-    State(state): State<AppState>,
-    Path(component_id): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    require_component(&state, &component_id)?;
-    Err(ApiError::NotImplemented(
-        "modes/communication-control not yet wired (UDS 0x28)".into(),
-    ))
-}
-
-pub async fn put_comm_control_mode(
-    State(state): State<AppState>,
-    Path(component_id): Path<String>,
-    Json(_req): Json<serde_json::Value>,
-) -> Result<StatusCode, ApiError> {
-    require_component(&state, &component_id)?;
-    Err(ApiError::NotImplemented(
-        "modes/communication-control not yet wired (UDS 0x28)".into(),
-    ))
-}
-
-pub async fn get_dtc_setting_mode(
-    State(state): State<AppState>,
-    Path(component_id): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    require_component(&state, &component_id)?;
-    Err(ApiError::NotImplemented(
-        "modes/dtc-setting not yet wired (UDS 0x85)".into(),
-    ))
-}
-
-pub async fn put_dtc_setting_mode(
-    State(state): State<AppState>,
-    Path(component_id): Path<String>,
-    Json(_req): Json<serde_json::Value>,
-) -> Result<StatusCode, ApiError> {
-    require_component(&state, &component_id)?;
-    Err(ApiError::NotImplemented(
-        "modes/dtc-setting not yet wired (UDS 0x85)".into(),
-    ))
-}
+// modes/comm-ctrl (UDS 0x28) + modes/dtcsetting (UDS 0x85) are now real
+// handlers in `modes.rs` (mapped per ISO 17978-3 Table 343 / C-130). They
+// used to be 501 stubs here; the stubs were removed when the backend gained
+// CommunicationControl / ControlDTCSetting support.

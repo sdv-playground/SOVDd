@@ -220,15 +220,18 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/data-groups",
             get(handlers::stubs::list_data_groups),
         )
-        // §7.16 modes/communication-control + modes/dtc-setting
+        // §7.16 modes/comm-ctrl + modes/dtcsetting — UDS CommunicationControl
+        // (0x28) + ControlDTCSetting (0x85), mapped exactly per ISO 17978-3
+        // Table 343 (C-130). The former `communication-control`/`dtc-setting`
+        // names are gone (now 404).
         .route(
-            "/vehicle/v1/components/{component_id}/modes/communication-control",
-            get(handlers::stubs::get_comm_control_mode)
-                .put(handlers::stubs::put_comm_control_mode),
+            "/vehicle/v1/components/{component_id}/modes/comm-ctrl",
+            get(handlers::modes::get_comm_control_mode)
+                .put(handlers::modes::put_comm_control_mode),
         )
         .route(
-            "/vehicle/v1/components/{component_id}/modes/dtc-setting",
-            get(handlers::stubs::get_dtc_setting_mode).put(handlers::stubs::put_dtc_setting_mode),
+            "/vehicle/v1/components/{component_id}/modes/dtcsetting",
+            get(handlers::modes::get_dtc_setting_mode).put(handlers::modes::put_dtc_setting_mode),
         )
         // Spec §7.13 clear-data collection — stub today.
         .route(
@@ -374,7 +377,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         // Mode routes (session, security).  Per ISO 17978-3 Table 343 /
         // C-130 the UDS service→mode mapping covers session (0x10),
-        // security (0x27/0x29), comm-control (0x28) and dtc-setting
+        // security (0x27/0x29), comm-ctrl (0x28) and dtcsetting
         // (0x85). LinkControl (0x87) has NO standardized mode name — it
         // is "not represented" — so the former `modes/link` route was
         // dropped for C-025 (only standardized mode names on the entity)

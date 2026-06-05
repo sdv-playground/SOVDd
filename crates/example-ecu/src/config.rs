@@ -181,6 +181,14 @@ pub struct ServiceIdConfig {
     #[serde(default = "default_security_access")]
     pub security_access: u8,
 
+    /// CommunicationControl (standard: 0x28)
+    #[serde(default = "default_communication_control")]
+    pub communication_control: u8,
+
+    /// ControlDTCSetting (standard: 0x85)
+    #[serde(default = "default_control_dtc_setting")]
+    pub control_dtc_setting: u8,
+
     /// ReadDataByPeriodicIdentifier (standard: 0x2A, Vortex Motors: 0xBB)
     #[serde(default = "default_read_data_by_periodic_id")]
     pub read_data_by_periodic_id: u8,
@@ -245,6 +253,12 @@ fn default_read_data_by_id() -> u8 {
 fn default_security_access() -> u8 {
     0x27
 }
+fn default_communication_control() -> u8 {
+    0x28
+}
+fn default_control_dtc_setting() -> u8 {
+    0x85
+}
 fn default_read_data_by_periodic_id() -> u8 {
     0x2A
 }
@@ -288,6 +302,8 @@ impl Default for ServiceIdConfig {
             read_dtc_info: default_read_dtc_info(),
             read_data_by_id: default_read_data_by_id(),
             security_access: default_security_access(),
+            communication_control: default_communication_control(),
+            control_dtc_setting: default_control_dtc_setting(),
             read_data_by_periodic_id: default_read_data_by_periodic_id(),
             dynamically_define_data_id: default_dynamically_define_data_id(),
             write_data_by_id: default_write_data_by_id(),
@@ -323,6 +339,8 @@ impl ServiceIdConfig {
             || self.read_dtc_info != 0x19
             || self.read_data_by_id != 0x22
             || self.security_access != 0x27
+            || self.communication_control != 0x28
+            || self.control_dtc_setting != 0x85
             || self.read_data_by_periodic_id != 0x2A
             || self.dynamically_define_data_id != 0x2C
             || self.write_data_by_id != 0x2E

@@ -43,6 +43,31 @@ pub struct SecurityMode {
     pub seed: Option<String>,
 }
 
+/// Communication-control mode (UDS CommunicationControl 0x28).
+///
+/// ISO 17978-3 §8.3.4 / Table 343: `<entity>/modes/comm-ctrl`. The `value`
+/// is the currently-set subfunction (kebab-case), and `supported` is the
+/// ECU-specific enum of subfunctions the ECU accepts. 0x28 is write-only on
+/// the UDS wire, so `value` reflects the last successful PUT (or the initial
+/// default) rather than a live read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommControlMode {
+    /// Current subfunction, kebab-case (e.g. `enable-rx-tx`, `disable-rx-tx`).
+    pub value: String,
+    /// ECU-specific enumeration of accepted subfunction values.
+    pub supported: Vec<String>,
+}
+
+/// DTC-setting mode (UDS ControlDTCSetting 0x85).
+///
+/// ISO 17978-3 §8.3.5 / Table 343: `<entity>/modes/dtcsetting`, an `on`/`off`
+/// enum. Write-only on the wire, so `value` is the last-set state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DtcSettingMode {
+    /// Current DTC-setting state: `on` or `off`.
+    pub value: String,
+}
+
 /// Link control state
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkMode {

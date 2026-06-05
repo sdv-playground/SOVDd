@@ -667,4 +667,38 @@ impl UdsService {
         self.send_request(&request).await?;
         Ok(())
     }
+
+    // =========================================================================
+    // CommunicationControl (0x28)
+    // =========================================================================
+
+    /// Communication Control (0x28).
+    ///
+    /// Request: `[0x28][subfunction][communicationType]`. The caller picks the
+    /// subfunction (0x00 enableRxAndTx … 0x03 disableRxAndTx); `comm_type` is
+    /// the communicationType byte (normally `0x01` normalCommunicationMessages).
+    /// Positive response SID is `0x68`.
+    pub async fn communication_control(
+        &self,
+        subfunction: u8,
+        comm_type: u8,
+    ) -> Result<(), UdsError> {
+        let request = vec![self.svc.communication_control, subfunction, comm_type];
+        self.send_request(&request).await?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // ControlDTCSetting (0x85)
+    // =========================================================================
+
+    /// Control DTC Setting (0x85).
+    ///
+    /// Request: `[0x85][subfunction]` where subfunction is `0x01` (on) or
+    /// `0x02` (off). Positive response SID is `0xC5`.
+    pub async fn control_dtc_setting(&self, subfunction: u8) -> Result<(), UdsError> {
+        let request = vec![self.svc.control_dtc_setting, subfunction];
+        self.send_request(&request).await?;
+        Ok(())
+    }
 }

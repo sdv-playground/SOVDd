@@ -10,12 +10,12 @@ use async_trait::async_trait;
 use chrono::Utc;
 use parking_lot::RwLock;
 use sovd_core::{
-    ActivationState, BackendError, BackendResult, Capabilities, ClearFaultsResult, DataPoint,
-    DataValue, DiagnosticBackend, EntityInfo, Fault, FaultFilter, FaultSeverity, FaultsResult,
-    FlashProgress, FlashState, FlashStatus, IoControlAction, IoControlResult, LinkControlResult,
-    LinkMode, LogEntry, LogFilter, OperationExecution, OperationInfo, OperationStatus,
-    OutputDetail, OutputInfo, PackageInfo, PackageStatus, ParameterInfo, SecurityMode,
-    SecurityState, SessionMode, SoftwareInfo, VerifyResult,
+    ActivationState, BackendError, BackendResult, Capabilities, ClearFaultsResult, CommControlMode,
+    DataPoint, DataValue, DiagnosticBackend, DtcSettingMode, EntityInfo, Fault, FaultFilter,
+    FaultSeverity, FaultsResult, FlashProgress, FlashState, FlashStatus, IoControlAction,
+    IoControlResult, LinkControlResult, LinkMode, LogEntry, LogFilter, OperationExecution,
+    OperationInfo, OperationStatus, OutputDetail, OutputInfo, PackageInfo, PackageStatus,
+    ParameterInfo, SecurityMode, SecurityState, SessionMode, SoftwareInfo, VerifyResult,
 };
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
@@ -107,6 +107,58 @@ pub struct UdsBackend {
     activation_state: Arc<RwLock<ActivationState>>,
     /// Flash commit/rollback configuration
     flash_commit_config: FlashCommitConfig,
+    /// Last-set CommunicationControl (0x28) subfunction, kebab-case.
+    /// 0x28 is write-only on the wire, so GET returns this tester-side value.
+    comm_control_state: Arc<RwLock<String>>,
+    /// Last-set ControlDTCSetting (0x85) state ("on"/"off"). Write-only on
+    /// the wire, so GET returns this tester-side value.
+    dtc_setting_state: Arc<RwLock<String>>,
+}
+
+/// CommunicationControl (0x28) subfunctions exposed via `modes/comm-ctrl`,
+/// as the kebab-case enum ↔ UDS subfunction byte. The `value`/`supported`
+/// strings are this enum; `disable-rx-tx` is the strongest quiescing.
+const COMM_CONTROL_VALUES: &[(&str, u8)] = &[
+    (
+        "enable-rx-tx",
+        crate::uds::comm_control_sub_function::ENABLE_RX_AND_TX,
+    ),
+    (
+        "enable-rx-disable-tx",
+        crate::uds::comm_control_sub_function::ENABLE_RX_AND_DISABLE_TX,
+    ),
+    (
+        "disable-rx-enable-tx",
+        crate::uds::comm_control_sub_function::DISABLE_RX_AND_ENABLE_TX,
+    ),
+    (
+        "disable-rx-tx",
+        crate::uds::comm_control_sub_function::DISABLE_RX_AND_TX,
+    ),
+];
+
+/// Initial / power-on CommunicationControl state (full comms enabled).
+const COMM_CONTROL_DEFAULT: &str = "enable-rx-tx";
+
+/// Initial / power-on ControlDTCSetting state.
+const DTC_SETTING_DEFAULT: &str = "on";
+
+/// Map a `modes/comm-ctrl` enum member to its UDS 0x28 subfunction byte.
+fn comm_control_subfunction(value: &str) -> Option<u8> {
+    COMM_CONTROL_VALUES
+        .iter()
+        .find(|(name, _)| *name == value)
+        .map(|(_, sf)| *sf)
+}
+
+/// Map a `modes/dtcsetting` enum member ("on"/"off") to its UDS 0x85
+/// subfunction byte.
+fn dtc_setting_subfunction(value: &str) -> Option<u8> {
+    match value {
+        "on" => Some(crate::uds::control_dtc_setting_sub_function::ON),
+        "off" => Some(crate::uds::control_dtc_setting_sub_function::OFF),
+        _ => None,
+    }
 }
 
 impl UdsBackend {
@@ -168,6 +220,8 @@ impl UdsBackend {
             io_control_states: Arc::new(RwLock::new(HashMap::new())),
             activation_state: Arc::new(RwLock::new(activation_state)),
             flash_commit_config,
+            comm_control_state: Arc::new(RwLock::new(COMM_CONTROL_DEFAULT.to_string())),
+            dtc_setting_state: Arc::new(RwLock::new(DTC_SETTING_DEFAULT.to_string())),
         })
     }
 
@@ -1030,6 +1084,67 @@ impl DiagnosticBackend for UdsBackend {
                 seed: None,
             })
         }
+    }
+
+    async fn get_communication_control(&self) -> BackendResult<CommControlMode> {
+        Ok(CommControlMode {
+            value: self.comm_control_state.read().clone(),
+            supported: COMM_CONTROL_VALUES
+                .iter()
+                .map(|(name, _)| name.to_string())
+                .collect(),
+        })
+    }
+
+    async fn set_communication_control(&self, value: &str) -> BackendResult<CommControlMode> {
+        let subfunction = comm_control_subfunction(value).ok_or_else(|| {
+            BackendError::InvalidRequest(format!(
+                "Unknown comm-ctrl value '{}'. Expected one of: enable-rx-tx, \
+                 enable-rx-disable-tx, disable-rx-enable-tx, disable-rx-tx",
+                value
+            ))
+        })?;
+
+        // UDS CommunicationControl (0x28) with communicationType 0x01
+        // (normalCommunicationMessages). An NRC propagates via convert_uds_error.
+        self.uds
+            .communication_control(
+                subfunction,
+                crate::uds::comm_control_type::NORMAL_COMMUNICATION_MESSAGES,
+            )
+            .await
+            .map_err(crate::error::convert_uds_error)?;
+
+        *self.comm_control_state.write() = value.to_string();
+        info!(value, "CommunicationControl (0x28) set");
+
+        self.get_communication_control().await
+    }
+
+    async fn get_dtc_setting(&self) -> BackendResult<DtcSettingMode> {
+        Ok(DtcSettingMode {
+            value: self.dtc_setting_state.read().clone(),
+        })
+    }
+
+    async fn set_dtc_setting(&self, value: &str) -> BackendResult<DtcSettingMode> {
+        let subfunction = dtc_setting_subfunction(value).ok_or_else(|| {
+            BackendError::InvalidRequest(format!(
+                "Unknown dtcsetting value '{}'. Expected 'on' or 'off'",
+                value
+            ))
+        })?;
+
+        // UDS ControlDTCSetting (0x85). NRC propagates via convert_uds_error.
+        self.uds
+            .control_dtc_setting(subfunction)
+            .await
+            .map_err(crate::error::convert_uds_error)?;
+
+        *self.dtc_setting_state.write() = value.to_string();
+        info!(value, "ControlDTCSetting (0x85) set");
+
+        self.get_dtc_setting().await
     }
 
     async fn get_link_mode(&self) -> BackendResult<LinkMode> {
@@ -1953,5 +2068,100 @@ mod tests {
         assert!(caps.faults);
         assert!(!caps.logs); // ECUs don't have logs
         assert!(!caps.sub_entities); // ECUs don't have sub-entities
+    }
+
+    // -------------------------------------------------------------------------
+    // CommunicationControl (0x28) — modes/comm-ctrl
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn comm_control_enum_maps_to_subfunction() {
+        assert_eq!(comm_control_subfunction("enable-rx-tx"), Some(0x00));
+        assert_eq!(comm_control_subfunction("enable-rx-disable-tx"), Some(0x01));
+        assert_eq!(comm_control_subfunction("disable-rx-enable-tx"), Some(0x02));
+        assert_eq!(comm_control_subfunction("disable-rx-tx"), Some(0x03));
+        assert_eq!(comm_control_subfunction("bogus"), None);
+    }
+
+    #[tokio::test]
+    async fn comm_control_default_is_enable_rx_tx() {
+        let backend = UdsBackend::new(test_config()).await.unwrap();
+        let mode = backend.get_communication_control().await.unwrap();
+        assert_eq!(mode.value, "enable-rx-tx");
+        // ECU-specific enumeration is the four standard subfunctions.
+        assert_eq!(
+            mode.supported,
+            vec![
+                "enable-rx-tx",
+                "enable-rx-disable-tx",
+                "disable-rx-enable-tx",
+                "disable-rx-tx",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn comm_control_set_updates_state() {
+        // MockTransport auto-replies 0x68 (sid+0x40) for the unmatched 0x28
+        // request, so the set succeeds and the tester-side state advances.
+        let backend = UdsBackend::new(test_config()).await.unwrap();
+        let mode = backend
+            .set_communication_control("disable-rx-tx")
+            .await
+            .unwrap();
+        assert_eq!(mode.value, "disable-rx-tx");
+        // GET reflects the last-set value (0x28 is write-only on the wire).
+        let got = backend.get_communication_control().await.unwrap();
+        assert_eq!(got.value, "disable-rx-tx");
+    }
+
+    #[tokio::test]
+    async fn comm_control_unknown_value_is_invalid_request() {
+        let backend = UdsBackend::new(test_config()).await.unwrap();
+        let err = backend
+            .set_communication_control("turbo")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::InvalidRequest(_)),
+            "unknown comm-ctrl value must be InvalidRequest (→400), got {err:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // ControlDTCSetting (0x85) — modes/dtcsetting
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn dtc_setting_enum_maps_to_subfunction() {
+        assert_eq!(dtc_setting_subfunction("on"), Some(0x01));
+        assert_eq!(dtc_setting_subfunction("off"), Some(0x02));
+        assert_eq!(dtc_setting_subfunction("maybe"), None);
+    }
+
+    #[tokio::test]
+    async fn dtc_setting_default_is_on() {
+        let backend = UdsBackend::new(test_config()).await.unwrap();
+        let mode = backend.get_dtc_setting().await.unwrap();
+        assert_eq!(mode.value, "on");
+    }
+
+    #[tokio::test]
+    async fn dtc_setting_set_updates_state() {
+        let backend = UdsBackend::new(test_config()).await.unwrap();
+        let mode = backend.set_dtc_setting("off").await.unwrap();
+        assert_eq!(mode.value, "off");
+        let got = backend.get_dtc_setting().await.unwrap();
+        assert_eq!(got.value, "off");
+    }
+
+    #[tokio::test]
+    async fn dtc_setting_unknown_value_is_invalid_request() {
+        let backend = UdsBackend::new(test_config()).await.unwrap();
+        let err = backend.set_dtc_setting("disabled").await.unwrap_err();
+        assert!(
+            matches!(err, BackendError::InvalidRequest(_)),
+            "unknown dtcsetting value must be InvalidRequest (→400), got {err:?}"
+        );
     }
 }

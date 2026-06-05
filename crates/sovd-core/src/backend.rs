@@ -12,10 +12,10 @@ use tokio::sync::broadcast;
 
 use crate::error::BackendResult;
 use crate::models::{
-    Capabilities, ClearFaultsResult, DataPoint, DataValue, EntityInfo, Fault, FaultFilter,
-    FaultsResult, IoControlAction, IoControlResult, LinkControlResult, LinkMode, LogEntry,
-    LogFilter, OperationExecution, OperationInfo, OutputDetail, OutputInfo, ParameterInfo,
-    SecurityMode, SessionMode,
+    Capabilities, ClearFaultsResult, CommControlMode, DataPoint, DataValue, DtcSettingMode,
+    EntityInfo, Fault, FaultFilter, FaultsResult, IoControlAction, IoControlResult,
+    LinkControlResult, LinkMode, LogEntry, LogFilter, OperationExecution, OperationInfo,
+    OutputDetail, OutputInfo, ParameterInfo, SecurityMode, SessionMode,
 };
 
 /// Byte stream for streaming package upload (HTTP/1.1 chunked transfer).
@@ -865,6 +865,51 @@ pub trait DiagnosticBackend: Send + Sync {
         let _ = session;
         Err(crate::error::BackendError::NotSupported(
             "set_session_mode".to_string(),
+        ))
+    }
+
+    /// Get current communication-control mode (UDS CommunicationControl 0x28).
+    ///
+    /// 0x28 is write-only on the wire — there is no UDS read for the active
+    /// communication state — so the backend returns the value it last set
+    /// (initial = `enable-rx-tx`). `supported` lists the ECU-specific
+    /// subfunction enum per ISO 17978-3 §8.3.4 / Table 343.
+    async fn get_communication_control(&self) -> BackendResult<CommControlMode> {
+        Err(crate::error::BackendError::NotSupported(
+            "get_communication_control".to_string(),
+        ))
+    }
+
+    /// Set communication-control mode (UDS CommunicationControl 0x28).
+    ///
+    /// `value` is one of the kebab-case enum members the backend advertises
+    /// in [`CommControlMode::supported`] (e.g. `disable-rx-tx`). An unknown
+    /// value maps to [`crate::error::BackendError::InvalidRequest`] (→ 400).
+    async fn set_communication_control(&self, value: &str) -> BackendResult<CommControlMode> {
+        let _ = value;
+        Err(crate::error::BackendError::NotSupported(
+            "set_communication_control".to_string(),
+        ))
+    }
+
+    /// Get current DTC-setting mode (UDS ControlDTCSetting 0x85).
+    ///
+    /// Write-only on the wire (like 0x28) — returns the last-set value
+    /// (initial = `on`). Per ISO 17978-3 §8.3.5 the enum is `on`/`off`.
+    async fn get_dtc_setting(&self) -> BackendResult<DtcSettingMode> {
+        Err(crate::error::BackendError::NotSupported(
+            "get_dtc_setting".to_string(),
+        ))
+    }
+
+    /// Set DTC-setting mode (UDS ControlDTCSetting 0x85).
+    ///
+    /// `value` is `on` (0x01) or `off` (0x02). Anything else maps to
+    /// [`crate::error::BackendError::InvalidRequest`] (→ 400).
+    async fn set_dtc_setting(&self, value: &str) -> BackendResult<DtcSettingMode> {
+        let _ = value;
+        Err(crate::error::BackendError::NotSupported(
+            "set_dtc_setting".to_string(),
         ))
     }
 

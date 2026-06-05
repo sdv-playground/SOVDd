@@ -20,9 +20,9 @@ use crate::config::{
     ServiceIdConfig,
 };
 use crate::uds::{
-    ddid_sub_function, dtc_sub_function, io_control_option, link_baud_rate,
-    link_control_sub_function, negative_response, nrc, positive_response, routine_sub_function,
-    service_id,
+    comm_control_sub_function, control_dtc_setting_sub_function, ddid_sub_function,
+    dtc_sub_function, io_control_option, link_baud_rate, link_control_sub_function,
+    negative_response, nrc, positive_response, routine_sub_function, service_id,
 };
 use crate::PeriodicRate;
 
@@ -480,6 +480,10 @@ impl SimulatedEcu {
             self.handle_tester_present(request)
         } else if sid == self.svc.security_access {
             self.handle_security_access(request)
+        } else if sid == self.svc.communication_control {
+            self.handle_communication_control(request)
+        } else if sid == self.svc.control_dtc_setting {
+            self.handle_control_dtc_setting(request)
         } else if sid == self.svc.read_data_by_id {
             self.handle_read_data_by_id(request)
         } else if sid == self.svc.write_data_by_id {
@@ -2051,6 +2055,85 @@ impl SimulatedEcu {
         ];
         response_data.extend_from_slice(&output.current_value);
         positive_response(service_id::IO_CONTROL_BY_ID, &response_data)
+    }
+
+    // =========================================================================
+    // CommunicationControl Handler (0x28)
+    // =========================================================================
+
+    fn handle_communication_control(&self, request: &[u8]) -> Vec<u8> {
+        // Request: [0x28][subfunction][communicationType]
+        if request.len() < 3 {
+            return negative_response(
+                service_id::COMMUNICATION_CONTROL,
+                nrc::INCORRECT_MESSAGE_LENGTH,
+            );
+        }
+
+        let sub_function = request[1];
+        let comm_type = request[2];
+
+        match sub_function {
+            comm_control_sub_function::ENABLE_RX_AND_TX
+            | comm_control_sub_function::ENABLE_RX_AND_DISABLE_TX
+            | comm_control_sub_function::DISABLE_RX_AND_ENABLE_TX
+            | comm_control_sub_function::DISABLE_RX_AND_TX => {
+                info!(
+                    sub_function = format!("0x{:02X}", sub_function),
+                    comm_type = format!("0x{:02X}", comm_type),
+                    "CommunicationControl request"
+                );
+                // Positive response echoes the subfunction: [0x68][subfunction]
+                positive_response(service_id::COMMUNICATION_CONTROL, &[sub_function])
+            }
+            _ => {
+                debug!(
+                    sub_function = format!("0x{:02X}", sub_function),
+                    "Unsupported CommunicationControl sub-function"
+                );
+                negative_response(
+                    service_id::COMMUNICATION_CONTROL,
+                    nrc::SUB_FUNCTION_NOT_SUPPORTED,
+                )
+            }
+        }
+    }
+
+    // =========================================================================
+    // ControlDTCSetting Handler (0x85)
+    // =========================================================================
+
+    fn handle_control_dtc_setting(&self, request: &[u8]) -> Vec<u8> {
+        // Request: [0x85][subfunction]
+        if request.len() < 2 {
+            return negative_response(
+                service_id::CONTROL_DTC_SETTING,
+                nrc::INCORRECT_MESSAGE_LENGTH,
+            );
+        }
+
+        let sub_function = request[1];
+
+        match sub_function {
+            control_dtc_setting_sub_function::ON | control_dtc_setting_sub_function::OFF => {
+                info!(
+                    sub_function = format!("0x{:02X}", sub_function),
+                    "ControlDTCSetting request"
+                );
+                // Positive response echoes the subfunction: [0xC5][subfunction]
+                positive_response(service_id::CONTROL_DTC_SETTING, &[sub_function])
+            }
+            _ => {
+                debug!(
+                    sub_function = format!("0x{:02X}", sub_function),
+                    "Unsupported ControlDTCSetting sub-function"
+                );
+                negative_response(
+                    service_id::CONTROL_DTC_SETTING,
+                    nrc::SUB_FUNCTION_NOT_SUPPORTED,
+                )
+            }
+        }
     }
 
     // =========================================================================

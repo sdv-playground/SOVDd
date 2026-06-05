@@ -9,6 +9,7 @@ pub mod service_id {
     pub const READ_DTC_INFO: u8 = 0x19;
     pub const READ_DATA_BY_ID: u8 = 0x22;
     pub const SECURITY_ACCESS: u8 = 0x27;
+    pub const COMMUNICATION_CONTROL: u8 = 0x28;
     pub const READ_DATA_BY_PERIODIC_ID: u8 = 0x2A;
     pub const DYNAMICALLY_DEFINE_DATA_ID: u8 = 0x2C;
     pub const WRITE_DATA_BY_ID: u8 = 0x2E;
@@ -19,6 +20,7 @@ pub mod service_id {
     pub const TRANSFER_DATA: u8 = 0x36;
     pub const REQUEST_TRANSFER_EXIT: u8 = 0x37;
     pub const TESTER_PRESENT: u8 = 0x3E;
+    pub const CONTROL_DTC_SETTING: u8 = 0x85;
     pub const RESPONSE_ON_EVENT: u8 = 0x86;
     pub const LINK_CONTROL: u8 = 0x87;
     pub const NEGATIVE_RESPONSE: u8 = 0x7F;
@@ -53,6 +55,20 @@ pub mod io_control_option {
     pub const RESET_TO_DEFAULT: u8 = 0x01;
     pub const FREEZE_CURRENT_STATE: u8 = 0x02;
     pub const SHORT_TERM_ADJUSTMENT: u8 = 0x03;
+}
+
+/// CommunicationControl (0x28) sub-functions
+pub mod comm_control_sub_function {
+    pub const ENABLE_RX_AND_TX: u8 = 0x00;
+    pub const ENABLE_RX_AND_DISABLE_TX: u8 = 0x01;
+    pub const DISABLE_RX_AND_ENABLE_TX: u8 = 0x02;
+    pub const DISABLE_RX_AND_TX: u8 = 0x03;
+}
+
+/// ControlDTCSetting (0x85) sub-functions
+pub mod control_dtc_setting_sub_function {
+    pub const ON: u8 = 0x01;
+    pub const OFF: u8 = 0x02;
 }
 
 /// LinkControl sub-functions

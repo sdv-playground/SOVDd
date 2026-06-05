@@ -406,6 +406,26 @@ const PATHS: &[PathEntry] = &[
         path: "/vehicle/v1/components/{component_id}/modes/security",
         summary: "Request seed / send key (UDS 0x27).",
     },
+    PathEntry {
+        method: "GET",
+        path: "/vehicle/v1/components/{component_id}/modes/comm-ctrl",
+        summary: "Read communication-control mode.",
+    },
+    PathEntry {
+        method: "PUT",
+        path: "/vehicle/v1/components/{component_id}/modes/comm-ctrl",
+        summary: "Set communication-control mode (UDS 0x28).",
+    },
+    PathEntry {
+        method: "GET",
+        path: "/vehicle/v1/components/{component_id}/modes/dtcsetting",
+        summary: "Read DTC-setting mode.",
+    },
+    PathEntry {
+        method: "PUT",
+        path: "/vehicle/v1/components/{component_id}/modes/dtcsetting",
+        summary: "Set DTC-setting mode on/off (UDS 0x85).",
+    },
 ];
 
 /// GET /vehicle/v1/docs — capability description (§7.5).

@@ -155,6 +155,135 @@ pub async fn put_session_mode(
 }
 
 // =============================================================================
+// Communication-Control Mode Handlers (UDS CommunicationControl 0x28)
+// =============================================================================
+
+/// PUT body for `modes/comm-ctrl` — ECU-specific subfunction enum value
+/// (ISO 17978-3 §8.3.4 / Table 343), e.g. `"disable-rx-tx"`.
+#[derive(Debug, Deserialize)]
+pub struct CommControlModeRequest {
+    /// Subfunction value (kebab-case) from the ECU-specific enum.
+    pub value: String,
+}
+
+/// Response for `modes/comm-ctrl` (GET + PUT). Mirrors the session shape
+/// (`id`/`value`) and adds the ECU-specific `supported` enumeration.
+#[derive(Debug, Serialize)]
+pub struct CommControlModeResponse {
+    /// Mode identifier (always "comm-ctrl").
+    pub id: String,
+    /// Current subfunction value.
+    pub value: String,
+    /// ECU-specific enumeration of accepted subfunction values.
+    pub supported: Vec<String>,
+}
+
+/// GET /vehicle/v1/components/:component_id/modes/comm-ctrl?target=child/path
+pub async fn get_comm_control_mode(
+    State(state): State<AppState>,
+    Path(component_id): Path<String>,
+    Query(query): Query<ModeQuery>,
+) -> Result<Json<CommControlModeResponse>, ApiError> {
+    let backend = state.get_backend(&component_id)?;
+    let target_backend: Arc<dyn DiagnosticBackend> = if let Some(ref target) = query.target {
+        resolve_target(backend, target).await?
+    } else {
+        backend.clone()
+    };
+    let mode = target_backend.get_communication_control().await?;
+    Ok(Json(CommControlModeResponse {
+        id: "comm-ctrl".to_string(),
+        value: mode.value,
+        supported: mode.supported,
+    }))
+}
+
+/// PUT /vehicle/v1/components/:component_id/modes/comm-ctrl?target=child/path
+/// Sends UDS CommunicationControl (0x28) with the selected subfunction.
+pub async fn put_comm_control_mode(
+    State(state): State<AppState>,
+    Path(component_id): Path<String>,
+    Query(query): Query<ModeQuery>,
+    Json(request): Json<CommControlModeRequest>,
+) -> Result<Json<CommControlModeResponse>, ApiError> {
+    let backend = state.get_backend(&component_id)?;
+    let target_backend: Arc<dyn DiagnosticBackend> = if let Some(ref target) = query.target {
+        resolve_target(backend, target).await?
+    } else {
+        backend.clone()
+    };
+    let mode = target_backend
+        .set_communication_control(&request.value)
+        .await?;
+    Ok(Json(CommControlModeResponse {
+        id: "comm-ctrl".to_string(),
+        value: mode.value,
+        supported: mode.supported,
+    }))
+}
+
+// =============================================================================
+// DTC-Setting Mode Handlers (UDS ControlDTCSetting 0x85)
+// =============================================================================
+
+/// PUT body for `modes/dtcsetting` — `"on"`/`"off"` enum (ISO 17978-3
+/// §8.3.5 / Table 343).
+#[derive(Debug, Deserialize)]
+pub struct DtcSettingModeRequest {
+    /// DTC-setting state: "on" or "off".
+    pub value: String,
+}
+
+/// Response for `modes/dtcsetting` (GET + PUT). Mirrors the session shape.
+#[derive(Debug, Serialize)]
+pub struct DtcSettingModeResponse {
+    /// Mode identifier (always "dtcsetting").
+    pub id: String,
+    /// Current DTC-setting state ("on"/"off").
+    pub value: String,
+}
+
+/// GET /vehicle/v1/components/:component_id/modes/dtcsetting?target=child/path
+pub async fn get_dtc_setting_mode(
+    State(state): State<AppState>,
+    Path(component_id): Path<String>,
+    Query(query): Query<ModeQuery>,
+) -> Result<Json<DtcSettingModeResponse>, ApiError> {
+    let backend = state.get_backend(&component_id)?;
+    let target_backend: Arc<dyn DiagnosticBackend> = if let Some(ref target) = query.target {
+        resolve_target(backend, target).await?
+    } else {
+        backend.clone()
+    };
+    let mode = target_backend.get_dtc_setting().await?;
+    Ok(Json(DtcSettingModeResponse {
+        id: "dtcsetting".to_string(),
+        value: mode.value,
+    }))
+}
+
+/// PUT /vehicle/v1/components/:component_id/modes/dtcsetting?target=child/path
+/// Sends UDS ControlDTCSetting (0x85) on (0x01) / off (0x02).
+pub async fn put_dtc_setting_mode(
+    State(state): State<AppState>,
+    Path(component_id): Path<String>,
+    Query(query): Query<ModeQuery>,
+    Json(request): Json<DtcSettingModeRequest>,
+) -> Result<Json<DtcSettingModeResponse>, ApiError> {
+    let backend = state.get_backend(&component_id)?;
+    let target_backend: Arc<dyn DiagnosticBackend> = if let Some(ref target) = query.target {
+        resolve_target(backend, target).await?
+    } else {
+        backend.clone()
+    };
+    let mode = target_backend.set_dtc_setting(&request.value).await?;
+    Ok(Json(DtcSettingModeResponse {
+        id: "dtcsetting".to_string(),
+        value: mode.value,
+    }))
+}
+
+// =============================================================================
 // Security Mode Handlers
 // =============================================================================
 

@@ -69,6 +69,33 @@ pub mod link_baud_rate {
     pub const CAN_1M: u8 = 0x13;
 }
 
+/// CommunicationControl (0x28) sub-functions (ISO 14229-1).
+pub mod comm_control_sub_function {
+    /// enableRxAndTx
+    pub const ENABLE_RX_AND_TX: u8 = 0x00;
+    /// enableRxAndDisableTx
+    pub const ENABLE_RX_AND_DISABLE_TX: u8 = 0x01;
+    /// disableRxAndEnableTx
+    pub const DISABLE_RX_AND_ENABLE_TX: u8 = 0x02;
+    /// disableRxAndTx
+    pub const DISABLE_RX_AND_TX: u8 = 0x03;
+}
+
+/// CommunicationControl (0x28) communicationType byte (ISO 14229-1).
+/// Bits 0-1 select the message class; `normalCommunicationMessages`.
+pub mod comm_control_type {
+    /// normalCommunicationMessages
+    pub const NORMAL_COMMUNICATION_MESSAGES: u8 = 0x01;
+}
+
+/// ControlDTCSetting (0x85) sub-functions (ISO 14229-1).
+pub mod control_dtc_setting_sub_function {
+    /// DTCSettingType = on (resume DTC setting)
+    pub const ON: u8 = 0x01;
+    /// DTCSettingType = off (suspend DTC setting)
+    pub const OFF: u8 = 0x02;
+}
+
 /// ECUReset (0x11) sub-functions
 pub mod reset_type {
     /// Hard reset - complete shutdown and restart of ECU
@@ -213,6 +240,8 @@ pub struct ServiceIds {
     pub read_dtc_info: u8,
     pub read_data_by_id: u8,
     pub security_access: u8,
+    pub communication_control: u8,
+    pub control_dtc_setting: u8,
     pub read_data_by_periodic_id: u8,
     pub dynamically_define_data_id: u8,
     pub write_data_by_id: u8,
@@ -236,6 +265,8 @@ impl Default for ServiceIds {
             read_dtc_info: service_id::READ_DTC_INFO,
             read_data_by_id: service_id::READ_DATA_BY_ID,
             security_access: service_id::SECURITY_ACCESS,
+            communication_control: service_id::COMMUNICATION_CONTROL,
+            control_dtc_setting: service_id::CONTROL_DTC_SETTING,
             read_data_by_periodic_id: service_id::READ_DATA_BY_PERIODIC_ID,
             dynamically_define_data_id: service_id::DYNAMICALLY_DEFINE_DATA_ID,
             write_data_by_id: service_id::WRITE_DATA_BY_ID,
