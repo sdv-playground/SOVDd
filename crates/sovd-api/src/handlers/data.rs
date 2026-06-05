@@ -419,8 +419,10 @@ async fn read_did_internal(
         .unwrap_or_else(|| param_id.to_string());
 
     // Read raw bytes via the backend.
-    // For non-ECU entities (gateways, app entities), read_raw_did is not supported.
-    // Fall back to synthesizing identification data from entity_info.
+    // For non-ECU entities (gateways, app entities), read_raw_did is not supported:
+    // synthesize identification data from entity_info if possible, else return a
+    // truthful 404 (the DID is not a data resource on this entity — it must be read
+    // on its owning child) rather than a misleading 501 sovd-server-misconfigured.
     let raw_bytes = match backend.read_raw_did(did_u16).await {
         Ok(bytes) => bytes,
         Err(BackendError::NotSupported(_)) => {
@@ -438,7 +440,13 @@ async fn read_did_internal(
                     timestamp: Utc::now().to_rfc3339(),
                 }));
             }
-            return Err(ApiError::NotImplemented("read_raw_did".to_string()));
+            return Err(ApiError::NotFound(format!(
+                "DID '{param_id}' is not a readable data resource on entity \
+                 '{component_id}'. This entity exposes no raw DID access (e.g. an \
+                 aggregating gateway, which owns no DIDs of its own and forwards to \
+                 children). Read it on the owning component via the sub-entity path: \
+                 /vehicle/v1/components/{component_id}/apps/<child>/data/{param_id}."
+            )));
         }
         Err(e) => return Err(e.into()),
     };
