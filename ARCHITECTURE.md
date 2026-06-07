@@ -279,12 +279,18 @@ and `read_data` serves them. SOVDd routes these with **zero** special-casing —
 vendor name is baked into the server, so it stays spec-pure (cf. §2). The value
 may be a structured object, not just a scalar.
 
-Canonical example — **`x-sumo-installed-manifest`** (served by
-sumo-machine-manager's `VmBackend`): `GET …/components/{vm}/data/x-sumo-installed-manifest`
-returns the committed bank's **signature-verified IVD manifest** — per-file
-`{path, sha256}`, the release `identity`, and the signed bytes for independent
-verification — the read a SW-mapping / update tool uses to inventory "what is
-installed" per VM. Producer-side contract + verification details:
+Canonical examples (served by sumo-machine-manager's `ComponentBackend`):
+- **`x-sumo-installed-manifest`** — `GET …/components/{vm}/data/x-sumo-installed-manifest`
+  returns the committed bank's **signature-verified IVD manifest** — per-file
+  `{path, sha256}`, the release `identity`, and the signed bytes for independent
+  verification — the read a SW-mapping / update tool uses to inventory "what is
+  installed" per VM.
+- **`x-sumo-update-mode`** — each component's update shape (`banked` vs `singleshot`/
+  irreversible, plus `supports_rollback` / `dual_bank` / `reset_kind`), readable any time
+  (even pre-flash). Lets an offboard twin sync rollback-capability so a campaign builder
+  can refuse to mix rollbackable + irreversible (e.g. HSM) components in one upgrade.
+
+Producer-side contract + verification details:
 `sumo-machine-manager/specs/sovd-vm-app-installation.md` §17.
 
 ---
