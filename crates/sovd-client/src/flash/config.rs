@@ -43,6 +43,12 @@ pub struct ConnectionConfig {
     /// API key header name (default: X-API-Key)
     #[serde(default = "default_api_key_header")]
     pub api_key_header: String,
+
+    /// Bearer token (JWT) for `Authorization: Bearer <token>`. Preferred over
+    /// `api_key` when set — the SOVD-standard auth path. Injected by the flash
+    /// engine's `TokenSource`; `add_auth` sends it on every request.
+    #[serde(default)]
+    pub bearer: Option<String>,
 }
 
 fn default_api_key_header() -> String {
@@ -468,6 +474,7 @@ impl FlashConfigBuilder {
                     base_url: base_url.into(),
                     api_key: None,
                     api_key_header: default_api_key_header(),
+                    bearer: None,
                 },
                 endpoints: EndpointsConfig::default(),
                 timeouts: TimeoutsConfig::default(),
@@ -486,6 +493,13 @@ impl FlashConfigBuilder {
     /// Set the API key header name
     pub fn api_key_header(mut self, header: impl Into<String>) -> Self {
         self.config.connection.api_key_header = header.into();
+        self
+    }
+
+    /// Set the bearer token (JWT). Preferred over `api_key` — the
+    /// SOVD-standard `Authorization: Bearer` auth path.
+    pub fn bearer(mut self, token: impl Into<String>) -> Self {
+        self.config.connection.bearer = Some(token.into());
         self
     }
 

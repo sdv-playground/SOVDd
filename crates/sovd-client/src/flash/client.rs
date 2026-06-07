@@ -210,6 +210,34 @@ impl FlashClient {
         )
     }
 
+    /// Like [`for_sovd`](Self::for_sovd), with a bearer token (JWT) sent as
+    /// `Authorization: Bearer <token>` on every request. The token-bearing
+    /// path the flash engine uses via its `TokenSource`.
+    pub fn for_sovd_bearer(base_url: &str, component_id: &str, token: &str) -> Result<Self> {
+        Self::new(
+            FlashConfig::builder(base_url)
+                .component_id(component_id)
+                .bearer(token)
+                .build(),
+        )
+    }
+
+    /// Like [`for_sovd_sub_entity`](Self::for_sovd_sub_entity), with a bearer token.
+    pub fn for_sovd_sub_entity_bearer(
+        base_url: &str,
+        gateway_id: &str,
+        app_id: &str,
+        token: &str,
+    ) -> Result<Self> {
+        Self::new(
+            FlashConfig::builder(base_url)
+                .gateway_id(gateway_id)
+                .component_id(app_id)
+                .bearer(token)
+                .build(),
+        )
+    }
+
     pub fn from_yaml_file(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let config =
             FlashConfig::from_yaml_file(path).map_err(|e| FlashError::Parse(e.to_string()))?;
@@ -342,41 +370,74 @@ impl FlashClient {
         Ok(body)
     }
 
-    /// `PUT /vehicle/v1/components/{id}/updates/{update_id}/bulk-data/{part_id}`.
-    /// Streams `data` into the named part.  Lazily opens an update
-    /// session if none is currently open.
-    #[instrument(skip(self, data))]
-    pub async fn upload_part(&self, part_id: &str, data: &[u8]) -> Result<PartUploadResponse> {
+    /// `PUT /vehicle/v1/components/{id}/updates/{update_id}/bulk-data/{part_id}`
+    /// from any [`reqwest::Body`] — a file, a wrapped byte stream, or in-memory
+    /// bytes. **Constant-memory** when `body` is a stream (the engine wraps a
+    /// `tokio::fs::File` so a multi-hundred-MB image never lands in RAM). `len`,
+    /// when known, sets `content-length`; `None` ⇒ chunked transfer-encoding
+    /// (the receive side reads the body as a stream either way). Lazily opens an
+    /// update session if none is currently open.
+    #[instrument(skip(self, body))]
+    pub async fn upload_part_stream(
+        &self,
+        part_id: &str,
+        body: impl Into<reqwest::Body>,
+        len: Option<u64>,
+    ) -> Result<PartUploadResponse> {
         let update_id = self.ensure_session().await?;
         let encoded_part = utf8_percent_encode(part_id, PART_SEGMENT_ENCODE).to_string();
         let url = self.build_url(&self.config.updates_part_path(&update_id, &encoded_part))?;
-        let bytes = data.len();
-        info!("PUT {} ({bytes} bytes)", url);
+        info!(
+            "PUT {} ({})",
+            url,
+            len.map(|n| format!("{n} bytes"))
+                .unwrap_or_else(|| "chunked".into())
+        );
         let started = std::time::Instant::now();
         let mut req = self
             .client
             .put(url)
-            .header("content-type", "application/octet-stream")
-            .header("content-length", bytes);
+            .header("content-type", "application/octet-stream");
+        if let Some(n) = len {
+            req = req.header("content-length", n);
+        }
         req = self.add_auth(req);
         let resp = req
             .timeout(Duration::from_millis(self.config.timeouts.upload_ms))
-            .body(data.to_vec())
+            .body(body)
             .send()
             .await?;
-        let body: PartUploadResponse = self.handle_response(resp).await?;
+        let resp_body: PartUploadResponse = self.handle_response(resp).await?;
         let elapsed = started.elapsed();
-        let mb = bytes as f64 / 1_048_576.0;
-        let secs = elapsed.as_secs_f64();
-        let mb_per_sec = if secs > 0.0 { mb / secs } else { 0.0 };
-        info!(
-            bytes,
-            elapsed_ms = elapsed.as_millis() as u64,
-            "part {part_id} uploaded: {:.2} MB at {:.2} MB/s",
-            mb,
-            mb_per_sec
-        );
-        Ok(body)
+        match len {
+            Some(n) => {
+                let mb = n as f64 / 1_048_576.0;
+                let secs = elapsed.as_secs_f64();
+                let mb_per_sec = if secs > 0.0 { mb / secs } else { 0.0 };
+                info!(
+                    bytes = n,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "part {part_id} uploaded: {:.2} MB at {:.2} MB/s",
+                    mb,
+                    mb_per_sec
+                );
+            }
+            None => info!(
+                elapsed_ms = elapsed.as_millis() as u64,
+                "part {part_id} uploaded (chunked)"
+            ),
+        }
+        Ok(resp_body)
+    }
+
+    /// `PUT …/bulk-data/{part_id}` from an in-memory buffer — a thin wrapper over
+    /// [`upload_part_stream`](Self::upload_part_stream) for callers that already
+    /// hold the bytes (manifests, tests). Large payloads should stream instead.
+    #[instrument(skip(self, data))]
+    pub async fn upload_part(&self, part_id: &str, data: &[u8]) -> Result<PartUploadResponse> {
+        let len = data.len() as u64;
+        self.upload_part_stream(part_id, data.to_vec(), Some(len))
+            .await
     }
 
     /// `POST /executions {action: "verify"}`.  Legacy
@@ -799,7 +860,11 @@ impl FlashClient {
     }
 
     fn add_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        if let Some(ref k) = self.config.connection.api_key {
+        // Bearer (JWT) is the SOVD-standard auth and takes precedence; the
+        // api_key header is the legacy generic-injection fallback.
+        if let Some(ref b) = self.config.connection.bearer {
+            request.header(reqwest::header::AUTHORIZATION, format!("Bearer {b}"))
+        } else if let Some(ref k) = self.config.connection.api_key {
             request.header(&self.config.connection.api_key_header, k)
         } else {
             request
@@ -838,42 +903,38 @@ impl FlashClient {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Off-band: entity-root ECU restart (no /updates context needed)
-// ---------------------------------------------------------------------------
-
-/// Issue an ECU-level reset at the SOVD entity root (ISO 17978-3 §7.19).
-/// Standalone — does not require a flash client.
-pub async fn system_restart(
-    server_url: &str,
-    gateway_id: Option<&str>,
-    reset_type: &str,
-) -> Result<()> {
-    let base = Url::parse(server_url)?;
-    let path = match gateway_id {
-        Some(gw) => format!("/vehicle/v1/components/{gw}/status/restart"),
-        None => "/vehicle/v1/status/restart".to_string(),
-    };
-    let url = base.join(&path)?;
-    info!("ECU restart at {url} (reset_type={reset_type})");
-    let body = ResetRequest {
-        reset_type: reset_type.to_string(),
-    };
-    let resp = Client::new().put(url).json(&body).send().await?;
-    let status = resp.status();
-    if status.is_success() {
-        Ok(())
-    } else {
-        Err(FlashError::Server {
-            status: status.as_u16(),
-            message: resp.text().await.unwrap_or_default(),
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::package_id_from;
+    use super::{package_id_from, FlashClient, FlashConfig};
+
+    #[test]
+    fn bearer_ctor_emits_authorization_bearer() {
+        let fc = FlashClient::for_sovd_bearer("http://localhost:9", "vm1", "jwt-tok").unwrap();
+        let req = fc
+            .add_auth(fc.client.get("http://localhost:9/x"))
+            .build()
+            .unwrap();
+        assert_eq!(
+            req.headers().get(reqwest::header::AUTHORIZATION).unwrap(),
+            "Bearer jwt-tok"
+        );
+    }
+
+    #[test]
+    fn api_key_is_fallback_when_no_bearer() {
+        let cfg = FlashConfig::builder("http://localhost:9")
+            .component_id("vm1")
+            .api_key_header("X-API-Key")
+            .api_key("secret")
+            .build();
+        let fc = FlashClient::new(cfg).unwrap();
+        let req = fc
+            .add_auth(fc.client.get("http://localhost:9/x"))
+            .build()
+            .unwrap();
+        assert_eq!(req.headers().get("X-API-Key").unwrap(), "secret");
+        assert!(req.headers().get(reqwest::header::AUTHORIZATION).is_none());
+    }
 
     #[test]
     fn package_id_slugifies_name_and_appends_version() {

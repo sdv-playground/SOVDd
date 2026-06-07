@@ -166,6 +166,34 @@ impl SovdClient {
         self.handle_response(response).await
     }
 
+    /// Issue an ECU-level reset at the SOVD entity root or a gateway component
+    /// (ISO 17978-3 §7.19): `PUT /vehicle/v1/status/restart` (the whole node)
+    /// when `gateway_id` is `None`, else
+    /// `PUT /vehicle/v1/components/{gateway}/status/restart`. Carries this
+    /// client's auth (e.g. a bearer token from [`with_bearer_token`](Self::with_bearer_token)).
+    /// The flash engine uses this to coalesce `RequiresEcuReset` components into
+    /// a single node reboot.
+    #[instrument(skip(self))]
+    pub async fn system_restart(&self, gateway_id: Option<&str>, reset_type: &str) -> Result<()> {
+        let path = match gateway_id {
+            Some(gw) => format!("/vehicle/v1/components/{}/status/restart", gw),
+            None => "/vehicle/v1/status/restart".to_string(),
+        };
+        let url = self.base_url.join(&path)?;
+        debug!("ECU restart at {url} (reset_type={reset_type})");
+        let response = self
+            .client
+            .put(url)
+            .json(&serde_json::json!({ "reset_type": reset_type }))
+            .send()
+            .await?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(self.extract_error(response).await)
+        }
+    }
+
     // =========================================================================
     // Data/Parameter Operations
     // =========================================================================
