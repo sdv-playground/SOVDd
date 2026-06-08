@@ -22,3 +22,6 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Per-dev task tracking (todo / lessons / scratch) — not version-controlled
+tasks/
