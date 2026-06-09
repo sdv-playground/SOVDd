@@ -166,6 +166,20 @@ impl SovdClient {
         self.handle_response(response).await
     }
 
+    /// Read an entity's runtime status (ISO 17978-3 §7.19.2):
+    /// `GET /vehicle/v1/components/{id}/status` → `EntityStatusBody` —
+    /// `status: ready|notReady` + control links + vendor `x-sumo-*` runtime fields.
+    /// An orchestrator reads the vendor boot counter here to verify a reset took
+    /// effect (baseline → restart → wait until incremented + `ready`).
+    #[instrument(skip(self))]
+    pub async fn read_status(&self, component_id: &str) -> Result<sovd_core::EntityStatusBody> {
+        let url = self
+            .base_url
+            .join(&format!("/vehicle/v1/components/{}/status", component_id))?;
+        let response = self.client.get(url).send().await?;
+        self.handle_response(response).await
+    }
+
     /// Issue an ECU-level reset at the SOVD entity root or a gateway component
     /// (ISO 17978-3 §7.19): `PUT /vehicle/v1/status/restart` (the whole node)
     /// when `gateway_id` is `None`, else

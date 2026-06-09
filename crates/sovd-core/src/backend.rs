@@ -61,6 +61,49 @@ pub enum PackageStatus {
     Invalid,
 }
 
+/// Runtime status of an entity — ISO 17978-3 §7.19.2, Table 281.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum EntityStatus {
+    /// Entity is able to answer SOVD requests.
+    #[default]
+    Ready,
+    /// Entity cannot (yet) answer SOVD requests (e.g. restarting / down).
+    NotReady,
+}
+
+/// Response body of `GET /{entity}/status` — ISO 17978-3 §7.19.2, Table 280: the
+/// standard `status` (+ control-resource links), plus a vendor-extension
+/// passthrough (§5.4.5; e.g. `x-sumo-runtime { boot_count, uptime_s }`) the
+/// backend supplies. SOVDd core stays spec-pure — it never authors `x-sumo-*`
+/// fields, only flattens whatever the backend returns.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EntityStatusBody {
+    /// Standard runtime status (M).
+    pub status: EntityStatus,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub start: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub restart: Vec<String>,
+    #[serde(
+        rename = "force-restart",
+        skip_serializing_if = "Vec::is_empty",
+        default
+    )]
+    pub force_restart: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub shutdown: Vec<String>,
+    #[serde(
+        rename = "force-shutdown",
+        skip_serializing_if = "Vec::is_empty",
+        default
+    )]
+    pub force_shutdown: Vec<String>,
+    /// Vendor extensions (e.g. `x-sumo-runtime`) supplied verbatim by the backend.
+    #[serde(flatten)]
+    pub extensions: serde_json::Map<String, serde_json::Value>,
+}
+
 /// Result of package verification
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifyResult {
@@ -396,6 +439,17 @@ pub trait DiagnosticBackend: Send + Sync {
         Err(crate::error::BackendError::NotSupported(
             "ecu_reset".to_string(),
         ))
+    }
+
+    /// Read the entity's runtime status — ISO 17978-3 §7.19.2 (`GET .../status`).
+    /// Backends that can report readiness (and optionally vendor `x-sumo-*`
+    /// runtime fields like a monotonic boot/restart counter) override this; the
+    /// default assumes a reachable entity is `Ready` with no vendor extras.
+    async fn read_entity_status(&self) -> BackendResult<EntityStatusBody> {
+        Ok(EntityStatusBody {
+            status: EntityStatus::Ready,
+            ..Default::default()
+        })
     }
 
     /// Subscribe to data parameter updates

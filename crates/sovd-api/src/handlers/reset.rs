@@ -13,6 +13,8 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use sovd_core::EntityStatusBody;
+
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -133,4 +135,23 @@ pub async fn status_restart_execution(
         status: "completed".to_string(),
         exec_id,
     })
+}
+
+/// GET {entity}/status — read an entity's runtime status (ISO 17978-3 §7.19.2).
+/// Returns the standard `EntityStatus` (`ready`/`notReady`) plus whatever vendor
+/// `x-sumo-*` runtime fields the backend supplies (e.g. a monotonic boot/restart
+/// counter + uptime, which an orchestrator uses to verify a reset took effect).
+/// The `restart` control link is filled in here since the route always exists.
+pub async fn status_read(
+    State(state): State<AppState>,
+    Path(component_id): Path<String>,
+) -> Result<Json<EntityStatusBody>, ApiError> {
+    let backend = state.get_backend(&component_id)?;
+    let mut status = backend.read_entity_status().await?;
+    if status.restart.is_empty() {
+        status.restart = vec![format!(
+            "/vehicle/v1/components/{component_id}/status/restart"
+        )];
+    }
+    Ok(Json(status))
 }

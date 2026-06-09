@@ -367,6 +367,13 @@ pub fn create_router(state: AppState) -> Router {
         // the status sub-resource; the GET on the sub-resource is a stub
         // that reads `completed` (reset is fire-and-forget, the ECU is
         // rebooting by the time we'd report progress).
+        // §7.19.2 — read an entity's runtime status (EntityStatus ready/notReady
+        // + control links + vendor x-sumo-* runtime fields). Orchestrators read
+        // this to verify a reset actually took effect (boot counter incremented).
+        .route(
+            "/vehicle/v1/components/{component_id}/status",
+            get(handlers::reset::status_read),
+        )
         .route(
             "/vehicle/v1/components/{component_id}/status/restart",
             put(handlers::reset::status_restart),

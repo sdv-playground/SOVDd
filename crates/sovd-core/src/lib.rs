@@ -9,9 +9,10 @@ pub mod models;
 pub mod routing;
 
 pub use backend::{
-    default_descriptor_from_context, ActivationState, DiagnosticBackend, FlashProgress, FlashState,
-    FlashStatus, PackageInfo, PackageStatus, PackageStream, ResetKind, SoftwareInfo,
-    UpdatePackageContext, UpdatePackageDescriptor, UpdatePartRef, VerifyResult,
+    default_descriptor_from_context, ActivationState, DiagnosticBackend, EntityStatus,
+    EntityStatusBody, FlashProgress, FlashState, FlashStatus, PackageInfo, PackageStatus,
+    PackageStream, ResetKind, SoftwareInfo, UpdatePackageContext, UpdatePackageDescriptor,
+    UpdatePartRef, VerifyResult,
 };
 pub use error::{BackendError, BackendResult};
 pub use models::*;
