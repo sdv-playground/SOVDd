@@ -1,41 +1,48 @@
 # SOVDd Architecture
 
-**Status:** verified against the source tree on 2026-06-03 (post-ISO-17978-3 conformance refactor).
+**Status:** verified against the source tree on 2026-06-10.
+**Scope of this document:** SOVDd as a freestanding project. It describes what this repository
+provides and the extension points it exposes; it deliberately does **not** describe any particular
+deployment or consumer of SOVDd. Integration-level architecture lives with the integrating system.
 **Keeping this current:** when you add/retire a route, a `DiagnosticBackend` method, a crate, or a
-`FlashState`, update the matching section here. Sections cite `crate/path:line` so drift is easy to spot.
+`FlashState`, update the matching section here. Sections cite `crate/path` (and function names,
+which are stabler than line numbers) so drift is easy to spot.
 For build/run/test commands see `README.md`; for contributor conventions see `CLAUDE.md`.
 
 ---
 
 ## 1. Overview & scope
 
-SOVDd is a Rust implementation of an **ASAM / ISO-17978-3 SOVD** (Service-Oriented Vehicle
+SOVDd is a Rust implementation of an **ASAM / ISO 17978-3 SOVD** (Service-Oriented Vehicle
 Diagnostics) server. It exposes a REST API under `/vehicle/v1/` and translates SOVD requests into
-**UDS** (ISO-14229) commands over CAN/ISO-TP or DoIP — or federates them across child SOVD servers.
+**UDS** (ISO 14229) commands over CAN/ISO-TP or DoIP — or federates them across child SOVD servers.
 
 **What SOVDd is:**
 - A **spec-first** SOVD/UDS gateway daemon (axum + tokio).
 - **Backend-agnostic**: one REST layer over a single trait (`DiagnosticBackend`) with several
-  implementations (real UDS, gateway federation, HTTP proxy, reference app-entity).
-- **Composable**: gateways nest arbitrarily; an app-entity can curate/own a downstream ECU.
+  implementations (real UDS, gateway federation, HTTP proxy, reference app-entity). Any external
+  system can provide additional backends by implementing the trait.
+- **Composable**: gateways nest arbitrarily; an app-entity can curate/own a downstream ECU; a proxy
+  backend lets one SOVDd front another.
+- **Authenticated when configured**: optional JWT-bearer auth (OIDC/JWKS or a pinned offline
+  workshop CA) with per-component scopes, plus in-process TLS termination (rustls). See §13.
 
-**What SOVDd is *not* (by design — these live in higher layers of the stack):**
-- **No authentication / TLS today.** The surface is unauthenticated HTTP; session/security for
-  downstream UDS is the *caller's* responsibility (see §13). Client→SOVDd auth (TLS + JWT-bearer) is
-  a planned, separate slice.
+**What SOVDd is *not* (by design):**
 - **No campaign/fleet orchestration, no SUIT/HSM awareness.** SOVDd is meant to be replaceable and
   *gateway-frontable*; vendor- and hardware-specific concerns sit above/below it, not inside it.
+- **No UDS security secrets.** Session and SecurityAccess for downstream ECUs are the caller's
+  responsibility (§13) — SOVDd authenticates *clients*, it does not unlock *ECUs*.
 
 ### One disclosed deviation from spec-purity (conformance item C-026)
 
 SOVDd aims for zero vendor routes, but **today it is not vendor-free**: the `/updates` collection
-carries three `x-sumo-*` orchestration verbs — `x-sumo-commit`, `x-sumo-rollback`,
-`x-sumo-force-rollback` (`crates/sovd-api/src/lib.rs:438-454`) — used to drive trial-mode
-commit/rollback for banked components. They are **explicitly disclosed** at
+carries three vendor orchestration verbs — `x-sumo-commit`, `x-sumo-rollback`, and the
+component-root `x-sumo-force-rollback` (`crates/sovd-api/src/lib.rs`, end of the `/updates` block) —
+used to drive trial-mode commit/rollback for banked components. They are **explicitly disclosed** at
 `GET /.well-known/sovd-extensions` (`crates/sovd-api/src/handlers/meta.rs`) so conformance scanners
 enumerate them rather than flag them as unknown surface. Whether these verbs stay in SOVDd (with an
-amended policy) or move down into the machine-manager layer is the open decision tracked as **C-026**.
-This document describes *reality*: spec-first **with one disclosed `sumo` vendor surface**.
+amended policy) or move down into a backend-side vendor surface is the open decision tracked as
+**C-026**. This document describes *reality*: spec-first **with one disclosed vendor surface**.
 
 ---
 
@@ -47,9 +54,9 @@ This document describes *reality*: spec-first **with one disclosed `sumo` vendor
   built from a hand-maintained `PATHS` table in `handlers/meta.rs` (axum 0.8 doesn't expose its route
   table, so this is maintained alongside the router — keep them in sync). Per-path scoped `{path}/docs`
   is served via the `not_found_fallback`.
-- **Status codes:** restricted to the spec subset (200/201/202/204/400/401/404/405/406/409/415/500/
-  501/503/504); non-spec codes (403/412/502/429) were deliberately removed from the wire
-  (`crates/sovd-api/src/error.rs`).
+- **Status codes:** the spec subset (200/201/202/204/400/401/404/405/406/409/415/500/501/503/504)
+  plus the RFC 9110-justified NRC mappings 403 (security-denied NRCs) and 502 (ECU-failure NRCs) —
+  never 429/412 (`crates/sovd-core/src/error.rs::nrc_to_status` is the single source; see §11).
 - **Section references in code:** the router and handlers are annotated with ISO `§` and `C-NNN`
   conformance IDs — these are the authoritative in-code pointers to which spec clause a route serves.
 - **No conformance rubric is checked into this repo**; the machine-readable C-001…C-142 checklist and
@@ -69,14 +76,14 @@ A 12-crate Cargo workspace (`Cargo.toml`): 7 libraries, 4 binaries, 1 test crate
 | **sovd-gateway** | lib | `GatewayBackend` — federates N child backends; itself a `DiagnosticBackend`. |
 | **sovd-proxy** | lib | `SovdProxyBackend` — a `DiagnosticBackend` that forwards over HTTP to a remote SOVD server. |
 | **sovd-client** | lib | Typed HTTP client (`SovdClient`, `FlashClient`, SSE `Subscription`, `testing::TestServer`). |
-| **sovd-api** | lib | Backend-agnostic axum REST layer: router, `AppState`, handlers, error mapping. |
-| **sovdd** | **bin** | The server daemon: parse TOML config → build backends → serve axum. |
+| **sovd-api** | lib | Backend-agnostic axum REST layer: router, `AppState`, handlers, auth middleware, error mapping. |
+| **sovdd** | **bin** | The server daemon: parse TOML config → build backends → serve axum (plain or TLS). |
 | **sovd-cli** | **bin** | clap CLI diagnostic tool (talks to a server via sovd-client). |
 | **example-ecu** | **bin** | UDS ECU simulator on vcan (A/B-bank flash sim). |
 | **example-app** | **bin** | Reference SOVD **app-entity**: synthetic params + a `ManagedEcuBackend` that owns/OTAs an upstream ECU. |
 | **sovd-tests** | test | E2E integration tests (real `example-ecu` on vcan). |
 
-### Dependency graph
+### Crate dependency graph
 
 ```mermaid
 graph TD
@@ -130,11 +137,56 @@ Method groups (see `backend.rs` for the full list):
 | I/O control | `list_outputs`, `get_output`, `control_output` |
 | Sub-entities | `list_sub_entities`, `get_sub_entity` (→ `Arc<dyn DiagnosticBackend>`) |
 | Software / packages | `get_software_info`, `receive_package`, `receive_package_stream` (chunked), `list_packages`, `get_package`, `verify_package`, `verify_part`, `delete_package` |
-| Async flash | `start_flash`, `update_shape`, `get_flash_status`, `list_flash_transfers`, `abort_flash`, `finalize_flash`, `validate`, `invalidate`, `activate`, `commit_flash`, `rollback_flash`, `get_activation_state` |
-| Modes | `get/set_session_mode`, `get/set_security_mode`, `get/set_link_mode` |
+| Async flash | `start_flash`, `update_shape`, `get_flash_status`, `list_flash_transfers`, `abort_flash`, `finalize_flash`, `validate`, `invalidate`, `activate`, `commit_flash`, `rollback_flash`, `get_activation_state`, `describe_update_package` |
+| Modes | `get/set_session_mode`, `get/set_security_mode`, `get/set_communication_control`, `get/set_dtc_setting`, `get/set_link_mode` (trait method kept; the `modes/link` route was dropped per C-025/C-130) |
+
+### Trait and implementations (composition)
+
+```mermaid
+classDiagram
+    class DiagnosticBackend {
+        <<trait, ~45 async methods>>
+        +entity_info() EntityInfo
+        +capabilities() Capabilities
+        +read_data(param) DataValue
+        +get_faults(filter) FaultsResult
+        +start_operation(op, opts)
+        +start_flash() / commit_flash() / rollback_flash()
+        +get_sub_entity(id) Arc~dyn DiagnosticBackend~
+        +default_impls() NotSupported
+    }
+    class UdsBackend {
+        real UDS over CAN/ISO-TP/DoIP
+        SessionManager (0x3E keepalive)
+        StreamManager (0x2A emulation)
+    }
+    class GatewayBackend {
+        federates N children
+        routes child_id/local_id
+        children = sub-entities
+    }
+    class SovdProxyBackend {
+        forwards over HTTP
+        via embedded SovdClient
+        caches upstream identity
+    }
+    class ManagedEcuBackend {
+        reference app-entity
+        two-level sessions
+        internal seed-key secret
+    }
+    DiagnosticBackend <|.. UdsBackend
+    DiagnosticBackend <|.. GatewayBackend
+    DiagnosticBackend <|.. SovdProxyBackend
+    DiagnosticBackend <|.. ManagedEcuBackend
+    GatewayBackend o-- "N" DiagnosticBackend : children
+    SovdProxyBackend --> SovdClient : HTTP
+    ManagedEcuBackend --> SovdProxyBackend : inner ECU
+```
 
 > The trait doc comment names `HpcBackend` and `ContainerBackend` as illustrative future backends —
-> these are **not implemented**. The concrete implementations are below.
+> these are **not implemented in this repo**. External systems implement the trait to expose their
+> own components (that is the intended integration seam).
 
 ---
 
@@ -144,28 +196,23 @@ Method groups (see `backend.rs` for the full list):
 
 Talks UDS to ECUs over CAN/ISO-TP or DoIP. This is where UDS pass-through happens (`read_raw_did` →
 0x22, `write_raw_did` → 0x2E, `control_output` → 0x2F, `start_operation` → 0x31, flash → 0x34/0x36/
-0x37, modes → 0x10/0x27/0x87).
+0x37, modes → 0x10/0x27/0x28/0x85).
 
-```text
-┌─────────────────────────────────────────────────────────────┐
-│                      UdsBackend                              │
-│  Implements DiagnosticBackend                                │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │ EcuConfig   │  │ SessionMgr  │  │ SubscriptionMgr     │  │
-│  │ (params)    │  │ (state)     │  │ (periodic data)     │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
-│                          │                                   │
-│                    ┌─────┴─────┐                             │
-│                    │UdsService │ (protocol)                  │
-│                    └─────┬─────┘                             │
-│                 ┌────────┴────────┐                          │
-│                 │TransportAdapter │ (SocketCAN / DoIP / Mock)│
-│                 └─────────────────┘                          │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph UdsBackend
+        EC[EcuConfig<br/>params] --- SM[SessionManager<br/>tester-present, security state]
+        SM --- SUB[SubscriptionManager<br/>periodic data]
+        SM --> SVC[UdsService<br/>protocol / SIDs]
+        SVC --> TA[TransportAdapter]
+    end
+    TA --> CAN[socketcan<br/>ISO-TP + scanner]
+    TA --> DOIP[doip<br/>TCP, ISO 13400]
+    TA --> MOCK[mock]
 ```
 
 - **Transports** (`transport/`): `socketcan/` (ISO-TP framing + a `scanner.rs` for CAN auto-discovery),
-  `doip/` (TCP, ISO-13400, incl. `discovery.rs`), `mock.rs`. **Feature-gated:** `default = ["socketcan"]`
+  `doip/` (TCP, ISO 13400, incl. `discovery.rs`), `mock.rs`. **Feature-gated:** `default = ["socketcan"]`
   and **DoIP is opt-in** (`crates/sovd-uds/Cargo.toml`); socketcan crates are `cfg(target_os = "linux")`.
 - **Sessions** (`session.rs`): auto-sends TesterPresent (0x3E) every ~2 s in non-default sessions;
   `notify_ecu_reset()` records that an ECU reverts to default session + re-locks security after 0x11.
@@ -174,21 +221,6 @@ Talks UDS to ECUs over CAN/ISO-TP or DoIP. This is where UDS pass-through happen
 ### 5.2 `GatewayBackend` (`sovd-gateway`) — federation
 
 Wraps N child backends keyed by each child's `entity_info().id`, and is itself a `DiagnosticBackend`.
-
-```text
-┌──────────────────────────────────────────────────────────┐
-│                     SOVD Gateway                          │
-│   ┌──────────────────────────────────────────────────┐   │
-│   │                 GatewayBackend                    │   │
-│   │  - registers child backends                       │   │
-│   │  - routes by `child_id/local_id` prefix           │   │
-│   │  - exposes children as sub-entities               │   │
-│   └───────────────┬──────────────────────────────────┘   │
-│           ┌───────┼───────┐                               │
-│           ▼       ▼       ▼                               │
-│      UdsBackend  UdsBackend  (proxy/app/…)                │
-└──────────────────────────────────────────────────────────┘
-```
 
 - **Routing:** child resources are addressed `child_id/local_id`; helpers in
   `crates/sovd-core/src/routing.rs` split/join prefixes. List methods fan out to all children and
@@ -228,39 +260,70 @@ The reference SOVD **app-entity** (ISO §6.5): it exposes synthetic params and o
 - `.fallback(meta::not_found_fallback)` + `.method_not_allowed_fallback(meta::method_not_allowed_fallback)`
   so **404/405 bodies are spec `GenericError`**, not axum plain text. (The 404 fallback also serves the
   per-path `{path}/docs` capability scoping, since axum can't express a non-final wildcard.)
-- Middleware (`lib.rs:475-477`): `DefaultBodyLimit::disable()` (for ASAM SOVD chunked uploads),
-  `TraceLayer::new_for_http()`, and a **fully permissive `CorsLayer`** (`Any` origin/method/header).
+- Middleware (outermost first: cors → trace → **auth** → body-limit): `DefaultBodyLimit::disable()`
+  (for ASAM SOVD chunked uploads), the **`auth::require_auth` JWT-bearer middleware** (§13 — a no-op
+  when `[server.auth]` is absent/disabled), `TraceLayer::new_for_http()`, and a **fully permissive
+  `CorsLayer`** (`Any` origin/method/header).
 - `.with_state(state)`.
-
-> There is **no auth/TLS layer** here today — a JWT-validation middleware + rustls would attach above
-> these layers when the auth slice lands.
 
 ### 6.2 Route groups (in router order)
 
 health · meta (`/version-info`, `/vehicle/v1/docs`, `/.well-known/sovd-extensions`) · components · data
-(+ `?raw=true` for raw DID) · data-lists (define-data operation + read/clear) · faults (+ `?active_only=true`,
-`delete_fault`) · logs (+ `entries`, `config`) · **spec-presence stub collections** (configurations, locks, triggers,
-communication-logs, scripts, data-categories, data-groups, modes/communication-control, modes/dtc-setting —
-present for spec coverage, backend wiring TODO, honest 501s) · clear-data · operations (+ async `executions`,
-covering UDS 0x31 **and** 0x2F per C-133) · apps (sub-entity tree, §7) · cyclic-subscriptions + streams (SSE) ·
-status/restart (ECU reset, §7.19) · modes (session/security/link = UDS 0x10/0x27/0x87) · discovery · updates
-(+ bulk-data, prepare/execute/automated/status, and the disclosed `x-sumo-*` verbs) · `/admin/definitions`
-(runtime DID-definition CRUD — note: **outside** `/vehicle/v1`).
+(+ `?raw=true` for raw DID, + `?categories=` filter) · faults (+ `?active_only=true`, `delete_fault`) ·
+data-lists (define-data operation + read/clear) · logs (+ `entries`, `config`) · **spec-presence stub
+collections** (configurations, locks, triggers, communication-logs, scripts, data-groups — present for
+spec coverage, backend wiring TODO, honest 501s) · data-categories (real, DID-derived) ·
+modes/comm-ctrl + modes/dtcsetting (UDS 0x28/0x85, Table-343 names) · clear-data · operations (+ async
+`executions`, covering UDS 0x31 **and** 0x2F per C-133) · apps (sub-entity tree, §7) ·
+cyclic-subscriptions (SSE content-negotiated on the subscription resource, §9) · status
+(`GET /{id}/status` EntityStatus per §7.19.2 + `PUT status/restart` ECU reset) · modes
+(session/security = UDS 0x10/0x27) · updates (+ bulk-data, prepare/execute/automated/status, and the
+disclosed vendor verbs — §1) · `/admin/definitions` (runtime DID CRUD — note: **outside** `/vehicle/v1`,
+gated by an admin scope).
 
 **Retired routes** (do not re-add; see git history): `/flash/*`, `/files/*`, `/outputs/*`, `/dtcs`,
-`/data-definitions/{ddid}`, the flat gateway data path, and the legacy `/executions{action}` vendor wire.
+`/data-definitions/{ddid}`, the flat gateway data path, the legacy `/executions{action}` vendor wire,
+the inline `/streams` reader + cyclic `streams/{id}` delivery URL (C-025), `POST /discovery` (C-025),
+and `modes/link` (LinkControl 0x87 has no standardized mode name, C-130).
 
 ### 6.3 Handler organization
 
 One module per domain in `crates/sovd-api/src/handlers/`: `components`, `data`, `data_lists`,
-`clear_data`, `faults`, `logs` + `logs_ext`, `operations`, `modes`, `reset`, `streams`, `subscriptions`,
-`sub_entity` (the entire `/apps/{app_id}/...` tree), `updates` (the full `/updates` wire + `x-sumo` verbs),
-`stubs` (the spec-presence stub collections), `definitions` (`/admin`), `discovery`, `apps`, `software`,
+`clear_data`, `faults`, `logs` + `logs_ext`, `operations`, `modes`, `reset`, `subscriptions`,
+`sub_entity` (the entire `/apps/{app_id}/...` tree), `updates` (the full `/updates` wire + the vendor
+verbs), `stubs` (the spec-presence stub collections), `definitions` (`/admin`), `apps`, `software`,
 and `meta` (version-info, docs, `.well-known`, the 404/405 fallbacks).
 
 ### 6.4 Request lifecycle (worked example: `GET .../data/{param}`)
 
-1. **Bind** (`crates/sovdd/src/main.rs`): `TcpListener::bind(0.0.0.0:port)` + `axum::serve` (plain HTTP).
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant MW as Middleware<br/>(cors→trace→auth)
+    participant H as data::read_parameter
+    participant S as AppState
+    participant B as dyn DiagnosticBackend
+    participant D as DidStore
+
+    C->>MW: GET /vehicle/v1/components/{id}/data/{param}
+    MW->>MW: require_auth: validate JWT,<br/>check component:{id} scope
+    MW->>H: authorized request (+ClientContext)
+    H->>S: get_backend(component_id)
+    S-->>H: Arc<dyn DiagnosticBackend> (or 404)
+    H->>D: resolve_did(param_id)
+    alt resolvable DID
+        H->>B: read_raw_did(did)
+        B-->>H: raw bytes
+        H->>D: decode(did, raw) → physical value
+    else proxy/app-style parameter
+        H->>B: read_data(param_id)
+        B-->>H: DataValue
+    end
+    H-->>C: DidResponse {id, value, unit, raw, …} or §11 error
+```
+
+1. **Bind** (`crates/sovdd/src/main.rs`): `TcpListener::bind` + `axum::serve`, or rustls TLS when
+   `[server.tls]` is configured (§13).
 2. **Route** → `data::read_parameter`.
 3. **Resolve component:** `state.get_backend(&component_id)?` (`crates/sovd-api/src/state.rs`) → an
    `&Arc<dyn DiagnosticBackend>` or `ApiError::NotFound` (404). This is the *single* resolution point.
@@ -273,25 +336,16 @@ and `meta` (version-info, docs, `.well-known`, the 404/405 fallbacks).
 
 ### 6.5 Vendor data parameters (`x-<ext>-…`)
 
-Backends may expose vendor-specific parameters over the generic `/data` wire:
-`list_parameters` advertises them with custom `x-<ext>-` ids (ISO 17978-3 §5.4.5)
-and `read_data` serves them. SOVDd routes these with **zero** special-casing — no
-vendor name is baked into the server, so it stays spec-pure (cf. §2). The value
-may be a structured object, not just a scalar.
+Backends may expose vendor-specific parameters over the generic `/data` wire: `list_parameters`
+advertises them with custom `x-<ext>-` ids (ISO 17978-3 §5.4.5) and `read_data` serves them. SOVDd
+routes these with **zero** special-casing — no vendor name is baked into the server, so it stays
+spec-pure (cf. §2). The value may be a structured object, not just a scalar.
 
-Canonical examples (served by sumo-machine-manager's `ComponentBackend`):
-- **`x-sumo-installed-manifest`** — `GET …/components/{vm}/data/x-sumo-installed-manifest`
-  returns the committed bank's **signature-verified IVD manifest** — per-file
-  `{path, sha256}`, the release `identity`, and the signed bytes for independent
-  verification — the read a SW-mapping / update tool uses to inventory "what is
-  installed" per VM.
-- **`x-sumo-update-mode`** — each component's update shape (`banked` vs `singleshot`/
-  irreversible, plus `supports_rollback` / `dual_bank` / `reset_kind`), readable any time
-  (even pre-flash). Lets an offboard twin sync rollback-capability so a campaign builder
-  can refuse to mix rollbackable + irreversible (e.g. HSM) components in one upgrade.
-
-Producer-side contract + verification details:
-`sumo-machine-manager/specs/sovd-vm-app-installation.md` §17.
+Typical uses (implemented by backends, not by this repo): a signed installed-software inventory the
+client can independently verify, or a component's update-shape descriptor (banked vs write-through,
+rollback support) readable before any flash. Each parameter additionally carries a spec
+`category` (Table 70: identData/currentData/storedData/sysInfo), letting clients filter
+`GET /data?categories=identData` for "what is installed".
 
 ---
 
@@ -301,6 +355,17 @@ Producer-side contract + verification details:
 - Children behind a gateway/app are addressed through the **sub-entity tree**: `sub_entity::resolve`
   walks each `/`-separated segment via `get_sub_entity()`, so `/apps/{a}/apps/{b}/...` supports
   **arbitrarily nested** gateways and proxy chains.
+
+```mermaid
+graph LR
+    C[Client] --> G["SOVDd (gateway)"]
+    G --> E1["UdsBackend: ecu1<br/>/components/gw/apps/ecu1"]
+    G --> P["SovdProxyBackend<br/>/components/gw/apps/sup"]
+    P -->|HTTP| S2["remote SOVDd (supplier)"]
+    S2 --> A["app-entity"]
+    A --> E2["managed ECU"]
+```
+
 - The canonical multi-tier exercise is `crates/sovd-tests/tests/multilayer_e2e_test.rs`: client →
   Vehicle-Gateway SOVDd (no CAN) → {proxy → SOVDd; proxy → example-app → proxy → SOVDd} →
   `example-ecu` on vcan. `gateway_e2e_test.rs` covers the single-gateway-over-real-vcan case.
@@ -316,54 +381,57 @@ driven by the trait's flash methods and surfaced over the `/updates` wire. Backe
 **Dual-bank (`supports_rollback = true`)** — activation reboots, then the component runs its own
 post-reset health check before the commit/rollback decision:
 
-```text
-Queued → Preparing → Transferring → AwaitingActivation ──(optional validate())──► Validated
-                                          │ finalize_flash()                          │
-                                          ▼                                           │ activate()
-                                     AwaitingReboot ◄──(invalidate() demotes)─────────┘
-                                          │ ecu_reset()
-                                          ▼
-                                      Verifying (component-driven post-reset health check)
-                                          ▼
-                                      Activated (trial mode)
-                                       /        \
-                               commit()          rollback()
-                                  ▼                  ▼
-                              Committed          RolledBack
+```mermaid
+stateDiagram-v2
+    [*] --> Queued
+    Queued --> Preparing
+    Preparing --> Transferring
+    Transferring --> AwaitingActivation
+    AwaitingActivation --> Validated : validate() (opt-in)
+    AwaitingActivation --> AwaitingReboot : finalize_flash()
+    Validated --> AwaitingReboot : activate()
+    AwaitingReboot --> AwaitingActivation : invalidate() (demote)
+    AwaitingReboot --> Verifying : ecu_reset()
+    Verifying --> Activated : post-reset health check (component-driven)
+    Activated --> Committed : commit_flash()
+    Activated --> RolledBack : rollback_flash()
+    Committed --> [*]
+    RolledBack --> [*]
 ```
 
 **Single-bank (`supports_rollback = false`)** — the artifact write *is* the activation; no reboot,
-no trial:
-
-```text
-… → Activated ── commit_flash() ──► Complete
-```
+no trial: `… → Activated → commit_flash() → Complete`.
 
 - `Initial` = factory-fresh (never OTA-flashed). `validate()`/`Validated` are opt-in (re-runnable crypto
-  checks for fleet campaigns); the classic `finalize_flash()` path skips them.
+  checks for fleet campaigns); the classic `finalize_flash()` path skips them. `Failed` is the terminal
+  error/abort state.
 - **Abortable:** `Queued`, `Preparing`, `Transferring`, `AwaitingActivation`, `Validated`. Everything
   after `AwaitingReboot` is not abortable — revert via `rollback_flash()` once `Activated`.
-- `ActivationState.reset_kind` (`None`/`Local`/`RequiresEcuReset`) lets an orchestrator coalesce resets:
-  most components self-cycle (`Local`); host-OS/M7 images need a parent-ECU reboot (`RequiresEcuReset`).
-- **Wire (`/updates`, handlers/updates.rs):** `POST /updates` registers; `PUT prepare`/`execute` spawn
-  tracked async tasks (`202` + `Location`); `GET status`; `DELETE` aborts via a stored `AbortHandle`.
-  **Orchestrated mode** (`PUT execute?x-sumo-control=orchestrated`) pauses at
-  `substate=awaiting-verdict` on a `watch` channel until `x-sumo-commit`/`x-sumo-rollback` (or a
-  watchdog fires; default 600 s). See the C-026 note in §1 for the vendor-verb status.
+- `ActivationState.reset_kind` (`None`/`Local`/`RequiresEcuReset`) lets an orchestrating client
+  coalesce resets: most components self-cycle (`Local`); some images need a parent-ECU reboot
+  (`RequiresEcuReset`).
+- **Wire (`/updates`, handlers/updates.rs):** `POST /updates` registers (client-declared stable
+  package ids, Table 257/261 catalog shape; `describe_update_package` lets a backend enrich the
+  detail view); `PUT prepare`/`execute` spawn tracked async tasks (`202` + `Location`); `GET status`;
+  `DELETE` aborts via a stored `AbortHandle`. **Orchestrated mode** (`PUT execute?x-sumo-control=orchestrated`)
+  pauses at `substate=awaiting-verdict` on a `watch` channel until `x-sumo-commit`/`x-sumo-rollback`
+  (or a watchdog fires; default 600 s). See the C-026 note in §1 for the vendor-verb status.
 
 ---
 
 ## 9. Streaming & async execution
 
 - **Cyclic subscriptions** (`handlers/subscriptions.rs`): `SubscriptionManager` =
-  `RwLock<HashMap<id, CyclicSubscription>>`. Create → `201` + `Location` + a `Link` header advertising
-  the SSE URL. Cadence is a coarse enum (Fast/Normal/Slow → 20/5/2 Hz). One `resource` per subscription.
-  **Ephemeral** — lost on restart.
-- **SSE delivery** (`handlers/streams.rs`): `GET .../streams/{sub_id}` resolves the subscription's
-  resource to a DID, calls `backend.subscribe_data(...)` → `broadcast::Receiver<DataPoint>`, and maps it
-  to SSE. Each event is an ISO §5.6 `EventEnvelope` `{timestamp, payload?, error?}`; broadcast **lag** is
-  surfaced as an `error` envelope rather than silently dropped. A non-spec inline `GET .../streams?parameters=…`
-  reader is kept for the stateless query-style case (manually parses repeated `?parameters=` keys, C-064).
+  `RwLock<HashMap<id, CyclicSubscription>>`. Create → `201` + `Location`. Cadence is a coarse enum
+  (Fast/Normal/Slow → 20/5/2 Hz). One `resource` per subscription, validated same-entity + readable
+  at create time (C-073). **Ephemeral** — lost on restart.
+- **SSE delivery is content-negotiated on the subscription resource itself** (ISO §7.10.3):
+  `GET .../cyclic-subscriptions/{id}` with `Accept: text/event-stream` streams events; without it,
+  returns the subscription details as JSON. There is no separate `streams` resource (C-025). The
+  stream resolves the subscription's resource to a DID, calls `backend.subscribe_data(...)` →
+  `broadcast::Receiver<DataPoint>`, and maps it to SSE. Each event is an ISO §5.6 `EventEnvelope`
+  `{timestamp, payload?, error?}`; broadcast **lag** is surfaced as an `error` envelope rather than
+  silently dropped.
 - **Async operations** (`handlers/operations.rs`): `POST .../operations/{op}/executions` → `202` +
   `Location`, runs in a tokio task, client polls `GET .../executions/{id}` (served from a bounded
   per-component `OperationExecutionCache`); `DELETE` → RoutineControl stop.
@@ -376,6 +444,8 @@ Raw ECU bytes ↔ physical values. `DidStore` (lock-free `DashMap`) is populated
 YAML/JSON files (via `sovdd -d <path>`), inline TOML `[[ecu.x.params]]`, ISO-14229 Annex-C standard DIDs
 (auto-registered), and the `/admin/definitions` runtime API. Supported shapes: scalar, array, map,
 histogram, bitfield, enum — with scale/offset and byte-order. Shared via `AppState.did_store`.
+`DidDefinition::has_conversion()` distinguishes scaled/structured definitions (physical-value writes)
+from bare byte blobs (raw passthrough) on the write path.
 
 ---
 
@@ -383,15 +453,22 @@ histogram, bitfield, enum — with scale/offset and byte-order. Shared via `AppS
 
 A two-stage funnel is the spine of every response:
 
-```
-BackendError (sovd-core)  ──From──►  ApiError (sovd-api)  ──IntoResponse──►  (StatusCode, Json<GenericError>)
+```mermaid
+flowchart LR
+    NRC["UDS NRC<br/>(7F xx nn)"] --> BE
+    BE["BackendError<br/>(sovd-core)"] -- From --> AE["ApiError<br/>(sovd-api)"]
+    AE -- IntoResponse --> R["(StatusCode, Json&lt;GenericError&gt;)"]
+    NS["nrc_to_status<br/>(single source)"] -.-> BE
+    NS -.-> AE
 ```
 
 `GenericError` (`crates/sovd-core/src/models/error.rs`): `{error_code, vendor_code?, message,
 translation_id?, parameters: map<string, string[]>}`. UDS NRCs surface as `error_code=error-response`
-with `parameters:{service, nrc}` at HTTP 409. `error_code` tokens follow ISO Table-18; the `vendor()`
-constructor stamps `error_code = "vendor-specific"`. `ApiError::into_response` also splits server-error
-vs client-error logging.
+with `parameters:{service, nrc, http_code}` (ISO Table 18); the HTTP status comes from the **single**
+`nrc_to_status` mapping in `sovd-core` (400 for request-shape NRCs, 403 for security NRCs, 502 for
+ECU-failure NRCs, 503 busy, else 409) — there is deliberately no second mapping layer. `error_code`
+tokens follow ISO Table-18; the `vendor()` constructor stamps `error_code = "vendor-specific"`.
+`ApiError::into_response` also splits server-error vs client-error logging.
 
 ---
 
@@ -401,7 +478,8 @@ vs client-error logging.
 config** it falls back to mock backends on port **18081**; the shipped sample configs use **9080**
 (`config/sovd.toml`), and the gateway/test configs use 18082-18092.
 
-Recognized TOML sections: `[server]` (`port`); `[transport]` (`socketcan`|`mock` + isotp);
+Recognized TOML sections: `[server]` (`port`); `[server.tls]` (certificate + private key → in-process
+rustls termination); `[server.auth]` (§13); `[transport]` (`socketcan`|`mock` + isotp);
 `[session]`/`[session.security]`/`[session.keepalive]`; `[service_overrides]` (OEM SID remaps);
 `[ecu.<id>]` (transport, params, operations, outputs, flash, session/security, overrides);
 `[proxy.<id>]` (`url`, `component_id`, `auth_token`); `[gateway]` (`enabled`, `id`, `scan`).
@@ -410,25 +488,63 @@ When `[gateway].enabled`, configured ECUs/proxies are drained into a `GatewayBac
 
 ---
 
-## 13. Security model (today)
+## 13. Security model
 
-SOVDd does **not** hold security secrets and is **unauthenticated** at its own surface:
+Two distinct layers — do not conflate them:
+
+### 13.1 Client→SOVDd authentication & authorization (implemented)
+
+`crates/sovd-api/src/auth.rs` + `workshop_ca.rs`, enforced by the `require_auth` middleware
+(`lib.rs`, attached in §6.1). ISO 17978-3 C-030/031/032.
+
+```mermaid
+flowchart TD
+    REQ[Incoming request] --> OPEN{auth disabled<br/>or OPTIONS<br/>or public path?}
+    OPEN -- yes --> PASS[pass through]
+    OPEN -- no --> VAL[validate Bearer JWT]
+    VAL -- Static --> CMP[verbatim token compare<br/>dev/CI only]
+    VAL -- Oidc --> JWKS[JWKS by kid; iss/aud/exp/nbf;<br/>asymmetric algs only — no HS*]
+    VAL -- WorkshopCa --> X5C[x5c chain → pinned CA<br/>ES256 only, chain-length cap]
+    CMP & JWKS & X5C --> SCOPE{path scope check}
+    SCOPE -- "/components/{id}/…" --> CS["requires component:{id} scope"]
+    SCOPE -- "/admin/*" --> AS[requires admin scope]
+    CS & AS --> CTX[ClientContext into request extensions]
+    CTX --> PASS2[handler]
+    VAL -- invalid --> E401[401 GenericError]
+    SCOPE -- denied --> E401
+```
+
+- **`AuthMode`**: `Disabled` (default — open surface, so dev/sim and the no-config mock server work
+  unchanged), `Static` (shared bearer token, dev/CI), `Oidc` (JWT against one or more OIDC issuers'
+  JWKS), `WorkshopCa` (offline path: `x5c`-chain JWTs validated against a **pinned** workshop CA —
+  per-link signature verify, CA:TRUE, validity, `aud`/`exp`/`nbf`, ES256 pinned, bounded chain length).
+- **Public resources** (per ISO §5.4.4): `/health`, `/version-info`, capability `…/docs`,
+  `/.well-known/*`, and CORS preflight pass through unauthenticated.
+- **Enumeration filtering** (C-031): `GET /components` is scope-filtered in the handler so clients
+  cannot enumerate components they have no scope for.
+- **Transport guard**: when auth is enabled and `[server.tls]` is not configured, the server **refuses
+  to start** unless `allow_insecure_transport = true` is set explicitly (loopback dev/CI) — bearer
+  tokens never cross plaintext silently. TLS is in-process rustls (ring provider).
+- **Residual, by design**: `AuthMode::Disabled` is the no-config default (fail-open for dev). The
+  CORS layer is fully permissive.
+
+### 13.2 Downstream UDS session/security (caller's responsibility)
+
+SOVDd does **not** hold UDS security secrets:
 - **Direct UDS access:** the external tester sets session and performs SecurityAccess (0x27) before
   privileged calls (`start_flash`, `commit_flash`, …).
 - **App-entity access:** `ManagedEcuBackend` holds the supplier secret internally and manages the inner
-  ECU's session/security — transparent to OEM clients.
-- **Simulations:** the separate `SOVD-security-helper` service holds seed-key secrets.
-
-Client→SOVDd authentication (TLS termination + JWT-bearer validation + per-client resource filtering,
-ISO C-030/031/032) is a planned, cohesive slice — intentionally *not* sprinkled into the current code.
+  ECU's session/security — transparent to clients.
+- **Simulations:** an external helper service can hold seed-key secrets; SOVDd itself never does.
 
 ---
 
 ## 14. Client & CLI
 
-- **`sovd-client`** — typed async HTTP client: `SovdClient` (read/write/faults/ops/modes), `FlashClient`
-  (routes through `/updates` internally), SSE `Subscription`, and `testing::TestServer` for in-process tests.
-  An optional `conversion` feature pulls in `sovd-conv`.
+- **`sovd-client`** — typed async HTTP client: `SovdClient` (read/write/faults/ops/modes/status,
+  optional bearer auth), `FlashClient` (routes through `/updates` internally; streaming `upload_part`),
+  SSE `Subscription`, and `testing::TestServer` for in-process tests. An optional `conversion` feature
+  pulls in `sovd-conv`.
 - **`sovd-cli`** — clap CLI over `sovd-client` for manual diagnostics.
 
 ---
@@ -437,6 +553,8 @@ ISO C-030/031/032) is a planned, cohesive slice — intentionally *not* sprinkle
 
 - **E2E (`crates/sovd-tests`)**: real `example-ecu` on `vcan0` (serial — shared bus). `gateway_e2e_test.rs`
   and `multilayer_e2e_test.rs` exercise federation/nesting. See `run-e2e-tests.sh`.
+- **Auth tests**: JWT validation, scope separation, `/admin` deny/allow, discovery/enumeration
+  filtering, workshop-CA chain validation incl. rogue-chain and overlong-chain rejection.
 - **Simulations (`simulations/`)**: `basic_uds` (3 ECUs + gateway) and `supplier_ota` (4-tier OTA), each
   with `start.sh`/`stop.sh`/`view-logs.sh` and a `config/` dir; binaries auto-build on start. Shared
   process management in `simulations/lib/common.sh`.
@@ -451,8 +569,7 @@ ISO C-030/031/032) is a planned, cohesive slice — intentionally *not* sprinkle
   registry; `DashMap` inside `DidStore`; `tokio::sync::broadcast` for data subscriptions/SSE.
 - **`AppState`** (`crates/sovd-api/src/state.rs`, `Clone` via `Arc` fields): `backends`, `did_store`,
   `subscription_manager`, `output_configs`, `operation_executions` (bounded cache), `log_config`,
-  `clear_data_status`, `updates` (per-update tracking; in-memory), `updates_config`.
-- **`.well-known` / discovery / admin:** `/.well-known/sovd-extensions` (vendor-extension disclosure),
-  `POST /vehicle/v1/discovery` (reads identity DIDs and emits TOML config snippets), `/admin/definitions`
-  (runtime DID CRUD, outside `/vehicle/v1`).
+  `clear_data_status`, `updates` (per-update tracking; in-memory), `updates_config`, auth context.
+- **`.well-known` / admin:** `/.well-known/sovd-extensions` (vendor-extension disclosure),
+  `/admin/definitions` (runtime DID CRUD, outside `/vehicle/v1`, admin-scope gated).
 - **Versioning:** SOVD API edition `v1`; `x-sovd-version "1.1"`; crate version surfaced in software-info.
