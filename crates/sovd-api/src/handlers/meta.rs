@@ -127,7 +127,7 @@ struct PathEntry {
 ///
 /// NOTE (C-024): the `/data/{param_id}` template is shared by *every* DID, so
 /// a single precise per-DID category isn't expressible on one templated path
-/// item. We emit the placeholder token `"x-sovd-multiple"` to signal "this
+/// item. We emit the placeholder token `"x-sumo-multiple"` to signal "this
 /// resource is category-tagged; the concrete category varies per DID — read
 /// `ValueMetaData.category` from `GET /data`". A per-DID-accurate
 /// `x-sovd-data-category` would require the doc emitter to introspect the
@@ -138,7 +138,9 @@ fn x_sovd_data_category_for(path: &str) -> Option<&'static str> {
     if path.ends_with("/data/{param_id}") {
         // Custom-extension category token (Table 70 `x-<ext>-…` form) meaning
         // "varies per DID"; not one of the four standard values on purpose.
-        Some("x-sovd-multiple")
+        // The `x-sovd-` prefix is RESERVED for spec-defined names (§5.4.5,
+        // C-026) — a custom token must carry the vendor prefix instead.
+        Some("x-sumo-multiple")
     } else {
         None
     }
@@ -691,6 +693,16 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
                             Spec model assumes server-pulls-from-OTA \
                             backend; bulk-data is the reverse channel \
                             for workstation / workshop deployments."
+            },
+            "x-sumo-multiple": {
+                "kind":  "value token",
+                "where": "x-sovd-data-category on the templated \
+                          /data/{param_id} path item in the capability \
+                          description (GET /vehicle/v1/docs)",
+                "summary": "Placeholder category meaning 'varies per DID' — \
+                            the shared path template covers DIDs of \
+                            different categories; read the precise \
+                            category per parameter from GET .../data."
             }
         }
     }))
