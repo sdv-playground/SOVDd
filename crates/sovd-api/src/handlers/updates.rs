@@ -135,10 +135,7 @@ pub struct UpdateStatusBody {
     /// captured once at register time. Lets the campaign orchestrator
     /// route RT/host-os components through a coalesced ECU reset instead
     /// of defaulting every component to `Local`.
-    #[serde(
-        rename = "x-sumo-reset-kind",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "x-sumo-reset-kind", skip_serializing_if = "Option::is_none")]
     pub reset_kind: Option<sovd_core::ResetKind>,
 }
 
