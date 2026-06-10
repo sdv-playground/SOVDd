@@ -527,6 +527,11 @@ flowchart TD
   tokens never cross plaintext silently. TLS is in-process rustls (ring provider).
 - **Residual, by design**: `AuthMode::Disabled` is the no-config default (fail-open for dev). The
   CORS layer is fully permissive.
+- **Time dependency**: `exp`/`nbf` and certificate-validity checks read the system clock and are
+  only as strong as it is. Deployments doing offline validation should pair SOVDd with a
+  monotonic clock floor at the platform level (e.g. ratcheted from signed-update timestamps
+  and/or Roughtime), so expired credentials cannot be revived by winding the clock back. SOVDd
+  itself takes no position on how the clock is secured.
 
 ### 13.2 Downstream UDS session/security (caller's responsibility)
 
