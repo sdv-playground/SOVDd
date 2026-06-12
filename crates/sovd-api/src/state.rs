@@ -9,7 +9,7 @@ use sovd_conv::DidStore;
 use sovd_core::{DiagnosticBackend, OperationExecution};
 use sovd_uds::config::OutputConfig;
 
-use crate::auth::AuthContext;
+use crate::auth::{AuthContext, Authorizer};
 use crate::error::ApiError;
 use crate::handlers::subscriptions::SubscriptionManager;
 
@@ -293,7 +293,7 @@ pub struct AppState {
     pub updates_config: Arc<UpdatesConfig>,
     /// Client→SOVDd authentication context (JWT-bearer slice). Defaults to
     /// disabled (open surface); set via [`AppState::with_auth`].
-    auth: Arc<AuthContext>,
+    auth: Arc<dyn Authorizer>,
 }
 
 impl AppState {
@@ -366,9 +366,18 @@ impl AppState {
         self
     }
 
-    /// The client-authentication context, read by the auth middleware.
-    pub fn auth(&self) -> &AuthContext {
-        &self.auth
+    /// Attach a custom authorizer — the injection seam. An embedder (the
+    /// machine-manager layer) provides an HSM-backed / capability-tiered
+    /// implementation; standalone SOVDd uses the built-in [`AuthContext`] modes
+    /// via [`AppState::with_auth`].
+    pub fn with_authorizer(mut self, auth: Arc<dyn Authorizer>) -> Self {
+        self.auth = auth;
+        self
+    }
+
+    /// The authorizer, read by the auth middleware.
+    pub fn auth(&self) -> &dyn Authorizer {
+        self.auth.as_ref()
     }
 
     /// Create AppState from a single backend (for simple single-entity servers)

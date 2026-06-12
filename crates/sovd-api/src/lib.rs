@@ -20,7 +20,10 @@ pub mod handlers;
 pub mod state;
 pub mod workshop_ca;
 
-pub use auth::{AuthConfig, AuthContext, AuthMode, ClientContext, IssuerConfig};
+pub use auth::{
+    AccessRequest, AuthConfig, AuthContext, AuthMode, Authorizer, Capability, ClientContext,
+    IssuerConfig,
+};
 pub use error::ApiError;
 pub use state::AppState;
 

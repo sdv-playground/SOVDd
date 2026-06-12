@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use axum::extract::{Request, State};
 use axum::http::{header::AUTHORIZATION, Method};
 use axum::middleware::Next;
@@ -118,6 +119,111 @@ impl ClientContext {
     /// `admin:*` / `admin` scope; ordinary `component:*` access does NOT grant it.
     pub fn can_admin(&self) -> bool {
         self.scopes.iter().any(|s| s == "admin:*" || s == "admin")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The authorization seam — the injection point.
+//
+// SOVDd computes the capability a route requires and asks an injected
+// `Authorizer` whether the bearer grants it. It ships this trait plus the
+// built-in modes (the default `AuthContext` impl below) and nothing else: a
+// deployment needing HSM-backed verification, issuer tiers, or token freshness
+// injects its own `Authorizer` from the machine-manager layer. SOVDd never
+// mints, never reaches an HSM, and verifies only via the built-in modes.
+// See `docs/design/authorization.md` §4.
+// ---------------------------------------------------------------------------
+
+/// The capability a route requires — a small, code-canonical vocabulary. The
+/// orchestrated-update verbs are included because that extension lives in this
+/// API. Tokens carry capabilities as opaque scope strings; this enum is only
+/// SOVDd's view of what its *own* routes need.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Capability {
+    DataRead,
+    DataWrite,
+    OperationsExecute,
+    ModesSet,
+    UpdateTransfer,
+    UpdateExecute,
+    UpdateVerdict,
+    ResetExecute,
+    FactoryReset,
+    Admin,
+    /// Read-only metadata / listings with no specific verb — component scope only.
+    Read,
+}
+
+/// What the API knows about an incoming request, in spec/extension-generic
+/// terms — handed to the injected [`Authorizer`].
+pub struct AccessRequest<'a> {
+    /// The full `Authorization` header value (`Bearer <token>`), if present.
+    /// The authorizer parses it; the built-in one strips `Bearer ` internally.
+    pub bearer: Option<&'a str>,
+    pub method: &'a Method,
+    pub path: &'a str,
+    /// Top-level component the route addresses, if any.
+    pub component: Option<&'a str>,
+    /// The capability this route requires.
+    pub capability: Capability,
+}
+
+/// The injected authorization decision point. SOVDd calls this once per
+/// protected request; the implementation verifies the bearer and decides
+/// whether it may perform `req.capability`, returning the caller identity or a
+/// denial reason (surfaced as 401).
+#[async_trait]
+pub trait Authorizer: Send + Sync {
+    async fn authorize(&self, req: &AccessRequest<'_>) -> Result<ClientContext, String>;
+
+    /// True when the surface is unauthenticated — the middleware short-circuits
+    /// before building an [`AccessRequest`]. Defaults to closed.
+    fn is_open(&self) -> bool {
+        false
+    }
+}
+
+/// The capability a route requires. Coarse today: the built-in authorizer
+/// enforces component/admin scope, not the verb — but the vocabulary is real so
+/// an injected authorizer can enforce verb-level tiers (`docs/design/authorization.md` §5).
+pub fn route_capability(method: &Method, path: &str) -> Capability {
+    let is_get = method == Method::GET;
+    if path.starts_with("/admin/") {
+        Capability::Admin
+    } else if path.contains("/x-sumo-commit") || path.contains("/x-sumo-rollback") {
+        Capability::UpdateVerdict
+    } else if path.contains("/operations/factory-reset") {
+        Capability::FactoryReset
+    } else if path.ends_with("/status/restart") || path.contains("/reset") {
+        Capability::ResetExecute
+    } else if path.contains("/updates") {
+        if is_get {
+            Capability::Read
+        } else if path.ends_with("/execute") || path.ends_with("/automated") {
+            Capability::UpdateExecute
+        } else {
+            Capability::UpdateTransfer
+        }
+    } else if path.contains("/operations") {
+        if is_get {
+            Capability::Read
+        } else {
+            Capability::OperationsExecute
+        }
+    } else if path.contains("/modes") {
+        if is_get {
+            Capability::Read
+        } else {
+            Capability::ModesSet
+        }
+    } else if path.contains("/data") {
+        if is_get {
+            Capability::DataRead
+        } else {
+            Capability::DataWrite
+        }
+    } else {
+        Capability::Read
     }
 }
 
@@ -274,6 +380,35 @@ impl AuthContext {
                 scopes: scopes.clone(),
             }),
         }
+    }
+}
+
+/// The built-in authorizer: the four configured modes
+/// (disabled/static/oidc/workshop-ca) plus SOVDd's spec-level component/admin
+/// scope check. This is what a standalone SOVDd uses with no HSM; embedders
+/// inject their own [`Authorizer`].
+#[async_trait]
+impl Authorizer for AuthContext {
+    async fn authorize(&self, req: &AccessRequest<'_>) -> Result<ClientContext, String> {
+        let ctx = self.authenticate(req.bearer).await?;
+        // Spec-level authorization (C-030 / C-031): a component-addressed route
+        // needs the matching `component:<id>` scope; the server-admin surface
+        // needs an `admin` scope. Verb-level tiers are an injected-authorizer
+        // concern, not the built-in one.
+        if let Some(component_id) = req.component {
+            if !ctx.can_access_component(component_id) {
+                return Err(format!(
+                    "client not authorized for component '{component_id}'"
+                ));
+            }
+        } else if req.capability == Capability::Admin && !ctx.can_admin() {
+            return Err("client not authorized for /admin (requires an admin scope)".to_string());
+        }
+        Ok(ctx)
+    }
+
+    fn is_open(&self) -> bool {
+        matches!(self.validator, Validator::Disabled)
     }
 }
 
@@ -471,33 +606,31 @@ pub async fn require_auth(
         return Ok(next.run(req).await);
     }
 
-    // Own the header value so the immutable borrow of `req` ends before we
+    // Own header/path/method so the immutable borrow of `req` ends before we
     // mutate its extensions below.
     let header = req
         .headers()
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
+    let path = req.uri().path().to_owned();
+    let method = req.method().clone();
 
+    // SOVDd contributes the spec-level facts — the component the route addresses
+    // and the capability it requires — and the injected authorizer decides. The
+    // built-in authorizer enforces component/admin scope (C-030/C-031); verb-level
+    // tiers are an injected-authorizer concern. See `docs/design/authorization.md` §4.
+    let access = AccessRequest {
+        bearer: header.as_deref(),
+        method: &method,
+        path: &path,
+        component: component_in_path(&path),
+        capability: route_capability(&method, &path),
+    };
     let ctx = auth
-        .authenticate(header.as_deref())
+        .authorize(&access)
         .await
         .map_err(ApiError::Unauthorized)?;
-
-    // Authorization (C-030 / C-031). Component-scoped paths require the matching
-    // `component:<id>` scope; the server-admin surface requires an `admin` scope.
-    let path = req.uri().path().to_owned();
-    if let Some(component_id) = component_in_path(&path) {
-        if !ctx.can_access_component(component_id) {
-            return Err(ApiError::Unauthorized(format!(
-                "client not authorized for component '{component_id}'"
-            )));
-        }
-    } else if path.starts_with("/admin/") && !ctx.can_admin() {
-        return Err(ApiError::Unauthorized(
-            "client not authorized for /admin (requires an admin scope)".to_string(),
-        ));
-    }
 
     req.extensions_mut().insert(ctx);
     Ok(next.run(req).await)
