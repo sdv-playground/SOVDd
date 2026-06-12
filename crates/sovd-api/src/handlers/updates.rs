@@ -281,7 +281,20 @@ pub async fn register_update(
     // simply skip this step. The actual flash session will be opened
     // later when the package is ready (during the /executions wire's
     // `verify` action or at `PUT /prepare`).
-    let transfer_id = backend.start_flash().await.ok();
+    let transfer_id = match backend.start_flash().await {
+        Ok(tid) => Some(tid),
+        // Backends that don't preallocate (`NotSupported`), or that require an
+        // already-verified package (`InvalidRequest`, the tier-1 supplier
+        // pattern), legitimately skip this step — the session opens later at
+        // verify/prepare.
+        Err(sovd_core::BackendError::NotSupported(_))
+        | Err(sovd_core::BackendError::InvalidRequest(_)) => None,
+        // Any other error is real — surface it. In particular `Busy` (409) means
+        // the bank set is in trial mode and must be committed/rolled back first;
+        // falling through here would let the later bulk-data PUT hit the
+        // unguarded legacy path and wipe the rollback bank.
+        Err(e) => return Err(e.into()),
+    };
 
     // Capture the component's declared ResetKind once, while it's idle
     // (cheap here; `get_activation_state` can be slow mid-flash, so we
