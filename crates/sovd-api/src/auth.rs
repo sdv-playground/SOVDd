@@ -722,6 +722,31 @@ mod tests {
     }
 
     #[test]
+    fn destructive_trial_verdicts_map_to_update_verdict() {
+        // Security-load-bearing: an embedder (supernova) enforces the entity-root
+        // x-sumo-{commit,rollback}-trials routes by applying require_auth, which
+        // gates on this capability. They must resolve to UpdateVerdict — NOT Read
+        // (the `/operations` GET case) and NOT ResetExecute (no `/reset` substring).
+        let post = Method::POST;
+        assert_eq!(
+            route_capability(&post, "/vehicle/v1/operations/x-sumo-commit-trials/executions"),
+            Capability::UpdateVerdict
+        );
+        assert_eq!(
+            route_capability(&post, "/vehicle/v1/operations/x-sumo-rollback-trials/executions"),
+            Capability::UpdateVerdict
+        );
+        // The x-sumo-commit branch wins over the generic /operations branch even on GET.
+        assert_eq!(
+            route_capability(
+                &Method::GET,
+                "/vehicle/v1/operations/x-sumo-commit-trials/executions"
+            ),
+            Capability::UpdateVerdict
+        );
+    }
+
+    #[test]
     fn bearer_parsing() {
         assert_eq!(bearer(Some("Bearer abc")).unwrap(), "abc");
         assert_eq!(bearer(Some("Bearer  abc  ")).unwrap(), "abc");
