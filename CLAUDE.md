@@ -68,6 +68,10 @@ example-app (app entity binary — embeds example-ecu for a full app→ECU stack
 
 sovd-cli → sovd-client
 sovd-tests → sovd-api + sovd-uds + sovd-gateway + sovd-conv + sovd-client
+
+sovd-mdns (standalone — mDNS/DNS-SD advertiser, ISO 17978-3 §5.11; reads the SOVD-server
+  instance id from the TLS leaf SAN, no sovd-core dep. Consumed by external SOVD servers as a
+  git dep. Off-QNX backend: mdns-sd; QNX (nto): a hand-rolled simple-dns + socket2 responder.)
 ```
 
 ### Central Abstraction: `DiagnosticBackend` Trait
