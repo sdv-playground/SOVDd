@@ -28,6 +28,14 @@ pub struct FlashConfig {
     /// `/vehicle/v1/components/{gateway_id}/apps/{component_id}/...`
     #[serde(default)]
     pub gateway_id: Option<String>,
+
+    /// Skip TLS certificate verification — the `curl -k` equivalent, for a dev
+    /// device whose leaf SAN won't match the dialled host. Default `false`
+    /// (full verification); when `false` the built client is byte-identical to
+    /// before this knob existed (`danger_accept_invalid_certs(false)` is the
+    /// reqwest default).
+    #[serde(default)]
+    pub insecure: bool,
 }
 
 /// Connection configuration
@@ -480,6 +488,7 @@ impl FlashConfigBuilder {
                 timeouts: TimeoutsConfig::default(),
                 component_id: None,
                 gateway_id: None,
+                insecure: false,
             },
         }
     }
@@ -524,6 +533,13 @@ impl FlashConfigBuilder {
     /// Set the gateway ID (for sub-entity SOVD paths)
     pub fn gateway_id(mut self, id: impl Into<String>) -> Self {
         self.config.gateway_id = Some(id.into());
+        self
+    }
+
+    /// Skip TLS certificate verification (the `curl -k` equivalent). Default
+    /// `false` ⇒ full verification. See [`FlashConfig::insecure`].
+    pub fn insecure(mut self, insecure: bool) -> Self {
+        self.config.insecure = insecure;
         self
     }
 

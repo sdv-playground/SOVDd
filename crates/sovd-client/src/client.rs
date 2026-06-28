@@ -70,7 +70,16 @@ impl SovdClient {
     /// # Arguments
     /// * `base_url` - Base URL of the SOVD server (e.g., "http://localhost:9080")
     pub fn new(base_url: &str) -> Result<Self> {
-        Self::with_config(base_url, DEFAULT_TIMEOUT, DEFAULT_CONNECT_TIMEOUT)
+        Self::new_insecure(base_url, false)
+    }
+
+    /// Like [`new`](Self::new), but optionally disable TLS certificate
+    /// verification — the `curl -k` equivalent. `insecure == false` is the
+    /// default and byte-identical to [`new`](Self::new) (full verification);
+    /// `insecure == true` accepts an invalid/mismatched server cert, for a dev
+    /// device whose leaf SAN won't match the dialled host (e.g. `127.0.0.1`).
+    pub fn new_insecure(base_url: &str, insecure: bool) -> Result<Self> {
+        Self::with_config_insecure(base_url, DEFAULT_TIMEOUT, DEFAULT_CONNECT_TIMEOUT, insecure)
     }
 
     /// Create a new SOVD client with custom configuration
@@ -79,9 +88,22 @@ impl SovdClient {
         timeout: Duration,
         connect_timeout: Duration,
     ) -> Result<Self> {
+        Self::with_config_insecure(base_url, timeout, connect_timeout, false)
+    }
+
+    /// [`with_config`](Self::with_config) plus the insecure-TLS toggle — the
+    /// single non-bearer client-building site. `insecure == false` ⇒ full
+    /// verification (`danger_accept_invalid_certs(false)` is the reqwest default).
+    fn with_config_insecure(
+        base_url: &str,
+        timeout: Duration,
+        connect_timeout: Duration,
+        insecure: bool,
+    ) -> Result<Self> {
         let client = Client::builder()
             .timeout(timeout)
             .connect_timeout(connect_timeout)
+            .danger_accept_invalid_certs(insecure)
             .build()?;
 
         let base_url = Url::parse(base_url)?;
@@ -93,6 +115,12 @@ impl SovdClient {
     ///
     /// The token is set as a default `Authorization: Bearer <token>` header.
     pub fn with_bearer_token(base_url: &str, token: &str) -> Result<Self> {
+        Self::with_bearer_token_insecure(base_url, token, false)
+    }
+
+    /// Like [`with_bearer_token`](Self::with_bearer_token), with the insecure-TLS
+    /// toggle. `insecure == false` ⇒ full verification (byte-identical default).
+    pub fn with_bearer_token_insecure(base_url: &str, token: &str, insecure: bool) -> Result<Self> {
         let mut headers = reqwest::header::HeaderMap::new();
         let header_value = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token))
             .map_err(|e| SovdClientError::ParseError(format!("Invalid auth token: {}", e)))?;
@@ -102,6 +130,7 @@ impl SovdClient {
             .timeout(DEFAULT_TIMEOUT)
             .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
             .default_headers(headers)
+            .danger_accept_invalid_certs(insecure)
             .build()?;
 
         let base_url = Url::parse(base_url)?;

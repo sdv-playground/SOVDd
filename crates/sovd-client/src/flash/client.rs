@@ -182,6 +182,7 @@ impl FlashClient {
         let client = Client::builder()
             .timeout(Duration::from_millis(config.timeouts.request_ms))
             .connect_timeout(Duration::from_millis(config.timeouts.connect_ms))
+            .danger_accept_invalid_certs(config.insecure)
             .build()?;
         let base_url = Url::parse(&config.connection.base_url)?;
         info!("flash client created for {}", base_url);
