@@ -9,6 +9,7 @@ members = [
     "crates/sovd-conv",
     "crates/sovd-client",
     "crates/sovd-proxy",
+    "crates/sovd-mdns",
     # Binaries
     "crates/sovdd",
     "crates/example-ecu",
