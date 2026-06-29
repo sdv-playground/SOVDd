@@ -57,6 +57,22 @@ const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// SOVD REST API client
 ///
+/// Apply the device-TLS verification mode to a reqwest builder — the single
+/// place this crate decides server-cert trust. When `ca_cert_pem` is set, pin
+/// that CA root (verify the device leaf chains to it — the tower identity root,
+/// for dialling `<id>.local`); otherwise `insecure` chooses skip-verify (raw-IP
+/// dialling, the `curl -k` equivalent) vs the system roots.
+pub(crate) fn apply_tls(
+    builder: reqwest::ClientBuilder,
+    insecure: bool,
+    ca_cert_pem: Option<&[u8]>,
+) -> reqwest::Result<reqwest::ClientBuilder> {
+    Ok(match ca_cert_pem {
+        Some(pem) => builder.add_root_certificate(reqwest::Certificate::from_pem(pem)?),
+        None => builder.danger_accept_invalid_certs(insecure),
+    })
+}
+
 /// Provides methods to communicate with SOVD-compliant servers.
 #[derive(Debug, Clone)]
 pub struct SovdClient {
@@ -79,7 +95,31 @@ impl SovdClient {
     /// `insecure == true` accepts an invalid/mismatched server cert, for a dev
     /// device whose leaf SAN won't match the dialled host (e.g. `127.0.0.1`).
     pub fn new_insecure(base_url: &str, insecure: bool) -> Result<Self> {
-        Self::with_config_insecure(base_url, DEFAULT_TIMEOUT, DEFAULT_CONNECT_TIMEOUT, insecure)
+        Self::with_config_verifying(
+            base_url,
+            DEFAULT_TIMEOUT,
+            DEFAULT_CONNECT_TIMEOUT,
+            insecure,
+            None,
+        )
+    }
+
+    /// Like [`new`](Self::new), but pin a CA root (PEM) for verification — dial
+    /// `<id>.local` and verify the device leaf chains to the tower identity root.
+    /// `ca_cert_pem == None` falls back to the [`new_insecure`](Self::new_insecure)
+    /// behaviour (skip-verify when `insecure`, else system roots).
+    pub fn new_verifying(
+        base_url: &str,
+        insecure: bool,
+        ca_cert_pem: Option<&[u8]>,
+    ) -> Result<Self> {
+        Self::with_config_verifying(
+            base_url,
+            DEFAULT_TIMEOUT,
+            DEFAULT_CONNECT_TIMEOUT,
+            insecure,
+            ca_cert_pem,
+        )
     }
 
     /// Create a new SOVD client with custom configuration
@@ -88,23 +128,27 @@ impl SovdClient {
         timeout: Duration,
         connect_timeout: Duration,
     ) -> Result<Self> {
-        Self::with_config_insecure(base_url, timeout, connect_timeout, false)
+        Self::with_config_verifying(base_url, timeout, connect_timeout, false, None)
     }
 
-    /// [`with_config`](Self::with_config) plus the insecure-TLS toggle — the
-    /// single non-bearer client-building site. `insecure == false` ⇒ full
-    /// verification (`danger_accept_invalid_certs(false)` is the reqwest default).
-    fn with_config_insecure(
+    /// The single non-bearer client-building site. `ca_cert_pem` (when set) pins
+    /// that CA root; otherwise `insecure` decides skip-verify vs system roots.
+    /// See [`apply_tls`].
+    fn with_config_verifying(
         base_url: &str,
         timeout: Duration,
         connect_timeout: Duration,
         insecure: bool,
+        ca_cert_pem: Option<&[u8]>,
     ) -> Result<Self> {
-        let client = Client::builder()
-            .timeout(timeout)
-            .connect_timeout(connect_timeout)
-            .danger_accept_invalid_certs(insecure)
-            .build()?;
+        let client = apply_tls(
+            Client::builder()
+                .timeout(timeout)
+                .connect_timeout(connect_timeout),
+            insecure,
+            ca_cert_pem,
+        )?
+        .build()?;
 
         let base_url = Url::parse(base_url)?;
 
@@ -121,17 +165,32 @@ impl SovdClient {
     /// Like [`with_bearer_token`](Self::with_bearer_token), with the insecure-TLS
     /// toggle. `insecure == false` ⇒ full verification (byte-identical default).
     pub fn with_bearer_token_insecure(base_url: &str, token: &str, insecure: bool) -> Result<Self> {
+        Self::with_bearer_token_verifying(base_url, token, insecure, None)
+    }
+
+    /// Like [`with_bearer_token`](Self::with_bearer_token), pinning a CA root
+    /// (PEM) for verification — the tower identity root, for dialling
+    /// `<id>.local`. `ca_cert_pem == None` falls back to the `insecure` behaviour.
+    pub fn with_bearer_token_verifying(
+        base_url: &str,
+        token: &str,
+        insecure: bool,
+        ca_cert_pem: Option<&[u8]>,
+    ) -> Result<Self> {
         let mut headers = reqwest::header::HeaderMap::new();
         let header_value = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token))
             .map_err(|e| SovdClientError::ParseError(format!("Invalid auth token: {}", e)))?;
         headers.insert(reqwest::header::AUTHORIZATION, header_value);
 
-        let client = Client::builder()
-            .timeout(DEFAULT_TIMEOUT)
-            .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
-            .default_headers(headers)
-            .danger_accept_invalid_certs(insecure)
-            .build()?;
+        let client = apply_tls(
+            Client::builder()
+                .timeout(DEFAULT_TIMEOUT)
+                .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+                .default_headers(headers),
+            insecure,
+            ca_cert_pem,
+        )?
+        .build()?;
 
         let base_url = Url::parse(base_url)?;
 

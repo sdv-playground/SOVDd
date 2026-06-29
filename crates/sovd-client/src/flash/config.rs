@@ -36,6 +36,14 @@ pub struct FlashConfig {
     /// reqwest default).
     #[serde(default)]
     pub insecure: bool,
+
+    /// PEM-encoded CA root to pin for device TLS verification. When set, the
+    /// built client verifies the server cert chains to THIS CA (the tower
+    /// identity root) — used on the discovery path dialling `<id>.local`. Takes
+    /// precedence over `insecure`; `None` ⇒ `insecure` decides (skip-verify vs
+    /// the system roots).
+    #[serde(default)]
+    pub ca_cert_pem: Option<Vec<u8>>,
 }
 
 /// Connection configuration
@@ -489,6 +497,7 @@ impl FlashConfigBuilder {
                 component_id: None,
                 gateway_id: None,
                 insecure: false,
+                ca_cert_pem: None,
             },
         }
     }
@@ -540,6 +549,14 @@ impl FlashConfigBuilder {
     /// `false` ⇒ full verification. See [`FlashConfig::insecure`].
     pub fn insecure(mut self, insecure: bool) -> Self {
         self.config.insecure = insecure;
+        self
+    }
+
+    /// Pin a PEM-encoded CA root for device TLS verification (the tower identity
+    /// root). Takes precedence over [`insecure`](Self::insecure); `None` leaves
+    /// the `insecure`/system-roots behaviour unchanged.
+    pub fn ca_cert_pem(mut self, pem: Option<Vec<u8>>) -> Self {
+        self.config.ca_cert_pem = pem;
         self
     }
 
