@@ -97,6 +97,16 @@ pub async fn put_log_config(
     Path(component_id): Path<String>,
     Json(config): Json<LogConfig>,
 ) -> Result<StatusCode, ApiError> {
+    // C-121 (ISO 17978-3 §7.21): the log `context` names the entry format and
+    // must be a known type. Reject anything else with 400 before touching state.
+    // (Wire values stay lowercase to match `default_context()`; the spec's
+    // canonical ContextType enum spells these RFC5424 / AUTOSAR_DLT.)
+    if !matches!(config.context.as_str(), "rfc5424" | "autosar-dlt") {
+        return Err(ApiError::BadRequest(format!(
+            "unsupported log context {:?}; allowed: \"rfc5424\", \"autosar-dlt\"",
+            config.context
+        )));
+    }
     let _ = state.get_backend(&component_id)?;
     let value = serde_json::to_value(&config)
         .map_err(|e| ApiError::Internal(format!("log_config serde: {e}")))?;
@@ -112,4 +122,118 @@ pub async fn reset_log_config(
     let _ = state.get_backend(&component_id)?;
     state.log_config.0.lock().remove(&component_id);
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sovd_core::{
+        BackendError, BackendResult, Capabilities, DataValue, DiagnosticBackend, EntityInfo,
+        FaultFilter, FaultsResult, OperationExecution, OperationInfo, ParameterInfo,
+    };
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    /// Minimal backend so `get_backend` resolves on the happy path; the methods
+    /// here are the trait's only required stubs (the rest default to
+    /// `NotSupported`).
+    struct StubBackend {
+        info: EntityInfo,
+        caps: Capabilities,
+    }
+
+    impl StubBackend {
+        fn new(id: &str) -> Self {
+            Self {
+                info: EntityInfo {
+                    id: id.to_string(),
+                    name: id.to_string(),
+                    entity_type: "ecu".to_string(),
+                    description: None,
+                    href: format!("/vehicle/v1/components/{id}"),
+                    status: Some("online".to_string()),
+                },
+                caps: Capabilities::default(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DiagnosticBackend for StubBackend {
+        fn entity_info(&self) -> &EntityInfo {
+            &self.info
+        }
+        fn capabilities(&self) -> &Capabilities {
+            &self.caps
+        }
+        async fn list_parameters(&self) -> BackendResult<Vec<ParameterInfo>> {
+            Ok(vec![])
+        }
+        async fn read_data(&self, _ids: &[String]) -> BackendResult<Vec<DataValue>> {
+            Ok(vec![])
+        }
+        async fn get_faults(&self, _filter: Option<&FaultFilter>) -> BackendResult<FaultsResult> {
+            Ok(FaultsResult {
+                faults: vec![],
+                status_availability_mask: None,
+            })
+        }
+        async fn list_operations(&self) -> BackendResult<Vec<OperationInfo>> {
+            Ok(vec![])
+        }
+        async fn start_operation(
+            &self,
+            op: &str,
+            _params: &[u8],
+        ) -> BackendResult<OperationExecution> {
+            Err(BackendError::OperationNotFound(op.to_string()))
+        }
+    }
+
+    fn state_with_ecu() -> AppState {
+        let mut backends: HashMap<String, Arc<dyn DiagnosticBackend>> = HashMap::new();
+        backends.insert("ecu".to_string(), Arc::new(StubBackend::new("ecu")));
+        AppState::new(backends)
+    }
+
+    fn config_with_context(context: &str) -> LogConfig {
+        LogConfig {
+            context: context.to_string(),
+            min_severity: default_min_severity(),
+            source: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn put_log_config_accepts_known_contexts() {
+        // Both spec-defined context types (C-121) are accepted → 204.
+        for ctx in ["rfc5424", "autosar-dlt"] {
+            let status = put_log_config(
+                State(state_with_ecu()),
+                Path("ecu".to_string()),
+                Json(config_with_context(ctx)),
+            )
+            .await
+            .expect("known context is accepted");
+            assert_eq!(status, StatusCode::NO_CONTENT, "context {ctx:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn put_log_config_rejects_unknown_context() {
+        // An out-of-enum context (C-121) is a 400 that names the bad value.
+        let err = put_log_config(
+            State(state_with_ecu()),
+            Path("ecu".to_string()),
+            Json(config_with_context("syslog")),
+        )
+        .await
+        .expect_err("unknown context is rejected");
+        match err {
+            ApiError::BadRequest(msg) => {
+                assert!(msg.contains("syslog"), "message names the bad value: {msg}");
+            }
+            other => panic!("expected 400 BadRequest, got {other:?}"),
+        }
+    }
 }

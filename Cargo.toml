@@ -34,6 +34,7 @@ sovd-gateway = { path = "crates/sovd-gateway" }
 sovd-conv = { path = "crates/sovd-conv" }
 sovd-client = { path = "crates/sovd-client" }
 sovd-proxy = { path = "crates/sovd-proxy" }
+sovd-mdns = { path = "crates/sovd-mdns" }
 example-ecu = { path = "crates/example-ecu" }
 
 # Async runtime

@@ -212,6 +212,39 @@ async fn main() -> anyhow::Result<()> {
             let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert, &tls.key)
                 .await
                 .map_err(|e| anyhow::anyhow!("failed to load TLS cert/key: {}", e))?;
+            // Self-advertise this SOVD endpoint over mDNS / DNS-SD (ISO 17978-3
+            // §5.11, C-010/011). The instance/hostname are derived from the TLS
+            // leaf's `<id>.local` SAN — the same name a discovery client verifies
+            // this cert against — so we advertise only on this provisioned HTTPS
+            // path (the plain-HTTP arm has no verifiable leaf, like
+            // supernova-machine-manager's `Ok(leaf)` arm). Best-effort: a failure
+            // to advertise must never stop serving. `_mdns` holds the guard for
+            // the server's lifetime (dropping it sends DNS-SD goodbye packets).
+            let leaf_der: Option<Vec<u8>> = std::fs::File::open(&tls.cert)
+                .ok()
+                .and_then(|f| {
+                    rustls_pemfile::certs(&mut std::io::BufReader::new(f))
+                        .filter_map(Result::ok)
+                        .next()
+                })
+                .map(|c| c.to_vec());
+            let _mdns = match leaf_der.as_deref().and_then(|der| {
+                sovd_mdns::SovdAdvertiser::from_leaf_and_bind(der, &addr.to_string())
+            }) {
+                Some(adv) => match adv.start() {
+                    Ok(guard) => Some(guard),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "SOVD mDNS advertise failed; serving without discovery");
+                        None
+                    }
+                },
+                None => {
+                    tracing::warn!(
+                        "SOVD mDNS advertise skipped: TLS leaf has no parseable <id>.local instance name"
+                    );
+                    None
+                }
+            };
             axum_server::bind_rustls(addr, rustls)
                 .serve(app.into_make_service())
                 .await?;

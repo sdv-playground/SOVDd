@@ -12,6 +12,7 @@ sovd-uds.workspace = true
 sovd-gateway.workspace = true
 sovd-conv.workspace = true
 sovd-proxy.workspace = true
+sovd-mdns.workspace = true
 tokio.workspace = true
 axum.workspace = true
 tracing.workspace = true
@@ -22,6 +23,9 @@ toml.workspace = true
 # In-process TLS (rustls + ring provider — portable, no cmake/NASM)
 axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# Read the TLS leaf DER back out of the configured PEM to derive the conformant
+# mDNS instance id (same rustls-pemfile 2.x axum-server already pulls in).
+rustls-pemfile = "2"
 
 [[bin]]
 name = "sovdd"
