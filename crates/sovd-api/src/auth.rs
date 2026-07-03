@@ -729,11 +729,17 @@ mod tests {
         // (the `/operations` GET case) and NOT ResetExecute (no `/reset` substring).
         let post = Method::POST;
         assert_eq!(
-            route_capability(&post, "/vehicle/v1/operations/x-sumo-commit-trials/executions"),
+            route_capability(
+                &post,
+                "/vehicle/v1/operations/x-sumo-commit-trials/executions"
+            ),
             Capability::UpdateVerdict
         );
         assert_eq!(
-            route_capability(&post, "/vehicle/v1/operations/x-sumo-rollback-trials/executions"),
+            route_capability(
+                &post,
+                "/vehicle/v1/operations/x-sumo-rollback-trials/executions"
+            ),
             Capability::UpdateVerdict
         );
         // The x-sumo-commit branch wins over the generic /operations branch even on GET.
