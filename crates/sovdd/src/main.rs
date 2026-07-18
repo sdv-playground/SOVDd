@@ -608,6 +608,8 @@ async fn load_config_file(
                             service_overrides: Default::default(),
                             sessions: session_config.clone(),
                             flash_commit: scan_flash_config.clone(),
+                            // Auto-discovered ECUs have no per-ECU unlock config.
+                            unlock: None,
                         };
 
                         match UdsBackend::new(backend_config).await {
@@ -714,6 +716,9 @@ async fn create_ecu_backend(
     // Load flash commit/rollback config
     let flash_commit = load_flash_commit_config(ecu_config)?;
 
+    // Load transparent server-side SecurityAccess (UDS 0x27) config, if any
+    let unlock = load_unlock_config(ecu_config)?;
+
     let config = UdsBackendConfig {
         id: ecu_id.to_string(),
         name: name.to_string(),
@@ -724,6 +729,7 @@ async fn create_ecu_backend(
         service_overrides,
         sessions,
         flash_commit,
+        unlock,
     };
 
     tracing::info!(ecu_id = %ecu_id, "Creating UDS backend");
@@ -1013,6 +1019,47 @@ fn load_flash_commit_config(ecu_config: &toml::Value) -> anyhow::Result<FlashCom
         commit_routine,
         rollback_routine,
     })
+}
+
+/// Parse the optional per-ECU `[ecu.*.unlock]` section into an
+/// [`UnlockConfig`]. Absent ⇒ `None` (no transparent server-side
+/// SecurityAccess for this ECU).
+fn load_unlock_config(
+    ecu_config: &toml::Value,
+) -> anyhow::Result<Option<sovd_uds::config::UnlockConfig>> {
+    let unlock = match ecu_config.get("unlock") {
+        Some(u) => u,
+        None => return Ok(None),
+    };
+
+    let algorithm = unlock
+        .get("algorithm")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("[ecu.*.unlock] requires a string 'algorithm'"))?
+        .to_string();
+
+    let secret_hex = unlock
+        .get("secret_hex")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("[ecu.*.unlock] requires a string 'secret_hex'"))?
+        .to_string();
+
+    let level = unlock
+        .get("level")
+        .and_then(|v| v.as_integer())
+        .map(|v| v as u8);
+
+    tracing::info!(
+        algorithm = %algorithm,
+        level = ?level,
+        "Transparent server-side SecurityAccess configured"
+    );
+
+    Ok(Some(sovd_uds::config::UnlockConfig {
+        algorithm,
+        secret_hex,
+        level,
+    }))
 }
 
 fn load_outputs(ecu_config: &toml::Value) -> anyhow::Result<Vec<OutputConfig>> {

@@ -35,6 +35,7 @@ pub mod session;
 pub mod subscription;
 pub mod transport;
 pub mod uds;
+pub mod unlock;
 
 pub use backend::UdsBackend;
 pub use config::UdsBackendConfig;
@@ -43,6 +44,7 @@ pub use session::{SessionError, SessionManager, SessionState};
 pub use subscription::{StreamError, StreamManager, StreamSubscription};
 pub use transport::{create_transport, TransportAdapter, TransportError};
 pub use uds::{NegativeResponseCode, ServiceIds, UdsError, UdsService};
+pub use unlock::{UnlockError, UnlockProvider, XorUnlock};
 
 // Re-export CAN bus scanner (Linux + socketcan feature only)
 #[cfg(all(target_os = "linux", feature = "socketcan"))]

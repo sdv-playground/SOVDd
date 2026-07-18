@@ -128,10 +128,12 @@ Single-bank collapses to `… → Activated → Complete` (no reboot/trial). `Fa
 
 ### Security Model
 
-The SOVD server does NOT hold security secrets. Session and security setup is the caller's responsibility:
-- **Direct UDS access:** the external tester (or test harness) sets session and performs security access before calling `start_flash()`, `commit_flash()`, etc.
+Authorization is a JWT bearer enforced at the `sovd-api` layer; UDS `SecurityAccess` (0x27) against a real ECU is the server's job. Session/security setup falls to one of:
+- **Transparent server-side unlock (default path):** a per-ECU `UnlockProvider` (`sovd-uds/src/unlock.rs`) lets the backend perform the 0x27 seed/key dance itself, on demand. Configured via an optional `[ecu.*.unlock]` section (`algorithm` + `secret_hex`); the dev impl is `XorUnlock`. When a gated operation is rejected with NRC 0x33 (write `write_raw_did`, or the flash `RequestDownload` in `run_flash_transfer`), the backend unlocks and retries once — clients no longer need to drive `modes/security`. Absent section ⇒ the op fails with the ECU's NRC (403). Auth already happened above; sovd-uds holds no auth logic.
+- **Direct UDS access (classic):** the external tester still *may* set session and perform security access itself; the spec-mandated `modes/security` surface stays for conformance.
 - **App entity access:** the supplier app (`ManagedEcuBackend`) holds its own secret internally and manages inner ECU session/security itself — transparent to OEM clients.
-- **Simulation security:** the `SOVD-security-helper` service (separate project) holds secrets for simulation environments.
+
+The retired offboard `SOVD-security-helper` (seed/key over a side channel) is superseded by the transparent server-side path above.
 
 ### DID Conversion Pipeline (sovd-conv)
 

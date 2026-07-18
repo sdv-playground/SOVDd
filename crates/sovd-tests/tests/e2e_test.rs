@@ -35,6 +35,9 @@ struct TestHarnessOptions {
     block_counter_wrap: u8,
     /// Whether to enable firmware rollback support (default true)
     supports_rollback: bool,
+    /// Whether to configure transparent server-side SecurityAccess for the ECU
+    /// (`[ecu.vtx_ecm.unlock]`, XOR / secret 0xFF). Default false.
+    unlock: bool,
 }
 
 impl Default for TestHarnessOptions {
@@ -43,6 +46,7 @@ impl Default for TestHarnessOptions {
             block_counter_start: 0,
             block_counter_wrap: 0,
             supports_rollback: true,
+            unlock: false,
         }
     }
 }
@@ -310,6 +314,22 @@ block_counter_wrap = {}
         // Create a minimal test config for sovdd
         let workspace = Self::workspace_root();
 
+        // Per-ECU sub-tables injected under [ecu.vtx_ecm] before its
+        // operations/outputs arrays: flash commit/rollback and (optionally)
+        // transparent server-side SecurityAccess. The unlock secret matches the
+        // example-ecu default (0xFF) so its real gate accepts the server key.
+        let flash_section = if self.options.supports_rollback {
+            "[ecu.vtx_ecm.flash]\nsupports_rollback = true\ncommit_routine = \"0xFF01\"\nrollback_routine = \"0xFF02\"\n"
+        } else {
+            ""
+        };
+        let unlock_section = if self.options.unlock {
+            "[ecu.vtx_ecm.unlock]\nalgorithm = \"xor\"\nsecret_hex = \"ff\"\n"
+        } else {
+            ""
+        };
+        let extra_ecu_sections = format!("{}{}", flash_section, unlock_section);
+
         let content = format!(
             r#"
 [server]
@@ -417,11 +437,7 @@ security_level = 0
             Self::INTERFACE,
             self.options.block_counter_start,
             self.options.block_counter_wrap,
-            if self.options.supports_rollback {
-                "[ecu.vtx_ecm.flash]\nsupports_rollback = true\ncommit_routine = \"0xFF01\"\nrollback_routine = \"0xFF02\""
-            } else {
-                ""
-            }
+            extra_ecu_sections,
         );
 
         let test_config = format!("{}/target/test-config.toml", workspace);
@@ -1544,6 +1560,90 @@ async fn test_security_access_success() {
     );
 
     eprintln!("Security access granted!");
+}
+
+// =============================================================================
+// Transparent server-side SecurityAccess (UDS 0x27) — per-ECU UnlockProvider
+//
+// With `[ecu.vtx_ecm.unlock]` configured, SOVDd performs the seed/key dance
+// itself on demand. The client drives NO `modes/security` interaction at all;
+// the backend unlocks reactively when the ECU rejects a gated operation with
+// NRC 0x33. The example-ecu's real XOR gate (secret 0xFF) is exercised: the
+// configured `secret_hex = "ff"` must match, or the gate rejects the key.
+// =============================================================================
+
+/// With transparent unlock configured, writing a Protected DID from the
+/// DEFAULT session — no client-side session or security setup — succeeds
+/// because the backend unlocks server-side on the ECU's NRC 0x33 and retries.
+#[tokio::test]
+#[serial_test::serial]
+async fn test_transparent_unlock_write_protected_did_succeeds() {
+    eprintln!("\n=== Transparent unlock: Protected write succeeds without client security ===");
+
+    let harness = TestHarness::new_with_options(TestHarnessOptions {
+        unlock: true,
+        ..Default::default()
+    })
+    .await
+    .expect("Failed to setup test harness");
+
+    // installation_date (0xF19D) is Protected + writable. The harness leaves us
+    // in the default session and we never touch /modes/security. A successful
+    // write returns 204 No Content (empty body), so check the status directly
+    // rather than decoding a body.
+    let url = format!(
+        "{}/vehicle/v1/components/vtx_ecm/data/installation_date",
+        harness.base_url
+    );
+    let resp = harness
+        .client
+        .put(&url)
+        .json(&json!({ "value": "20260101" }))
+        .send()
+        .await
+        .expect("PUT failed");
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+
+    assert_eq!(
+        status, 204,
+        "transparent server-side unlock should let the Protected write succeed \
+         with no client-side security step, got {}: {}",
+        status, body
+    );
+
+    eprintln!("=== Test PASSED: Protected write succeeded via transparent unlock ===");
+}
+
+/// Without an `unlock` section, the same Protected write from the default
+/// session is denied with the ECU's securityAccessDenied (NRC 0x33 → 403).
+/// This preserves today's behaviour: the op fails with the ECU's NRC.
+#[tokio::test]
+#[serial_test::serial]
+async fn test_no_unlock_write_protected_did_denied() {
+    eprintln!("\n=== No unlock configured: Protected write is denied (NRC 0x33 → 403) ===");
+
+    // Default options ⇒ unlock disabled.
+    let harness = TestHarness::new()
+        .await
+        .expect("Failed to setup test harness");
+
+    let (status, json) = harness
+        .put(
+            "/vehicle/v1/components/vtx_ecm/data/installation_date",
+            json!({ "value": "20260101" }),
+        )
+        .await
+        .expect("PUT failed");
+
+    assert_eq!(
+        status, 403,
+        "without an unlock provider the Protected write must be denied \
+         (securityAccessDenied, NRC 0x33 → 403), got {}: {}",
+        status, json
+    );
+
+    eprintln!("=== Test PASSED: Protected write correctly denied without unlock ===");
 }
 
 // =============================================================================

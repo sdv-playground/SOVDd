@@ -24,13 +24,14 @@ use uuid::Uuid;
 use crate::config::{FlashCommitConfig, UdsBackendConfig};
 use crate::error::UdsBackendError;
 use crate::output_conv;
-use crate::session::SessionManager;
+use crate::session::{SessionError, SessionManager};
 use crate::subscription::StreamManager;
 use crate::transport::{create_transport, TransportAdapter};
 use crate::uds::{
     dtc::{parse_dtc_by_status_mask_response, status_bit, Dtc},
-    link_baud_rate, ServiceIds, UdsService,
+    link_baud_rate, NegativeResponseCode, ServiceIds, UdsError, UdsService,
 };
+use crate::unlock::{provider_from_config, UnlockProvider};
 
 // =============================================================================
 // I/O Control State Tracking (tester-side bookkeeping)
@@ -77,6 +78,28 @@ struct FlashTransfer {
     abort_handle: Option<tokio::task::AbortHandle>,
 }
 
+/// Resolved transparent-unlock context for one ECU: the pluggable
+/// SecurityAccess key provider plus the security level to unlock. Built from
+/// [`crate::config::UnlockConfig`] at construction; `None` when the ECU has no
+/// `unlock` section (operations that need security then fail with the ECU's
+/// NRC — today's behaviour).
+struct TransparentUnlock {
+    provider: Arc<dyn UnlockProvider>,
+    level: u8,
+}
+
+/// True iff `err` is a UDS negative response carrying NRC 0x33
+/// (`securityAccessDenied`) — the signal that a flow needs SecurityAccess.
+fn is_security_access_denied(err: &UdsError) -> bool {
+    matches!(
+        err,
+        UdsError::NegativeResponse {
+            nrc: NegativeResponseCode::SecurityAccessDenied,
+            ..
+        }
+    )
+}
+
 /// UDS diagnostic backend
 ///
 /// Implements the DiagnosticBackend trait for ECUs accessible via UDS over CAN/ISO-TP.
@@ -113,6 +136,9 @@ pub struct UdsBackend {
     /// Last-set ControlDTCSetting (0x85) state ("on"/"off"). Write-only on
     /// the wire, so GET returns this tester-side value.
     dtc_setting_state: Arc<RwLock<String>>,
+    /// Transparent server-side SecurityAccess context, if this ECU configured
+    /// an `unlock` section. Shared into the flash task via `Arc`.
+    unlock: Option<Arc<TransparentUnlock>>,
 }
 
 /// CommunicationControl (0x28) subfunctions exposed via `modes/comm-ctrl`,
@@ -196,6 +222,26 @@ impl UdsBackend {
         // Create stream manager for periodic data
         let stream_manager = Arc::new(StreamManager::new(transport.clone(), config.clone()));
 
+        // Transparent server-side SecurityAccess (UDS 0x27), if configured.
+        // The level is taken from an explicit override, else the ECU's
+        // configured security level, else defaults to 1.
+        let unlock = match &config.unlock {
+            Some(cfg) => {
+                let provider = provider_from_config(cfg)
+                    .map_err(|e| UdsBackendError::Config(format!("unlock: {}", e)))?;
+                let level = cfg
+                    .level
+                    .or_else(|| config.sessions.security.as_ref().map(|s| s.level))
+                    .unwrap_or(1);
+                info!(
+                    algorithm = %cfg.algorithm,
+                    level, "Transparent server-side SecurityAccess enabled"
+                );
+                Some(Arc::new(TransparentUnlock { provider, level }))
+            }
+            None => None,
+        };
+
         let flash_commit_config = config.flash_commit.clone();
         let activation_state = ActivationState {
             supports_rollback: flash_commit_config.supports_rollback,
@@ -222,7 +268,65 @@ impl UdsBackend {
             flash_commit_config,
             comm_control_state: Arc::new(RwLock::new(COMM_CONTROL_DEFAULT.to_string())),
             dtc_setting_state: Arc::new(RwLock::new(DTC_SETTING_DEFAULT.to_string())),
+            unlock,
         })
+    }
+
+    /// Perform the server-side SecurityAccess (UDS 0x27) seed/key dance for
+    /// `level` using `provider`, driving the existing [`SessionManager`]
+    /// primitives (`request_security_seed` → `send_security_key`). Returns
+    /// `Ok` once unlocked — or when the ECU reports it is already unlocked via
+    /// a zero seed.
+    ///
+    /// This is an associated fn (not a `&self` method) so both the request
+    /// path and the spawned flash task can call it.
+    async fn perform_unlock(
+        session_manager: &SessionManager,
+        provider: &dyn UnlockProvider,
+        level: u8,
+    ) -> Result<(), SessionError> {
+        let seed = session_manager.request_security_seed(level).await?;
+        if seed.is_empty() {
+            // Zero seed ⇒ the ECU is already unlocked; nothing to send.
+            return Ok(());
+        }
+        let key = provider
+            .compute_key(level, &seed)
+            .map_err(|e| SessionError::SecurityAccessFailed(format!("compute key: {}", e)))?;
+        session_manager.send_security_key(level, &key).await
+    }
+
+    /// If `err` is `securityAccessDenied` (NRC 0x33) and this ECU has a
+    /// transparent unlock provider, perform the server-side seed/key dance and
+    /// return `true` (the caller should retry the operation once). Any other
+    /// error — or no configured provider — returns `false`, leaving the
+    /// original error to surface unchanged.
+    async fn unlock_on_denied(&self, err: &UdsError) -> bool {
+        let Some(unlock) = self.unlock.as_ref() else {
+            return false;
+        };
+        if !is_security_access_denied(err) {
+            return false;
+        }
+        match Self::perform_unlock(
+            &self.session_manager,
+            unlock.provider.as_ref(),
+            unlock.level,
+        )
+        .await
+        {
+            Ok(()) => {
+                info!(
+                    level = unlock.level,
+                    "Transparent server-side SecurityAccess granted"
+                );
+                true
+            }
+            Err(e) => {
+                warn!(error = %e, "Transparent server-side SecurityAccess failed");
+                false
+            }
+        }
     }
 
     /// Parse a hex DID string to u16
@@ -469,13 +573,23 @@ impl DiagnosticBackend for UdsBackend {
             "Writing raw DID"
         );
 
-        // Call UDS WriteDataByIdentifier (0x2E)
-        self.uds
-            .write_data_by_id(did, data)
-            .await
-            .map_err(crate::error::convert_uds_error)?;
-
-        Ok(())
+        // Call UDS WriteDataByIdentifier (0x2E). If the ECU rejects with NRC
+        // 0x33 (securityAccessDenied) and this ECU has a transparent unlock
+        // provider, unlock server-side and retry once — transparent to the
+        // client, which never has to drive `modes/security`.
+        match self.uds.write_data_by_id(did, data).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if self.unlock_on_denied(&e).await {
+                    self.uds
+                        .write_data_by_id(did, data)
+                        .await
+                        .map_err(crate::error::convert_uds_error)
+                } else {
+                    Err(crate::error::convert_uds_error(e))
+                }
+            }
+        }
     }
 
     async fn subscribe_data(
@@ -1462,10 +1576,20 @@ impl DiagnosticBackend for UdsBackend {
         let flash_state = self.flash_state.clone();
         let transfer_id_clone = transfer_id.clone();
         let sessions = self.config.sessions.clone();
+        let session_manager = self.session_manager.clone();
+        let unlock = self.unlock.clone();
 
         let task = tokio::spawn(async move {
-            Self::run_flash_transfer(uds, flash_state, sessions, transfer_id_clone, package_data)
-                .await
+            Self::run_flash_transfer(
+                uds,
+                flash_state,
+                sessions,
+                session_manager,
+                unlock,
+                transfer_id_clone,
+                package_data,
+            )
+            .await
         });
 
         // Store the abort handle
@@ -1913,10 +2037,13 @@ impl UdsBackend {
 
 impl UdsBackend {
     /// Internal method to run the flash transfer process
+    #[allow(clippy::too_many_arguments)]
     async fn run_flash_transfer(
         uds: UdsService,
         flash_state: Arc<RwLock<Option<FlashTransfer>>>,
         sessions: crate::config::SessionConfig,
+        session_manager: Arc<SessionManager>,
+        unlock: Option<Arc<TransparentUnlock>>,
         transfer_id: String,
         data: Vec<u8>,
     ) {
@@ -1969,6 +2096,34 @@ impl UdsBackend {
             .await
         {
             Ok(size) => size,
+            // Transparent server-side SecurityAccess: if RequestDownload is
+            // denied (NRC 0x33) and this ECU has an unlock provider, unlock and
+            // retry once. Covers classic clients that set the programming
+            // session but skip the security step.
+            Err(e) if unlock.is_some() && is_security_access_denied(&e) => {
+                let unlock = unlock.as_ref().unwrap();
+                if let Err(e) =
+                    Self::perform_unlock(&session_manager, unlock.provider.as_ref(), unlock.level)
+                        .await
+                {
+                    update_error(format!("Transparent SecurityAccess failed: {}", e));
+                    return;
+                }
+                info!(
+                    level = unlock.level,
+                    "Transparent server-side SecurityAccess granted for flash download"
+                );
+                match uds
+                    .request_download(0x00, 0x44, memory_address, &memory_size)
+                    .await
+                {
+                    Ok(size) => size,
+                    Err(e) => {
+                        update_error(format!("RequestDownload failed: {}", e));
+                        return;
+                    }
+                }
+            }
             Err(e) => {
                 update_error(format!("RequestDownload failed: {}", e));
                 return;
@@ -2039,6 +2194,7 @@ mod tests {
             service_overrides: Default::default(),
             sessions: Default::default(),
             flash_commit: Default::default(),
+            unlock: None,
         }
     }
 

@@ -33,6 +33,38 @@ pub struct UdsBackendConfig {
     /// Flash commit/rollback configuration
     #[serde(default)]
     pub flash_commit: FlashCommitConfig,
+    /// Transparent server-side SecurityAccess (UDS 0x27) configuration.
+    ///
+    /// When present, the backend performs the seed/key dance itself on demand,
+    /// so clients no longer need to drive `modes/security`. Absent ⇒ no
+    /// transparent unlock for this ECU: operations that need security fail with
+    /// the ECU's NRC (today's behaviour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlock: Option<UnlockConfig>,
+}
+
+/// Per-ECU transparent SecurityAccess (UDS 0x27) configuration.
+///
+/// The `algorithm` selects a pluggable key-derivation provider (see
+/// [`crate::unlock`]); `"xor"` is the simulation gate. `secret_hex` is the
+/// shared secret as a hex string. Example:
+///
+/// ```toml
+/// [ecu.vtx_ecm.unlock]
+/// algorithm = "xor"
+/// secret_hex = "ff"
+/// # level = 1   # optional; defaults to the ECU's security level, else 1
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnlockConfig {
+    /// Key-derivation algorithm (e.g. `"xor"`).
+    pub algorithm: String,
+    /// Shared secret as a hex string (e.g. `"ff"`, `"deadbeef"`).
+    pub secret_hex: String,
+    /// Security level to unlock. When omitted, the backend resolves it from the
+    /// ECU's configured security level (`session.security.level`), else 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<u8>,
 }
 
 /// Flash commit/rollback configuration for A/B bank firmware updates
