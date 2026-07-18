@@ -3,7 +3,6 @@
 //! Provides helpers for running integration tests against SOVD servers.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::TcpListener;
@@ -116,30 +115,6 @@ impl Drop for TestServer {
             handle.abort();
         }
     }
-}
-
-/// Trait for creating mock backends for testing
-pub trait MockBackendBuilder {
-    /// Build the mock backend
-    fn build(self) -> Arc<dyn sovd_core::DiagnosticBackend>;
-}
-
-/// Wait for a condition with timeout
-pub async fn wait_for<F, Fut>(condition: F, timeout: Duration) -> bool
-where
-    F: Fn() -> Fut,
-    Fut: std::future::Future<Output = bool>,
-{
-    let deadline = tokio::time::Instant::now() + timeout;
-
-    while tokio::time::Instant::now() < deadline {
-        if condition().await {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-
-    false
 }
 
 #[cfg(test)]

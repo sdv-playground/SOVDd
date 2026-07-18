@@ -54,6 +54,9 @@ pub struct FlashCommitConfig {
 // =============================================================================
 
 /// Transport configuration
+///
+/// There is deliberately no `Default`: a transport must always be chosen
+/// explicitly (config or code) — nothing should silently fall back to a mock.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum TransportConfig {
@@ -61,14 +64,11 @@ pub enum TransportConfig {
     SocketCan(SocketCanConfig),
     /// DoIP (Diagnostics over IP) - ISO 13400
     DoIp(DoIpConfig),
-    /// Mock transport for testing
+    /// Mock transport for testing/demo (feature `mock-transport`, opt-in).
+    /// Without the feature, a config naming `type = "mock"` fails to
+    /// deserialize with an unknown-variant error.
+    #[cfg(feature = "mock-transport")]
     Mock(MockConfig),
-}
-
-impl Default for TransportConfig {
-    fn default() -> Self {
-        Self::Mock(MockConfig::default())
-    }
 }
 
 /// SocketCAN configuration
@@ -174,7 +174,8 @@ fn default_doip_keepalive() -> u64 {
     30
 }
 
-/// Mock transport configuration
+/// Mock transport configuration (feature `mock-transport`)
+#[cfg(feature = "mock-transport")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MockConfig {
     /// Simulated latency in milliseconds

@@ -360,9 +360,9 @@ pub struct FlashProgress {
 /// The core trait that all diagnostic backends implement.
 ///
 /// This abstraction allows the same SOVD REST API to be served by different backends:
-/// - `UdsBackend` - For traditional ECUs via CAN/UDS
-/// - `HpcBackend` - For HPC nodes with containers, logs, metrics
-/// - `ContainerBackend` - For individual containers as sub-entities
+/// - `UdsBackend` (sovd-uds) - traditional ECUs via CAN/ISO-TP or DoIP
+/// - `GatewayBackend` (sovd-gateway) - federates child backends behind one entity
+/// - `SovdProxyBackend` (sovd-proxy) - forwards to a remote SOVD server over HTTP
 ///
 /// Backends can leave default implementations for features they don't support.
 #[async_trait]

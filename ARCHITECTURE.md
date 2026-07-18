@@ -110,11 +110,11 @@ graph TD
     eapp --> proxy
     eapp --> client
     eapp --> uds
-    eapp --> eecu
 ```
 
-Notable edges: `sovd-api` depends on both `sovd-uds` **and** `sovd-client`; `example-app` **embeds**
-`example-ecu` (it can run a full app→ECU stack in one process).
+Notable edges: `sovd-api` depends on both `sovd-uds` **and** `sovd-client`; `example-app` does **not**
+link `example-ecu` — it proxies an upstream SOVD server over HTTP (in the e2e stack that server is a
+`sovdd` fronting `example-ecu` as a separate process).
 
 ---
 
@@ -184,9 +184,9 @@ classDiagram
     ManagedEcuBackend --> SovdProxyBackend : inner ECU
 ```
 
-> The trait doc comment names `HpcBackend` and `ContainerBackend` as illustrative future backends —
-> these are **not implemented in this repo**. External systems implement the trait to expose their
-> own components (that is the intended integration seam).
+> The trait is an open integration seam: external systems implement it to expose their own
+> components (e.g. an HPC node or container runtime) — the in-repo implementations are the three
+> named above.
 
 ---
 
@@ -212,8 +212,10 @@ graph TD
 ```
 
 - **Transports** (`transport/`): `socketcan/` (ISO-TP framing + a `scanner.rs` for CAN auto-discovery),
-  `doip/` (TCP, ISO 13400, incl. `discovery.rs`), `mock.rs`. **Feature-gated:** `default = ["socketcan"]`
-  and **DoIP is opt-in** (`crates/sovd-uds/Cargo.toml`); socketcan crates are `cfg(target_os = "linux")`.
+  `doip/` (TCP, ISO 13400, incl. `discovery.rs`), `mock.rs`. **All feature-gated:** `default = ["socketcan"]`,
+  **DoIP is opt-in**, and **mock is opt-in** (`mock-transport` — enabled by `sovdd` for the demo config
+  and by sovd-uds's own tests via a self dev-dependency; without it, `type = "mock"` fails to
+  deserialize and `TransportConfig` has no `Mock` variant). Socketcan crates are `cfg(target_os = "linux")`.
 - **Sessions** (`session.rs`): auto-sends TesterPresent (0x3E) every ~2 s in non-default sessions;
   `notify_ecu_reset()` records that an ECU reverts to default session + re-locks security after 0x11.
 - **Subscriptions** (`subscription.rs`): `StreamManager` polls DIDs periodically to emulate UDS 0x2A.
@@ -475,8 +477,9 @@ tokens follow ISO Table-18; the `vendor()` constructor stamps `error_code = "ven
 ## 12. Configuration & bootstrap (`sovdd`)
 
 `main.rs` parses one positional TOML config path + repeatable `-d/--did-definitions <path>`. With **no
-config** it falls back to mock backends on port **18081**; the shipped sample configs use **9080**
-(`config/sovd.toml`), and the gateway/test configs use 18082-18092.
+config** it falls back to the shipped demo config `config/sovd.toml` (mock transport, port **9080**,
+resolved relative to the current directory) with a warning, and errors out if that file is missing;
+the gateway/test configs use 18082-18092.
 
 Recognized TOML sections: `[server]` (`port`); `[server.tls]` (certificate + private key → in-process
 rustls termination); `[server.auth]` (§13); `[transport]` (`socketcan`|`mock` + isotp);
@@ -514,7 +517,7 @@ flowchart TD
     SCOPE -- denied --> E401
 ```
 
-- **`AuthMode`**: `Disabled` (default — open surface, so dev/sim and the no-config mock server work
+- **`AuthMode`**: `Disabled` (default — open surface, so dev/sim and the no-config demo work
   unchanged), `Static` (shared bearer token, dev/CI), `Oidc` (JWT against one or more OIDC issuers'
   JWKS), `WorkshopCa` (offline path: `x5c`-chain JWTs validated against a **pinned** workshop CA —
   per-link signature verify, CA:TRUE, validity, `aud`/`exp`/`nbf`, ES256 pinned, bounded chain length).
@@ -548,8 +551,8 @@ SOVDd does **not** hold UDS security secrets:
 
 - **`sovd-client`** — typed async HTTP client: `SovdClient` (read/write/faults/ops/modes/status,
   optional bearer auth), `FlashClient` (routes through `/updates` internally; streaming `upload_part`),
-  SSE `Subscription`, and `testing::TestServer` for in-process tests. An optional `conversion` feature
-  pulls in `sovd-conv`.
+  SSE `Subscription`, and `testing::TestServer` for in-process tests (feature `test-util`, which is
+  what pulls in axum). An optional `conversion` feature pulls in `sovd-conv`.
 - **`sovd-cli`** — clap CLI over `sovd-client` for manual diagnostics.
 
 ---

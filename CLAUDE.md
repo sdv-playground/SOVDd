@@ -63,8 +63,8 @@ sovd-core (foundation — DiagnosticBackend trait, models, errors)
 sovdd (server binary)
   ├── sovd-api + sovd-uds + sovd-gateway + sovd-conv + sovd-proxy
 
-example-app (app entity binary — embeds example-ecu for a full app→ECU stack in one process)
-  ├── sovd-api + sovd-proxy + sovd-core + sovd-client + sovd-uds + example-ecu
+example-app (app entity binary — proxies an upstream SOVD server, e.g. a sovdd fronting example-ecu)
+  ├── sovd-api + sovd-proxy + sovd-core + sovd-client + sovd-uds
 
 sovd-cli → sovd-client
 sovd-tests → sovd-api + sovd-uds + sovd-gateway + sovd-conv + sovd-client
@@ -88,7 +88,7 @@ Defined in `crates/sovd-core/src/backend.rs`. ~45 async methods grouped by domai
 - **Modes:** `get/set_session_mode`, `get/set_security_mode`, `get/set_link_mode`
 - **Entities:** `list_sub_entities`, `get_sub_entity`
 
-Three library implementations — `UdsBackend` (sovd-uds), `GatewayBackend` (sovd-gateway), `SovdProxyBackend` (sovd-proxy) — plus the reference app-entity `ManagedEcuBackend`/`ExampleAppBackend` (example-app). The API layer (`sovd-api`) dispatches to whichever backend is configured and never knows the concrete type. (The trait doc-comment also names `HpcBackend`/`ContainerBackend` — illustrative, not implemented.)
+Three library implementations — `UdsBackend` (sovd-uds), `GatewayBackend` (sovd-gateway), `SovdProxyBackend` (sovd-proxy) — plus the reference app-entity `ManagedEcuBackend`/`ExampleAppBackend` (example-app). The API layer (`sovd-api`) dispatches to whichever backend is configured and never knows the concrete type.
 
 ### API Layer (sovd-api)
 
@@ -97,7 +97,7 @@ Three library implementations — `UdsBackend` (sovd-uds), `GatewayBackend` (sov
 ### UDS Backend (sovd-uds)
 
 `crates/sovd-uds/src/backend.rs` (~1,900 lines) is the main implementation. Key internals:
-- **Transport abstraction:** `TransportAdapter` trait in `transport/mod.rs` with three impls: `socketcan/` (ISO-TP framing), `doip/` (TCP/TLS, ISO 13400), `mock.rs`
+- **Transport abstraction:** `TransportAdapter` trait in `transport/mod.rs` with three impls, each feature-gated: `socketcan/` (ISO-TP framing; default feature), `doip/` (TCP/TLS, ISO 13400), `mock.rs` (`mock-transport`, opt-in — enabled by sovdd for the demo config and by sovd-uds's own tests via a self dev-dependency)
 - **Session management:** `session.rs` — auto-sends tester-present (0x3E) every 2s in non-default sessions; `notify_ecu_reset()` tracks that ECU reverts to default session after reset (0x11)
 - **Subscriptions:** `subscription.rs` — `StreamManager` polls DIDs periodically to emulate UDS 0x2A
 - **UDS services:** Each UDS SID (0x10, 0x11, 0x19, 0x22, 0x27, 0x2A, 0x2E, 0x2F, 0x31, 0x34, 0x36, 0x37, 0x3E, 0x87) is implemented in the backend
@@ -140,7 +140,7 @@ Raw ECU bytes ↔ physical values via YAML definitions in `config/did-definition
 ### Configuration
 
 Server config is TOML (`config/*.toml`). DID definitions are YAML (`config/did-definitions/`). Key configs:
-- `config/sovd.toml` — Mock transport (no hardware needed, good for development)
+- `config/sovd.toml` — Mock transport demo (no hardware needed, good for development). Also the no-config fallback: a bare `sovdd` run from the repo root serves this file (with a warning) and errors out if it is missing.
 - `config/sovd-socketcan.toml` — SocketCAN on vcan0
 - `config/gateway-socketcan.toml` — Multi-ECU gateway
 

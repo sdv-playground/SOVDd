@@ -1,23 +1,26 @@
 //! Transport layer for UDS communication
 //!
 //! This module provides transport adapters for communicating with ECUs:
-//! - SocketCAN adapter for CAN/ISO-TP (Linux only)
-//! - DoIP adapter for Diagnostics over IP (ISO 13400)
-//! - Mock adapter for testing
+//! - SocketCAN adapter for CAN/ISO-TP (Linux only, feature `socketcan`)
+//! - DoIP adapter for Diagnostics over IP (ISO 13400, feature `doip`)
+//! - Mock adapter for testing (feature `mock-transport`, opt-in)
 //!
 //! # Example
 //!
 //! ```ignore
 //! use sovd_uds::transport::{create_transport, TransportAdapter};
-//! use sovd_uds::config::TransportConfig;
+//! use sovd_uds::config::{MockConfig, TransportConfig};
 //!
-//! let config = TransportConfig::Mock(Default::default());
+//! // Requires the `mock-transport` feature.
+//! let config = TransportConfig::Mock(MockConfig::default());
 //! let transport = create_transport(&config).await?;
 //! let response = transport.send_receive(&[0x22, 0xF1, 0x90], Duration::from_secs(5)).await?;
 //! ```
 
 mod adapter;
 pub mod error;
+
+#[cfg(feature = "mock-transport")]
 pub mod mock;
 
 #[cfg(all(target_os = "linux", feature = "socketcan"))]
@@ -56,6 +59,7 @@ pub async fn create_transport(
         TransportConfig::DoIp(_) => Err(TransportError::Unsupported(
             "DoIP requires the 'doip' feature".to_string(),
         )),
+        #[cfg(feature = "mock-transport")]
         TransportConfig::Mock(cfg) => {
             let adapter = mock::MockTransportAdapter::new(cfg);
             Ok(Arc::new(adapter))

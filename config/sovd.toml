@@ -1,4 +1,8 @@
-# SOVD Server Configuration
+# SOVD Server Configuration — mock transport demo (no hardware needed)
+#
+# This file is also the no-config fallback: a bare `sovdd` (run from the repo
+# root) serves exactly this config. The [ecu.engine_ecu] section below is the
+# demo ECU that used to be hardcoded in sovdd.
 
 [server]
 host = "0.0.0.0"
@@ -68,3 +72,60 @@ fast_hz = 10
 
 [ecu.vtx_ecm.parameters]
 config_file = "parameters/vtx_ecm.toml"
+
+# ECU Configuration: demo Engine ECU
+# The demo entities the no-config server exposes (previously hardcoded in
+# sovdd's create_mock_backends). Rides the shared mock [transport] above.
+[ecu.engine_ecu]
+id = "engine_ecu"
+name = "Engine Control Module"
+description = "Main engine ECU (mock)"
+
+[[ecu.engine_ecu.operations]]
+id = "self_test"
+name = "Run Self Test"
+rid = "0x0203"
+description = "Execute ECU self-test routine"
+security_level = 0
+
+[[ecu.engine_ecu.outputs]]
+id = "throttle_position"
+name = "Throttle Position"
+ioid = "0xF000"
+default_value = "00"
+description = "Electronic throttle body position control"
+security_level = 1
+data_type = "uint8"
+unit = "%"
+scale = 0.392157
+offset = 0.0
+min = 0.0
+max = 100.0
+
+[[ecu.engine_ecu.outputs]]
+id = "fuel_injector_1"
+name = "Fuel Injector #1"
+ioid = "0xF001"
+default_value = "00"
+description = "Cylinder 1 fuel injector actuation"
+security_level = 1
+
+[[ecu.engine_ecu.outputs]]
+id = "check_engine_light"
+name = "Check Engine Light (MIL)"
+ioid = "0xF010"
+default_value = "00"
+description = "Malfunction Indicator Lamp control"
+security_level = 0
+data_type = "uint8"
+allowed = ["off", "on"]
+
+[[ecu.engine_ecu.outputs]]
+id = "cooling_fan"
+name = "Cooling Fan Relay"
+ioid = "0xF020"
+default_value = "00"
+description = "Engine cooling fan relay control"
+security_level = 0
+data_type = "uint8"
+allowed = ["off", "on"]

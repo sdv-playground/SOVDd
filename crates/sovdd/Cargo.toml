@@ -8,7 +8,9 @@ description = "SOVD server daemon - REST API gateway for vehicle diagnostics"
 [dependencies]
 sovd-core.workspace = true
 sovd-api.workspace = true
-sovd-uds.workspace = true
+# mock-transport: sovdd legitimately serves the mock demo config
+# (config/sovd.toml) and configs with `type = "mock"`.
+sovd-uds = { workspace = true, features = ["mock-transport"] }
 sovd-gateway.workspace = true
 sovd-conv.workspace = true
 sovd-proxy.workspace = true

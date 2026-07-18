@@ -38,6 +38,6 @@ p256 = { version = "0.13", features = ["ecdsa"] }
 base64 = "0.22"
 
 [dev-dependencies]
-sovd-client.workspace = true
+sovd-client = { workspace = true, features = ["test-util"] }
 tokio-test.workspace = true
 reqwest = { workspace = true }

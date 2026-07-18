@@ -49,9 +49,13 @@
 //!
 //! # Testing
 //!
-//! The `testing` module provides utilities for integration testing:
+//! The `testing` module (behind the `test-util` feature) provides utilities
+//! for integration testing:
 //!
 //! ```rust,ignore
+//! // Enable the "test-util" feature in [dev-dependencies]:
+//! // sovd-client = { version = "...", features = ["test-util"] }
+//!
 //! use sovd_client::testing::TestServer;
 //! use sovd_api::{create_router, AppState};
 //!
@@ -63,6 +67,7 @@ mod client;
 mod error;
 pub mod flash;
 pub mod streaming;
+#[cfg(feature = "test-util")]
 pub mod testing;
 mod types;
 

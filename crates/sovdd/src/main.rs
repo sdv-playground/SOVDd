@@ -9,7 +9,9 @@
 //!   --did-definitions <path>  Load DID definitions from file or directory
 //!                             Supports .yaml/.json files (sovd-conv format)
 //!
-//! If no config file is provided, uses mock transport for demo purposes.
+//! If no config file is provided, falls back to the repo's demo config
+//! (`config/sovd.toml`, mock transport) — resolved relative to the current
+//! directory, exactly like a config path given on the command line.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -28,6 +30,11 @@ use sovd_uds::{
     DiagnosticBackend, UdsBackend,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+/// Demo config served when no config file is given on the command line.
+/// Resolved relative to the current directory (like any config path argument),
+/// so a bare `sovdd` from the repo root serves the mock demo ECU.
+const DEMO_CONFIG_PATH: &str = "config/sovd.toml";
 
 /// Parsed command-line arguments
 struct Args {
@@ -88,7 +95,8 @@ Options:
   -h, --help                    Print this help message
 
 Examples:
-  # Run with mock transport
+  # No config: serve the demo config (config/sovd.toml, mock transport).
+  # Run from the repo root so the demo config file resolves.
   sovdd
 
   # Run with config file
@@ -131,15 +139,33 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Loaded {} DID definitions from files", did_count);
     }
 
-    // Load backend configuration (also registers inline params in DidStore)
-    let (backends, port, output_configs) = if let Some(ref path) = args.config_path {
-        tracing::info!("Loading config from: {}", path);
-        load_config_file(path, &did_store).await?
-    } else {
-        tracing::info!("No config file provided, using mock transport");
-        let (backends, output_configs) = create_mock_backends().await?;
-        (backends, 18081, output_configs)
+    // Resolve the effective config path. With no argument, fall back to the
+    // repo's demo config (mock transport) so a bare `sovdd` keeps serving the
+    // demo ECU.
+    let config_path = match args.config_path {
+        Some(path) => {
+            tracing::info!("Loading config from: {}", path);
+            path
+        }
+        None => {
+            if !Path::new(DEMO_CONFIG_PATH).is_file() {
+                anyhow::bail!(
+                    "no config file given, and the demo config '{}' was not found in the \
+                     current directory. Run from the repo root to serve the demo, or pass a \
+                     config file: sovdd <config.toml> (see --help)",
+                    DEMO_CONFIG_PATH
+                );
+            }
+            tracing::warn!(
+                "no config given — serving demo config from {}",
+                DEMO_CONFIG_PATH
+            );
+            DEMO_CONFIG_PATH.to_string()
+        }
     };
+
+    // Load backend configuration (also registers inline params in DidStore)
+    let (backends, port, output_configs) = load_config_file(&config_path, &did_store).await?;
 
     let final_count = did_store.len();
     if final_count > did_count {
@@ -158,10 +184,7 @@ async fn main() -> anyhow::Result<()> {
     // 17978-3 C-030/C-032). `[server.auth]` selects disabled (default —
     // open surface for dev/mock) / static (dev token) / oidc (validate
     // JWTs against trusted issuers' JWKS). See tasks/sovdd-auth-slice.md.
-    let auth_config = match args.config_path {
-        Some(ref path) => load_auth_config(path)?,
-        None => AuthConfig::default(),
-    };
+    let auth_config = load_auth_config(&config_path)?;
     let allow_insecure_transport = auth_config.allow_insecure_transport;
     let auth = AuthContext::from_config(auth_config)
         .await
@@ -187,10 +210,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Serve over TLS when `[server.tls]` is configured (rustls/ring), else
     // plain HTTP (dev/sim, or when TLS is terminated by a fronting proxy).
-    let tls_config = match args.config_path {
-        Some(ref path) => load_tls_config(path)?,
-        None => None,
-    };
+    let tls_config = load_tls_config(&config_path)?;
     // Don't serve authenticated traffic over plaintext by accident — bearer
     // tokens must not cross the wire in cleartext.
     if auth_enabled && tls_config.is_none() {
@@ -1290,104 +1310,4 @@ fn register_discovered_ecu_dids(
             did_store.register(did, def);
         }
     }
-}
-
-/// Create mock backends for demo/testing
-async fn create_mock_backends() -> anyhow::Result<(
-    HashMap<String, Arc<dyn DiagnosticBackend>>,
-    HashMap<String, Vec<OutputConfig>>,
-)> {
-    use sovd_uds::config::DataType;
-
-    let mock_outputs = vec![
-        OutputConfig {
-            id: "throttle_position".to_string(),
-            name: "Throttle Position".to_string(),
-            ioid: "0xF000".to_string(),
-            default_value: "00".to_string(),
-            description: Some("Electronic throttle body position control".to_string()),
-            security_level: 1,
-            data_type: Some(DataType::Uint8),
-            unit: Some("%".to_string()),
-            scale: 0.392157,
-            offset: 0.0,
-            min: Some(0.0),
-            max: Some(100.0),
-            allowed: Vec::new(),
-        },
-        OutputConfig {
-            id: "fuel_injector_1".to_string(),
-            name: "Fuel Injector #1".to_string(),
-            ioid: "0xF001".to_string(),
-            default_value: "00".to_string(),
-            description: Some("Cylinder 1 fuel injector actuation".to_string()),
-            security_level: 1,
-            data_type: None,
-            unit: None,
-            scale: 1.0,
-            offset: 0.0,
-            min: None,
-            max: None,
-            allowed: Vec::new(),
-        },
-        OutputConfig {
-            id: "check_engine_light".to_string(),
-            name: "Check Engine Light (MIL)".to_string(),
-            ioid: "0xF010".to_string(),
-            default_value: "00".to_string(),
-            description: Some("Malfunction Indicator Lamp control".to_string()),
-            security_level: 0,
-            data_type: Some(DataType::Uint8),
-            unit: None,
-            scale: 1.0,
-            offset: 0.0,
-            min: None,
-            max: None,
-            allowed: vec!["off".to_string(), "on".to_string()],
-        },
-        OutputConfig {
-            id: "cooling_fan".to_string(),
-            name: "Cooling Fan Relay".to_string(),
-            ioid: "0xF020".to_string(),
-            default_value: "00".to_string(),
-            description: Some("Engine cooling fan relay control".to_string()),
-            security_level: 0,
-            data_type: Some(DataType::Uint8),
-            unit: None,
-            scale: 1.0,
-            offset: 0.0,
-            min: None,
-            max: None,
-            allowed: vec!["off".to_string(), "on".to_string()],
-        },
-    ];
-
-    let ecu_config = UdsBackendConfig {
-        id: "engine_ecu".to_string(),
-        name: "Engine Control Module".to_string(),
-        description: Some("Main engine ECU (mock)".to_string()),
-        transport: TransportConfig::Mock(MockConfig { latency_ms: 10 }),
-        operations: vec![OperationConfig {
-            id: "self_test".to_string(),
-            name: "Run Self Test".to_string(),
-            rid: "0x0203".to_string(),
-            description: Some("Execute ECU self-test routine".to_string()),
-            security_level: 0,
-        }],
-        outputs: mock_outputs.clone(),
-        service_overrides: Default::default(),
-        sessions: SessionConfig::default(),
-        flash_commit: Default::default(),
-    };
-
-    let backend = UdsBackend::new(ecu_config).await?;
-    let backend: Arc<dyn DiagnosticBackend> = Arc::new(backend);
-
-    let mut backends = HashMap::new();
-    backends.insert("engine_ecu".to_string(), backend);
-
-    let mut output_configs = HashMap::new();
-    output_configs.insert("engine_ecu".to_string(), mock_outputs);
-
-    Ok((backends, output_configs))
 }

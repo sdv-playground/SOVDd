@@ -36,13 +36,16 @@ uuid = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 
-# Server for testing module
-axum = { workspace = true }
+# Server for the `testing` module (only compiled with the `test-util` feature)
+axum = { workspace = true, optional = true }
 
 [features]
 default = []
 # Enable client-side DID conversion (re-exports sovd-conv)
 conversion = ["sovd-conv"]
+# Test utilities (`testing::TestServer`) — pulls in axum to host the router
+# under test. Enable from consumers' [dev-dependencies] only.
+test-util = ["dep:axum"]
 
 [dev-dependencies]
 tokio-test = { workspace = true }
@@ -50,3 +53,6 @@ sovd-api = { workspace = true }
 sovd-conv = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+# Self dev-dependency: turns on `test-util` for this crate's own tests
+# (tests/integration_tests.rs) without leaking it to downstream builds.
+sovd-client = { path = ".", features = ["test-util"] }

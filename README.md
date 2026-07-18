@@ -56,15 +56,22 @@ cargo build --release
 ### Run with Mock Transport (no hardware)
 
 ```bash
+# Serves the demo config config/sovd.toml (mock transport). With no config
+# argument, sovdd falls back to that same file — run it from the repo root.
 ./target/release/sovdd config/sovd.toml
+# equivalent demo shortcut:
+./target/release/sovdd
 ```
 
 ```bash
 # List ECUs
 curl http://localhost:9080/vehicle/v1/components
 
-# Read a parameter
-curl http://localhost:9080/vehicle/v1/components/vtx_ecm/data/engine_rpm
+# Read a parameter (VIN via its standard DID)
+curl http://localhost:9080/vehicle/v1/components/engine_ecu/data/vin
+
+# List the demo ECU's operations (self-test + I/O controls)
+curl http://localhost:9080/vehicle/v1/components/engine_ecu/operations
 ```
 
 ### Run with SocketCAN
@@ -96,10 +103,10 @@ sudo ip link set up vcan0
 sovd-cli --url http://localhost:9080 components
 
 # Read data
-sovd-cli --url http://localhost:9080 read vtx_ecm engine_rpm
+sovd-cli --url http://localhost:9080 read engine_ecu vin
 
 # Monitor in real-time
-sovd-cli --url http://localhost:9080 monitor vtx_ecm engine_rpm coolant_temp --rate 10
+sovd-cli --url http://localhost:9080 monitor engine_ecu vin hw_number --rate 10
 ```
 
 ## Configuration
@@ -108,7 +115,7 @@ Server config is TOML, DID definitions are YAML.
 
 | Config | Description |
 |--------|-------------|
-| `config/sovd.toml` | Mock transport (no hardware) |
+| `config/sovd.toml` | Mock transport demo (no hardware; also the no-config fallback) |
 | `config/sovd-socketcan.toml` | Single ECU on vcan0 |
 | `config/gateway-socketcan.toml` | Multi-ECU gateway |
 | `config/did-definitions/*.yaml` | DID encoding/decoding rules |

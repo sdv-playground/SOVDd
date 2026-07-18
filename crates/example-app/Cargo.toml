@@ -23,12 +23,13 @@ serde = { workspace = true }
 serde_json.workspace = true
 toml.workspace = true
 sovd-uds.workspace = true
-example-ecu.workspace = true
 hex.workspace = true
 
 [dev-dependencies]
 reqwest.workspace = true
 tokio-test.workspace = true
+# tests/e2e_test.rs hosts routers in-process via sovd-client's TestServer
+sovd-client = { workspace = true, features = ["test-util"] }
 
 [[bin]]
 name = "example-app"

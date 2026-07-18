@@ -1,8 +1,8 @@
 //! sovd-gateway - Federated SOVD backend aggregation
 //!
 //! This crate provides the GatewayBackend that aggregates multiple
-//! diagnostic backends (UDS ECUs, HPC nodes, etc.) into a unified
-//! SOVD interface.
+//! diagnostic backends (UDS ECUs, proxied SOVD servers, nested gateways)
+//! into a unified SOVD interface.
 //!
 //! # Architecture
 //!
@@ -20,10 +20,10 @@
 //! │              ┌───────────────┼───────────────┐                  │
 //! │              │               │               │                  │
 //! │              ▼               ▼               ▼                  │
-//! │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐      │
-//! │  │  UdsBackend   │  │  UdsBackend   │  │  HpcBackend   │      │
-//! │  │  (Engine ECU) │  │  (Trans ECU)  │  │  (Compute)    │      │
-//! │  └───────────────┘  └───────────────┘  └───────────────┘      │
+//! │  ┌───────────────┐  ┌───────────────┐  ┌────────────────────┐ │
+//! │  │  UdsBackend   │  │  UdsBackend   │  │  SovdProxyBackend  │ │
+//! │  │  (Engine ECU) │  │  (Trans ECU)  │  │  (Supplier app)    │ │
+//! │  └───────────────┘  └───────────────┘  └────────────────────┘ │
 //! │                                                                  │
 //! └──────────────────────────────────────────────────────────────────┘
 //! ```

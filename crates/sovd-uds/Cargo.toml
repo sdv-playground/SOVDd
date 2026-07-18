@@ -36,6 +36,14 @@ tokio-socketcan-isotp = { version = "0.2", optional = true }
 default = ["socketcan"]
 socketcan = ["dep:socketcan", "dep:socketcan-isotp", "dep:tokio-socketcan-isotp"]
 doip = ["dep:doip-definitions", "dep:doip-sockets"]
+# Mock transport adapter (testing/demo). Deliberately NOT a default feature —
+# production consumers must opt in explicitly.
+mock-transport = []
+
+[dev-dependencies]
+# Self dev-dependency: turns on `mock-transport` for this crate's own unit
+# tests (backend.rs/error.rs test modules) without enabling it downstream.
+sovd-uds = { path = ".", features = ["mock-transport"] }
 
 [lib]
 name = "sovd_uds"

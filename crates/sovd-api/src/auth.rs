@@ -59,7 +59,8 @@ pub struct AuthConfig {
 #[serde(rename_all = "lowercase")]
 pub enum AuthMode {
     /// No authentication — the surface is open. Default, so dev/sim and the
-    /// no-config mock server keep working unchanged.
+    /// no-config demo (sovdd falling back to the repo's demo config,
+    /// `config/sovd.toml`) keep working unchanged.
     #[default]
     Disabled,
     /// Single shared bearer token compared verbatim. Dev/CI only.
