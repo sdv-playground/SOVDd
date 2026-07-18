@@ -1646,6 +1646,111 @@ async fn test_no_unlock_write_protected_did_denied() {
     eprintln!("=== Test PASSED: Protected write correctly denied without unlock ===");
 }
 
+/// Proactive transparent unlock on the tester-side pre-checked 0x2F path:
+/// `control_output` refuses a security-gated output BEFORE anything hits the
+/// wire (so no NRC 0x33 ever surfaces to react to). With unlock configured,
+/// the backend now unlocks proactively at the pre-check. relay_2 (0xF003,
+/// security_level 1) is driven from the DEFAULT session with NO client-side
+/// modes/session or modes/security interaction at all — the example-ecu 0x2F
+/// handler gates on security only, so the transparent unlock is the whole
+/// story. The real XOR gate (secret 0xFF) is exercised.
+///
+/// The unconfigured counterpart stays covered by
+/// `test_io_control_security_required` (denied when no provider).
+#[tokio::test]
+#[serial_test::serial]
+async fn test_transparent_unlock_io_control_succeeds() {
+    eprintln!("\n=== Transparent unlock: secured IO control succeeds without client security ===");
+
+    let harness = TestHarness::new_with_options(TestHarnessOptions {
+        unlock: true,
+        ..Default::default()
+    })
+    .await
+    .expect("Failed to setup test harness");
+    let client = harness.sovd_client();
+
+    let result = client
+        .control_output(
+            "vtx_ecm",
+            "relay_2",
+            "short_term_adjust",
+            Some(serde_json::json!("on")),
+        )
+        .await
+        .expect("secured IO control should succeed via proactive transparent unlock");
+
+    assert!(
+        result.success,
+        "secured IO control should report success, got {:?}",
+        result
+    );
+    assert_eq!(result.action, "short_term_adjust");
+
+    eprintln!("=== Test PASSED: secured IO control succeeded via transparent unlock ===");
+}
+
+/// Proactive transparent unlock on the tester-side pre-checked 0x31 path:
+/// erase_memory (0xFF00, security_level 1) additionally requires the
+/// programming session in example-ecu — session control is a modes concern
+/// the unlock seam must NOT absorb, so the test enters it via the normal
+/// modes path. It then drives NO security interaction whatsoever: the
+/// pre-check that used to fail with SecurityRequired now unlocks server-side
+/// and the routine completes against the real XOR gate.
+///
+/// The unconfigured counterpart stays covered by
+/// `test_routine_security_required` (execution Failed when no provider).
+#[tokio::test]
+#[serial_test::serial]
+async fn test_transparent_unlock_routine_succeeds() {
+    eprintln!("\n=== Transparent unlock: secured routine succeeds without client security ===");
+
+    let harness = TestHarness::new_with_options(TestHarnessOptions {
+        unlock: true,
+        ..Default::default()
+    })
+    .await
+    .expect("Failed to setup test harness");
+    let client = harness.sovd_client();
+
+    // Session setup stays with the client (normal modes path)…
+    client
+        .set_session("vtx_ecm", sovd_client::SessionType::Programming)
+        .await
+        .expect("set_session programming failed");
+
+    // …but security is never touched by the client.
+    let started = client
+        .start_operation_execution("vtx_ecm", "erase_memory", None)
+        .await
+        .expect("start_operation_execution should be accepted (202)");
+
+    let mut result = client
+        .get_operation_execution("vtx_ecm", "erase_memory", &started.execution_id)
+        .await
+        .expect("get_operation_execution failed");
+    for _ in 0..50 {
+        if result.status != sovd_client::OperationStatus::Running {
+            break;
+        }
+        sleep(Duration::from_millis(20)).await;
+        result = client
+            .get_operation_execution("vtx_ecm", "erase_memory", &started.execution_id)
+            .await
+            .expect("get_operation_execution failed");
+    }
+
+    assert_eq!(
+        result.status,
+        sovd_client::OperationStatus::Completed,
+        "secured routine should complete via proactive transparent unlock, got {} (error: {:?})",
+        result.status,
+        result.error
+    );
+
+    eprintln!("=== Test PASSED: secured routine succeeded via transparent unlock ===");
+}
+
 // =============================================================================
 // modes/comm-ctrl (UDS 0x28) + modes/dtcsetting (UDS 0x85)
 // ISO 17978-3 §8.3.4/§8.3.5 + Table 343 (C-130/C-135) — drives the real

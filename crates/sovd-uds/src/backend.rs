@@ -329,6 +329,37 @@ impl UdsBackend {
         }
     }
 
+    /// Proactive counterpart to [`Self::unlock_on_denied`] for operations that
+    /// enforce security with a tester-side pre-check (RoutineControl 0x31 via
+    /// `start_operation`, IOControl 0x2F via `control_output`) and therefore
+    /// never surface NRC 0x33 from the wire. No-op when `level` is 0 or the
+    /// session is already unlocked. Otherwise, if this ECU has a transparent
+    /// unlock provider, performs the server-side seed/key dance at `level` —
+    /// the operation's own required level, which takes precedence over the
+    /// configured default — then re-checks. Returns `SecurityRequired(level)`
+    /// when no provider is configured or the unlock did not leave the session
+    /// unlocked (today's behaviour for unprovisioned ECUs).
+    async fn ensure_unlocked_for(&self, level: u8) -> BackendResult<()> {
+        if level == 0 || self.session_manager.security_state().unlocked {
+            return Ok(());
+        }
+        if let Some(unlock) = self.unlock.as_ref() {
+            match Self::perform_unlock(&self.session_manager, unlock.provider.as_ref(), level).await
+            {
+                Ok(()) => info!(
+                    level,
+                    "Transparent server-side SecurityAccess granted (proactive)"
+                ),
+                Err(e) => warn!(error = %e, "Transparent server-side SecurityAccess failed"),
+            }
+        }
+        if self.session_manager.security_state().unlocked {
+            Ok(())
+        } else {
+            Err(BackendError::SecurityRequired(level))
+        }
+    }
+
     /// Parse a hex DID string to u16
     fn parse_did(did_str: &str) -> Option<u16> {
         let cleaned = did_str.trim_start_matches("0x").trim_start_matches("0X");
@@ -770,13 +801,11 @@ impl DiagnosticBackend for UdsBackend {
             .find(|o| o.id == operation_id)
             .ok_or_else(|| BackendError::OperationNotFound(operation_id.to_string()))?;
 
-        // Check security level
-        if op.security_level > 0 {
-            let security_state = self.session_manager.security_state();
-            if !security_state.unlocked {
-                return Err(BackendError::SecurityRequired(op.security_level));
-            }
-        }
+        // Security pre-check with proactive transparent unlock: a locked
+        // session never reaches the wire here, so the reactive NRC-0x33 seam
+        // cannot fire — unlock server-side instead when a provider is
+        // configured, else SecurityRequired as before.
+        self.ensure_unlocked_for(op.security_level).await?;
 
         // Parse routine ID
         let rid = Self::parse_rid(&op.rid).map_err(|e| BackendError::Protocol(e.to_string()))?;
@@ -938,13 +967,11 @@ impl DiagnosticBackend for UdsBackend {
             .find(|o| o.id == output_id)
             .ok_or_else(|| BackendError::OutputNotFound(output_id.to_string()))?;
 
-        // Check security level
-        if output.security_level > 0 {
-            let security_state = self.session_manager.security_state();
-            if !security_state.unlocked {
-                return Err(BackendError::SecurityRequired(output.security_level));
-            }
-        }
+        // Security pre-check with proactive transparent unlock: a locked
+        // session never reaches the wire here, so the reactive NRC-0x33 seam
+        // cannot fire — unlock server-side instead when a provider is
+        // configured, else SecurityRequired as before.
+        self.ensure_unlocked_for(output.security_level).await?;
 
         let ioid =
             Self::parse_ioid(&output.ioid).map_err(|e| BackendError::Protocol(e.to_string()))?;
@@ -2181,7 +2208,7 @@ impl UdsBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{MockConfig, TransportConfig};
+    use crate::config::{MockConfig, TransportConfig, UnlockConfig};
 
     fn test_config() -> UdsBackendConfig {
         UdsBackendConfig {
@@ -2318,6 +2345,55 @@ mod tests {
         assert!(
             matches!(err, BackendError::InvalidRequest(_)),
             "unknown dtcsetting value must be InvalidRequest (→400), got {err:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // ensure_unlocked_for — proactive transparent unlock at the tester-side
+    // pre-checks (0x31 start_operation / 0x2F control_output)
+    // -------------------------------------------------------------------------
+
+    fn test_config_with_unlock() -> UdsBackendConfig {
+        UdsBackendConfig {
+            unlock: Some(UnlockConfig {
+                algorithm: "xor".to_string(),
+                secret_hex: "ff".to_string(),
+                level: None,
+            }),
+            ..test_config()
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_unlocked_for_level_zero_is_noop() {
+        // security_level 0 ⇒ no gate at all, provider or not.
+        let backend = UdsBackend::new(test_config()).await.unwrap();
+        backend.ensure_unlocked_for(0).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ensure_unlocked_for_no_provider_is_security_required() {
+        // No unlock section ⇒ today's behaviour: SecurityRequired carrying the
+        // OP's required level (not a config default — there is none here).
+        let backend = UdsBackend::new(test_config()).await.unwrap();
+        let err = backend.ensure_unlocked_for(3).await.unwrap_err();
+        assert!(
+            matches!(err, BackendError::SecurityRequired(3)),
+            "locked + no provider must be SecurityRequired(3), got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_unlocked_for_failed_unlock_is_security_required() {
+        // Provider configured, but the mock transport answers 0x27 with a bare
+        // [0x67] (no sub-function echo, no seed) ⇒ the seed request fails and
+        // the session stays locked ⇒ SecurityRequired at the OP's level, not
+        // a masked transport error.
+        let backend = UdsBackend::new(test_config_with_unlock()).await.unwrap();
+        let err = backend.ensure_unlocked_for(2).await.unwrap_err();
+        assert!(
+            matches!(err, BackendError::SecurityRequired(2)),
+            "locked + failed unlock must be SecurityRequired(2), got {err:?}"
         );
     }
 }
