@@ -85,6 +85,9 @@ fn capability_scope(cap: Capability) -> Option<&'static str> {
         Capability::UpdateVerdict => Some("updates:verdict"),
         Capability::ResetExecute => Some("reset:execute"),
         Capability::FactoryReset => Some("factory-reset"),
+        // Bare-hyphenated on purpose: `component:admin` would collide with the
+        // `component:<id>` scope namespace (see the enum doc).
+        Capability::ComponentAdmin => Some("component-admin"),
         Capability::Admin => Some("admin"),
         Capability::Read => None,
     }
@@ -255,5 +258,52 @@ async fn component_read_needs_only_component_scope() {
     assert_eq!(
         get_status(&server, "/vehicle/v1/components/vm1", Some(&token)).await,
         200
+    );
+}
+
+/// `ComponentAdmin` maps to no SOVDd route — the per-component admin-state op
+/// (disable/enable) is a vendor route in the machine-manager layer; SOVDd owns
+/// only the vocabulary. An embedder gates that route through this same seam, so
+/// exercise the authorizer directly with a hand-built [`AccessRequest`].
+async fn authorize_component_admin(
+    authorizer: &TestAuthorizer,
+    token: &str,
+) -> Result<ClientContext, String> {
+    let header = format!("Bearer {token}");
+    // `reqwest::Method` is the same `http::Method` axum re-exports.
+    let method = reqwest::Method::POST;
+    let req = AccessRequest {
+        bearer: Some(&header),
+        method: &method,
+        path: "/not-a-sovdd-route/admin-state",
+        component: Some("vm1"),
+        capability: Capability::ComponentAdmin,
+    };
+    authorizer.authorize(&req).await
+}
+
+#[tokio::test]
+async fn component_admin_needs_its_bare_hyphenated_verb() {
+    let authorizer = TestAuthorizer::new();
+
+    // Component scope + the `component-admin` verb → granted.
+    let granted =
+        authorize_component_admin(&authorizer, &mint(&["component:vm1", "component-admin"])).await;
+    assert!(granted.is_ok(), "got: {granted:?}");
+
+    // Component scope alone → denied: the verb dimension is enforced.
+    assert!(
+        authorize_component_admin(&authorizer, &mint(&["component:vm1"]))
+            .await
+            .is_err()
+    );
+
+    // The namespace collision the hyphen avoids: `component:admin` is NOT the
+    // admin verb — it is component access to an id "admin", so it neither
+    // matches component vm1 nor supplies `component-admin`.
+    assert!(
+        authorize_component_admin(&authorizer, &mint(&["component:admin"]))
+            .await
+            .is_err()
     );
 }

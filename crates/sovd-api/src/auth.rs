@@ -150,6 +150,15 @@ pub enum Capability {
     UpdateVerdict,
     ResetExecute,
     FactoryReset,
+    /// Per-component administrative state (disable/enable) — enforced at the
+    /// Operational tier downstream. The op itself is a vendor route in the
+    /// machine-manager layer, so no SOVDd route maps here and
+    /// [`route_capability`] never returns it; SOVDd owns only the vocabulary.
+    /// Scope verb: `component-admin` — bare-hyphenated deliberately, because
+    /// `component:admin` would collide with the `component:<id>` scope
+    /// namespace that [`ClientContext::can_access_component`] treats as
+    /// component access.
+    ComponentAdmin,
     Admin,
     /// Read-only metadata / listings with no specific verb — component scope only.
     Read,
@@ -826,6 +835,34 @@ mod tests {
             !adm.can_access_component("engine_ecu"),
             "admin:* is not component access"
         );
+    }
+
+    #[test]
+    fn component_admin_verb_is_not_a_component_scope() {
+        // Security-load-bearing namespace pin: `ComponentAdmin`'s scope verb is
+        // bare-hyphenated (`component-admin`) deliberately — a colon form
+        // (`component:admin`) would fall into the `component:<id>` namespace
+        // and read as access to a component named "admin".
+        let verb = ClientContext {
+            subject: "x".into(),
+            scopes: vec!["component-admin".into()],
+        };
+        assert!(
+            !verb.can_access_component("admin"),
+            "`component-admin` is a capability verb, not component access"
+        );
+        assert!(
+            !verb.can_admin(),
+            "`component-admin` is not the server-admin scope either"
+        );
+
+        // The collision the hyphen avoids: `component:admin` IS component
+        // access — to a component whose id is "admin".
+        let colliding = ClientContext {
+            subject: "x".into(),
+            scopes: vec!["component:admin".into()],
+        };
+        assert!(colliding.can_access_component("admin"));
     }
 
     #[test]
