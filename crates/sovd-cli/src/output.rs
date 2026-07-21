@@ -234,6 +234,34 @@ pub struct FaultRow {
     pub category: String,
 }
 
+/// Output display for the logs command (SOVD §7.21 entries).
+#[derive(Debug, Tabled, Serialize)]
+pub struct LogRow {
+    #[tabled(rename = "Time")]
+    pub time: String,
+    #[tabled(rename = "Level")]
+    pub level: String,
+    #[tabled(rename = "Source")]
+    pub source: String,
+    #[tabled(rename = "Message")]
+    pub message: String,
+    #[tabled(rename = "ID")]
+    pub id: String,
+}
+
+impl From<&sovd_client::LogEntry> for LogRow {
+    fn from(e: &sovd_client::LogEntry) -> Self {
+        LogRow {
+            // The client models timestamp/priority as the raw wire strings.
+            time: e.timestamp.clone(),
+            level: e.priority.clone(),
+            source: e.source.clone().unwrap_or_default(),
+            message: e.message.clone(),
+            id: e.id.clone(),
+        }
+    }
+}
+
 /// Output display for outputs command
 #[derive(Debug, Tabled, Serialize)]
 pub struct OutputRow {

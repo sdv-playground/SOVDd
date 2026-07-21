@@ -5,6 +5,7 @@ pub mod faults;
 pub mod flash;
 pub mod info;
 pub mod list;
+pub mod logs;
 pub mod monitor;
 pub mod operations;
 pub mod outputs;

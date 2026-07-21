@@ -211,6 +211,61 @@ enum Commands {
         #[arg(long)]
         params: Option<String>,
     },
+
+    /// Access SOVD §7.21 logs. Point at a vehicle gateway to get the whole
+    /// vehicle's logs (merged + timestamp-sorted server-side).
+    Logs {
+        /// ECU / component id (a gateway id gives the merged vehicle view).
+        ecu: String,
+
+        /// Action: list (default), get, content, delete.
+        #[arg(long, default_value = "list")]
+        action: String,
+
+        /// Log entry id — required for get / content / delete.
+        #[arg(long)]
+        id: Option<String>,
+
+        /// Only priority this level and above (emergency|alert|critical|error|warning|notice|info|debug).
+        #[arg(long)]
+        priority: Option<String>,
+
+        /// Filter by source (service/unit name).
+        #[arg(long)]
+        source: Option<String>,
+
+        /// Filter by log type (e.g. engine_dump, diagnostic).
+        #[arg(long = "type")]
+        log_type: Option<String>,
+
+        /// Filter by retrieval status (pending|retrieved).
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Substring the message must contain (client-side).
+        #[arg(long)]
+        grep: Option<String>,
+
+        /// Show only the last N entries.
+        #[arg(long)]
+        tail: Option<usize>,
+
+        /// Server-side max entries to fetch.
+        #[arg(long)]
+        limit: Option<u32>,
+
+        /// For `content`: write bytes to this file instead of stdout.
+        #[arg(long, short = 'o')]
+        out: Option<String>,
+
+        /// Follow: poll the list and print new entries (tail -f).
+        #[arg(long, short = 'f')]
+        follow: bool,
+
+        /// Poll interval (seconds) for --follow.
+        #[arg(long, default_value = "1.0")]
+        interval: f64,
+    },
 }
 
 #[tokio::main]
@@ -336,6 +391,56 @@ async fn main() -> Result<()> {
                 &ctx,
             )
             .await?;
+        }
+
+        Commands::Logs {
+            ecu,
+            action,
+            id,
+            priority,
+            source,
+            log_type,
+            status,
+            grep,
+            tail,
+            limit,
+            out,
+            follow,
+            interval,
+        } => {
+            let client = create_client(&merged.server)?;
+            match action.as_str() {
+                "list" => {
+                    let args = commands::logs::LogArgs {
+                        priority: priority.clone(),
+                        source: source.clone(),
+                        log_type: log_type.clone(),
+                        status: status.clone(),
+                        limit: *limit,
+                        pattern: grep.clone(),
+                        tail: *tail,
+                        follow: *follow,
+                        interval_secs: *interval,
+                    };
+                    commands::logs::list(&client, ecu, &args, &ctx).await?;
+                }
+                "get" | "content" | "delete" => {
+                    let Some(id) = id else {
+                        anyhow::bail!("--id is required for `logs --action {action}`");
+                    };
+                    match action.as_str() {
+                        "get" => commands::logs::get(&client, ecu, id, &ctx).await?,
+                        "content" => {
+                            commands::logs::content(&client, ecu, id, out.as_deref(), &ctx).await?
+                        }
+                        "delete" => commands::logs::delete(&client, ecu, id, &ctx).await?,
+                        _ => unreachable!(),
+                    }
+                }
+                other => anyhow::bail!(
+                    "unknown logs action `{other}` (expected: list, get, content, delete)"
+                ),
+            }
         }
     }
 
