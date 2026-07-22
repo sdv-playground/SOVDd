@@ -34,6 +34,24 @@ struct Cli {
     #[arg(short, long, env = "SOVD_CONFIG")]
     config: Option<PathBuf>,
 
+    /// Bearer token (JWT) sent as `Authorization: Bearer <token>`. Mint it with
+    /// the workshop minter (see examples/autoloader/sovd-get-logs.sh). When
+    /// omitted the client is unauthenticated — fine for a device serving
+    /// tokenless reads, rejected (401) otherwise.
+    #[arg(long, env = "SOVD_TOKEN")]
+    token: Option<String>,
+
+    /// Pin this CA root (PEM file) when verifying the server's TLS certificate —
+    /// the tower identity root for dialling a device's self-signed leaf. Takes
+    /// precedence over `--insecure`.
+    #[arg(long, env = "SOVD_CA_CERT")]
+    ca_cert: Option<PathBuf>,
+
+    /// Skip TLS certificate verification (the `curl -k` equivalent). Ignored when
+    /// `--ca-cert` is given. For dev rigs with a self-signed device leaf only.
+    #[arg(long)]
+    insecure: bool,
+
     /// Output format
     #[arg(short, long, value_enum, default_value = "table")]
     output: OutputFormat,
@@ -294,58 +312,61 @@ async fn main() -> Result<()> {
     // Merge CLI args with config
     let merged = config.merge_with_args(Some(&cli.server), Some(cli.output.into()), cli.no_color);
 
+    // Resolve client auth (bearer token + TLS trust) once for every command.
+    let auth = ClientAuth::from_cli(&cli)?;
+
     // Create output context
     let ctx = OutputContext::new(cli.output, merged.no_color, cli.quiet);
 
     // Execute command
     match &cli.command {
         Commands::List => {
-            let client = create_client(&merged.server)?;
+            let client = create_client(&merged.server, &auth)?;
             commands::list(&client, &ctx).await?;
         }
 
         Commands::Info { ecu } => {
-            let client = create_client(&merged.server)?;
+            let client = create_client(&merged.server, &auth)?;
             commands::info(&client, ecu, &ctx).await?;
         }
 
         Commands::Data { ecu } => {
-            let client = create_client(&merged.server)?;
+            let client = create_client(&merged.server, &auth)?;
             commands::data(&client, ecu, &ctx).await?;
         }
 
         Commands::Read { ecu, params, all } => {
-            let client = create_client(&merged.server)?;
+            let client = create_client(&merged.server, &auth)?;
             commands::read(&client, ecu, params, *all, &ctx).await?;
         }
 
         Commands::Write { ecu, param, value } => {
-            let client = create_client(&merged.server)?;
+            let client = create_client(&merged.server, &auth)?;
             commands::write(&client, ecu, param, value, &ctx).await?;
         }
 
         Commands::Faults { ecu, active, clear } => {
-            let client = create_client(&merged.server)?;
+            let client = create_client(&merged.server, &auth)?;
             commands::faults(&client, ecu, *active, *clear, &ctx).await?;
         }
 
         Commands::Monitor { ecu, params, rate } => {
-            let client = create_client(&merged.server)?;
+            let client = create_client(&merged.server, &auth)?;
             commands::monitor(&client, ecu, params.clone(), *rate, &ctx).await?;
         }
 
         Commands::Session { ecu, session_type } => {
-            let client = create_client(&merged.server)?;
+            let client = create_client(&merged.server, &auth)?;
             commands::session(&client, ecu, session_type, &ctx).await?;
         }
 
         Commands::Unlock { ecu, level, key } => {
-            let client = create_client(&merged.server)?;
+            let client = create_client(&merged.server, &auth)?;
             commands::unlock(&client, ecu, *level, key.as_deref(), &ctx).await?;
         }
 
         Commands::Outputs { ecu } => {
-            let client = create_client(&merged.server)?;
+            let client = create_client(&merged.server, &auth)?;
             commands::outputs(&client, ecu, &ctx).await?;
         }
 
@@ -355,23 +376,33 @@ async fn main() -> Result<()> {
             action,
             value,
         } => {
-            let client = create_client(&merged.server)?;
+            let client = create_client(&merged.server, &auth)?;
             commands::actuate(&client, ecu, output, action, value.as_deref(), &ctx).await?;
         }
 
         Commands::Flash { ecu, file } => {
-            let flash_client = FlashClient::for_sovd(&merged.server, ecu)
-                .context("Failed to create flash client")?;
+            // Flash is destructive, so it honours the same global auth flags as
+            // every other command (bearer token + TLS trust), threaded through
+            // the flash config builder.
+            let mut builder = sovd_client::flash::FlashConfig::builder(&merged.server)
+                .component_id(ecu)
+                .insecure(auth.insecure)
+                .ca_cert_pem(auth.ca_cert_pem.clone());
+            if let Some(token) = &auth.token {
+                builder = builder.bearer(token);
+            }
+            let flash_client =
+                FlashClient::new(builder.build()).context("Failed to create flash client")?;
             commands::flash(&flash_client, file, &ctx).await?;
         }
 
         Commands::Reset { ecu, reset_type } => {
-            let client = create_client(&merged.server)?;
+            let client = create_client(&merged.server, &auth)?;
             commands::reset(&client, ecu, reset_type.as_deref(), &ctx).await?;
         }
 
         Commands::Ops { ecu } => {
-            let client = create_client(&merged.server)?;
+            let client = create_client(&merged.server, &auth)?;
             commands::ops(&client, ecu, &ctx).await?;
         }
 
@@ -381,7 +412,7 @@ async fn main() -> Result<()> {
             action,
             params,
         } => {
-            let client = create_client(&merged.server)?;
+            let client = create_client(&merged.server, &auth)?;
             commands::run(
                 &client,
                 ecu,
@@ -408,7 +439,7 @@ async fn main() -> Result<()> {
             follow,
             interval,
         } => {
-            let client = create_client(&merged.server)?;
+            let client = create_client(&merged.server, &auth)?;
             match action.as_str() {
                 "list" => {
                     let args = commands::logs::LogArgs {
@@ -447,9 +478,46 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Create a SOVD client for the given server URL
-fn create_client(server: &str) -> Result<SovdClient> {
-    SovdClient::new(server).context("Failed to create SOVD client")
+/// The client-auth inputs resolved once from the global CLI flags and threaded
+/// into every `create_client` call: an optional bearer token plus the TLS trust
+/// decision (pinned CA root PEM, or skip-verify).
+struct ClientAuth {
+    token: Option<String>,
+    ca_cert_pem: Option<Vec<u8>>,
+    insecure: bool,
+}
+
+impl ClientAuth {
+    /// Read the CA PEM off disk (if `--ca-cert` was given) so a bad path fails
+    /// once, up front, rather than on the first request.
+    fn from_cli(cli: &Cli) -> Result<Self> {
+        let ca_cert_pem = match &cli.ca_cert {
+            Some(path) => Some(
+                std::fs::read(path)
+                    .with_context(|| format!("Failed to read --ca-cert {}", path.display()))?,
+            ),
+            None => None,
+        };
+        Ok(Self {
+            token: cli.token.clone(),
+            ca_cert_pem,
+            insecure: cli.insecure,
+        })
+    }
+}
+
+/// Create a SOVD client for the given server URL, honouring the resolved auth:
+/// a bearer token when present, otherwise an unauthenticated client — both
+/// verifying against the pinned CA (or skipping verification when `--insecure`).
+fn create_client(server: &str, auth: &ClientAuth) -> Result<SovdClient> {
+    let ca = auth.ca_cert_pem.as_deref();
+    match &auth.token {
+        Some(token) => {
+            SovdClient::with_bearer_token_verifying(server, token, auth.insecure, ca)
+        }
+        None => SovdClient::new_verifying(server, auth.insecure, ca),
+    }
+    .context("Failed to create SOVD client")
 }
 
 // Implement conversion for OutputFormat to string (for config merge)
@@ -459,6 +527,57 @@ impl From<OutputFormat> for &str {
             OutputFormat::Table => "table",
             OutputFormat::Json => "json",
             OutputFormat::Csv => "csv",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The clap layer is wired up correctly (no overlapping short flags, valid
+    /// arg spec) — a debug_assert clap runs only in this test.
+    #[test]
+    fn cli_arg_spec_is_valid() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
+    /// With a token, we build the bearer client; without, the unauthenticated
+    /// one. Both must construct successfully (client-build does no network I/O).
+    #[test]
+    fn create_client_selects_by_token_presence() {
+        let with_token = ClientAuth {
+            token: Some("jwt.abc.def".to_string()),
+            ca_cert_pem: None,
+            insecure: false,
+        };
+        assert!(create_client("http://localhost:8080", &with_token).is_ok());
+
+        let no_token = ClientAuth {
+            token: None,
+            ca_cert_pem: None,
+            insecure: true,
+        };
+        assert!(create_client("http://localhost:8080", &no_token).is_ok());
+    }
+
+    /// A `--ca-cert` path that doesn't exist fails up front (at auth resolution),
+    /// not deferred to the first request.
+    #[test]
+    fn ca_cert_missing_file_errors_early() {
+        let cli = Cli::try_parse_from([
+            "sovd-cli",
+            "--ca-cert",
+            "/no/such/ca-cert.pem",
+            "list",
+        ])
+        .expect("args parse");
+        // Not `.expect_err`: ClientAuth deliberately has no Debug (it holds the
+        // bearer token — keep it out of any log/panic output).
+        match ClientAuth::from_cli(&cli) {
+            Ok(_) => panic!("missing CA file must error"),
+            Err(e) => assert!(e.to_string().contains("--ca-cert")),
         }
     }
 }
