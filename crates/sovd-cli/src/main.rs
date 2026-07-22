@@ -236,12 +236,11 @@ enum Commands {
         /// ECU / component id (a gateway id gives the merged vehicle view).
         ecu: String,
 
-        /// Action: list (default), get, content, delete.
-        #[arg(long, default_value = "list")]
+        /// Action (positional): list (default), get, content, delete.
+        #[arg(default_value = "list")]
         action: String,
 
-        /// Log entry id — required for get / content / delete.
-        #[arg(long)]
+        /// Log entry id (positional) — required for get / content / delete.
         id: Option<String>,
 
         /// Only priority this level and above (emergency|alert|critical|error|warning|notice|info|debug).
@@ -457,7 +456,7 @@ async fn main() -> Result<()> {
                 }
                 "get" | "content" | "delete" => {
                     let Some(id) = id else {
-                        anyhow::bail!("--id is required for `logs --action {action}`");
+                        anyhow::bail!("a log id is required: `logs <ecu> {action} <id>`");
                     };
                     match action.as_str() {
                         "get" => commands::logs::get(&client, ecu, id, &ctx).await?,
@@ -578,6 +577,32 @@ mod tests {
         match ClientAuth::from_cli(&cli) {
             Ok(_) => panic!("missing CA file must error"),
             Err(e) => assert!(e.to_string().contains("--ca-cert")),
+        }
+    }
+
+    /// `logs` action + id are positional: `logs <ecu>` defaults to list,
+    /// `logs <ecu> get <id>` fills both.
+    #[test]
+    fn logs_action_and_id_are_positional() {
+        let list = Cli::try_parse_from(["sovd-cli", "logs", "supernova"]).expect("parse list");
+        match list.command {
+            Commands::Logs { ecu, action, id, .. } => {
+                assert_eq!(ecu, "supernova");
+                assert_eq!(action, "list"); // default
+                assert!(id.is_none());
+            }
+            _ => panic!("expected Logs"),
+        }
+
+        let get = Cli::try_parse_from(["sovd-cli", "logs", "vm1", "get", "line:x:abc"])
+            .expect("parse get");
+        match get.command {
+            Commands::Logs { ecu, action, id, .. } => {
+                assert_eq!(ecu, "vm1");
+                assert_eq!(action, "get");
+                assert_eq!(id.as_deref(), Some("line:x:abc"));
+            }
+            _ => panic!("expected Logs"),
         }
     }
 }
