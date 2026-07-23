@@ -1,6 +1,7 @@
 //! Command implementations for sovd-cli
 
 pub mod actuate;
+pub mod bulk_data;
 pub mod faults;
 pub mod flash;
 pub mod info;

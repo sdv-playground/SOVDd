@@ -283,6 +283,40 @@ enum Commands {
         #[arg(long, default_value = "1.0")]
         interval: f64,
     },
+
+    /// Access §7.20 bulk-data (log files / large payloads). The spec-native
+    /// "get all logs": `bulk-data get-all <ecu> logs -d <dir>` downloads every
+    /// item in a category.
+    BulkData {
+        /// ECU / component id.
+        ecu: String,
+
+        /// Action (positional): categories (default) | list | download | get-all.
+        #[arg(default_value = "categories")]
+        action: String,
+
+        /// Category id — required for list / download / get-all (e.g. `logs`).
+        category: Option<String>,
+
+        /// Item id — required for `download`.
+        id: Option<String>,
+
+        /// Only items created after this RFC 3339 time (list / get-all).
+        #[arg(long)]
+        created_after: Option<String>,
+
+        /// Only items created before this RFC 3339 time (list / get-all).
+        #[arg(long)]
+        created_before: Option<String>,
+
+        /// For `download`: write bytes to this file (default: stdout).
+        #[arg(long, short = 'o')]
+        out: Option<String>,
+
+        /// For `get-all`: write each item to this directory (one file per id).
+        #[arg(long, short = 'd')]
+        dir: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -471,6 +505,32 @@ async fn main() -> Result<()> {
                     "unknown logs action `{other}` (expected: list, get, content, delete)"
                 ),
             }
+        }
+
+        Commands::BulkData {
+            ecu,
+            action,
+            category,
+            id,
+            created_after,
+            created_before,
+            out,
+            dir,
+        } => {
+            let client = create_client(&merged.server, &auth)?;
+            commands::bulk_data::run(
+                &client,
+                ecu,
+                action,
+                category.as_deref(),
+                id.as_deref(),
+                created_after.as_deref(),
+                created_before.as_deref(),
+                out.as_deref(),
+                dir.as_deref(),
+                &ctx,
+            )
+            .await?;
         }
     }
 
