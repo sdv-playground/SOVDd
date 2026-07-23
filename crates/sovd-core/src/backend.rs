@@ -12,10 +12,11 @@ use tokio::sync::broadcast;
 
 use crate::error::BackendResult;
 use crate::models::{
-    Capabilities, ClearFaultsResult, CommControlMode, DataPoint, DataValue, DtcSettingMode,
-    EntityInfo, Fault, FaultFilter, FaultsResult, IoControlAction, IoControlResult,
-    LinkControlResult, LinkMode, LogEntry, LogFilter, LogPage, OperationExecution, OperationInfo,
-    OutputDetail, OutputInfo, ParameterInfo, SecurityMode, SessionMode,
+    BulkCategory, BulkDataDownload, BulkDataFilter, BulkDataItem, Capabilities, ClearFaultsResult,
+    CommControlMode, DataPoint, DataValue, DtcSettingMode, EntityInfo, Fault, FaultFilter,
+    FaultsResult, IoControlAction, IoControlResult, LinkControlResult, LinkMode, LogEntry,
+    LogFilter, LogPage, OperationExecution, OperationInfo, OutputDetail, OutputInfo, ParameterInfo,
+    SecurityMode, SessionMode,
 };
 
 /// Byte stream for streaming package upload (HTTP/1.1 chunked transfer).
@@ -548,6 +549,46 @@ pub trait DiagnosticBackend: Send + Sync {
     ) -> BackendResult<broadcast::Receiver<LogEntry>> {
         Err(crate::error::BackendError::NotSupported(
             "stream_logs".to_string(),
+        ))
+    }
+
+    // =========================================================================
+    // Bulk-data (SOVD §7.20 — C-120). The spec-native path for large opaque
+    // payloads; §7.21 logs are the first consumer (a `logs` category). All
+    // default to "nothing here" so existing backends are unaffected.
+    // =========================================================================
+
+    /// List the bulk-data categories this entity exposes
+    /// (`GET /{entity}/bulk-data`). Default: none.
+    async fn list_bulk_data_categories(&self) -> BackendResult<Vec<BulkCategory>> {
+        Ok(vec![])
+    }
+
+    /// List the downloadable items in a category, honouring the created-before/
+    /// after filter (`GET /{entity}/bulk-data/{category}`). Default: the category
+    /// is unknown here.
+    async fn list_bulk_data(
+        &self,
+        category: &str,
+        _filter: &BulkDataFilter,
+    ) -> BackendResult<Vec<BulkDataItem>> {
+        Err(crate::error::BackendError::EntityNotFound(format!(
+            "bulk-data category: {category}"
+        )))
+    }
+
+    /// Download one bulk-data item
+    /// (`GET /{entity}/bulk-data/{category}/{id}`). Returns the payload inline, a
+    /// redirect, or an async-staging pointer (see [`BulkDataDownload`]). Default:
+    /// not supported.
+    async fn get_bulk_data(
+        &self,
+        category: &str,
+        id: &str,
+    ) -> BackendResult<BulkDataDownload> {
+        let _ = (category, id);
+        Err(crate::error::BackendError::NotSupported(
+            "get_bulk_data".to_string(),
         ))
     }
 

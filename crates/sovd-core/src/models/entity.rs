@@ -49,6 +49,11 @@ pub struct Capabilities {
     pub sub_entities: bool,
     /// Supports periodic data subscriptions
     pub subscriptions: bool,
+    /// Supports the §7.20 bulk-data collection (download of log files / large
+    /// opaque payloads). Gates the `/bulk-data` routes. `#[serde(default)]` so a
+    /// capability doc from an older server (no field) deserializes as `false`.
+    #[serde(default)]
+    pub bulk_data: bool,
 }
 
 impl Capabilities {
@@ -67,6 +72,7 @@ impl Capabilities {
             security: true,
             sub_entities: false,
             subscriptions: true,
+            bulk_data: false,
         }
     }
 
@@ -85,6 +91,9 @@ impl Capabilities {
             security: false,
             sub_entities: true,
             subscriptions: true,
+            // Logs are retrieved via bulk-data (§7.21/C-121), so an HPC that has
+            // logs also exposes the bulk-data collection.
+            bulk_data: true,
         }
     }
 
@@ -103,6 +112,7 @@ impl Capabilities {
             security: false,
             sub_entities: false,
             subscriptions: true,
+            bulk_data: true,
         }
     }
 
@@ -121,6 +131,7 @@ impl Capabilities {
             security: false,
             sub_entities: true, // Gateway always has sub-entities
             subscriptions: false,
+            bulk_data: false,
         }
     }
 }

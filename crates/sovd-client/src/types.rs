@@ -66,6 +66,9 @@ pub struct ComponentCapabilities {
     pub sub_entities: bool,
     #[serde(default)]
     pub subscriptions: bool,
+    /// §7.20 bulk-data collection (log-file download / large payloads).
+    #[serde(default)]
+    pub bulk_data: bool,
 }
 
 /// List of components response
