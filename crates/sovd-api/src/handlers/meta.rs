@@ -331,6 +331,22 @@ const PATHS: &[PathEntry] = &[
         path: "/vehicle/v1/components/{component_id}/logs/config",
         summary: "Reset log configuration — 204.",
     },
+    // bulk-data (§7.20)
+    PathEntry {
+        method: "GET",
+        path: "/vehicle/v1/components/{component_id}/bulk-data",
+        summary: "List bulk-data categories (§7.20).",
+    },
+    PathEntry {
+        method: "GET",
+        path: "/vehicle/v1/components/{component_id}/bulk-data/{category}",
+        summary: "List bulk-data items; q: created-before/after.",
+    },
+    PathEntry {
+        method: "GET",
+        path: "/vehicle/v1/components/{component_id}/bulk-data/{category}/{bulk_data_id}",
+        summary: "Download a bulk-data item (200/202/307).",
+    },
     // clear-data (§7.13)
     PathEntry {
         method: "GET",

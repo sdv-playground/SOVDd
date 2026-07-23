@@ -66,12 +66,34 @@ fn default_min_severity() -> u8 {
 }
 
 /// GET /vehicle/v1/components/:component_id/logs/entries
+///
+/// §7.21: each entry LINKS TO its log file, which is retrieved via bulk-data
+/// (C-121). So we surface the backend's `logs` bulk-data category as entries
+/// whose `href` points at the `/bulk-data/logs/{id}` download. Empty (not an
+/// error) when the backend exposes no `logs` category.
 pub async fn list_log_entries(
     State(state): State<AppState>,
     Path(component_id): Path<String>,
 ) -> Result<Json<LogEntriesResponse>, ApiError> {
-    let _ = state.get_backend(&component_id)?;
-    Ok(Json(LogEntriesResponse { items: Vec::new() }))
+    let backend = state.get_backend(&component_id)?;
+    let base = format!("/vehicle/v1/components/{component_id}/bulk-data/logs");
+    // list_bulk_data defaults to EntityNotFound for an unknown category; a
+    // backend without a `logs` category (or without bulk-data at all) simply has
+    // no entries — degrade to empty rather than surfacing a 404 on /logs/entries.
+    let items = match backend
+        .list_bulk_data("logs", &sovd_core::BulkDataFilter::default())
+        .await
+    {
+        Ok(list) => list
+            .into_iter()
+            .map(|it| LogEntryRef {
+                href: format!("{base}/{}", it.id),
+                id: it.id,
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    Ok(Json(LogEntriesResponse { items }))
 }
 
 /// GET /vehicle/v1/components/:component_id/logs/config

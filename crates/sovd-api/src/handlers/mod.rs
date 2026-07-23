@@ -3,6 +3,7 @@
 //! These handlers use the DiagnosticBackend trait and are backend-agnostic.
 
 pub mod apps;
+pub mod bulk_data;
 pub mod clear_data;
 pub mod components;
 pub mod data;

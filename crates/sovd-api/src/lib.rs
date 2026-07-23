@@ -153,6 +153,20 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/logs/{log_id}",
             get(handlers::logs::get_log).delete(handlers::logs::delete_log),
         )
+        // §7.20 bulk-data collection (C-120): the spec-native large-payload
+        // download path. Logs are its first consumer (a `logs` category).
+        .route(
+            "/vehicle/v1/components/{component_id}/bulk-data",
+            get(handlers::bulk_data::list_categories),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/bulk-data/{category}",
+            get(handlers::bulk_data::list_items),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/bulk-data/{category}/{bulk_data_id}",
+            get(handlers::bulk_data::download),
+        )
         // -----------------------------------------------------------------
         // F.5 stub collections (spec presence, backend wiring TODO).
         // -----------------------------------------------------------------
