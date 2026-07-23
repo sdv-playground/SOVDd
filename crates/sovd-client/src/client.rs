@@ -807,6 +807,84 @@ impl SovdClient {
     }
 
     // =========================================================================
+    // Bulk-data (SOVD §7.20) — categories, items, download. The spec-native
+    // "get all logs": list the `logs` category's items, download each.
+    // =========================================================================
+
+    /// List a component's bulk-data categories (`GET /{c}/bulk-data`).
+    #[instrument(skip(self))]
+    pub async fn list_bulk_data_categories(
+        &self,
+        component_id: &str,
+    ) -> Result<Vec<BulkCategoryRef>> {
+        let url = self
+            .base_url
+            .join(&format!("/vehicle/v1/components/{component_id}/bulk-data"))?;
+        let response = self.client.get(url).send().await?;
+        self.handle_response::<BulkCategoriesResponse>(response)
+            .await
+            .map(|r| r.items)
+    }
+
+    /// List the downloadable items in a category
+    /// (`GET /{c}/bulk-data/{category}`), optionally time-filtered.
+    #[instrument(skip(self))]
+    pub async fn list_bulk_data(
+        &self,
+        component_id: &str,
+        category: &str,
+        created_after: Option<&str>,
+        created_before: Option<&str>,
+    ) -> Result<Vec<BulkItemRef>> {
+        let mut url = self.base_url.join(&format!(
+            "/vehicle/v1/components/{}/bulk-data/{}",
+            component_id,
+            encode_path_segment(category)
+        ))?;
+        {
+            let mut qp = url.query_pairs_mut();
+            if let Some(a) = created_after {
+                qp.append_pair("created-after", a);
+            }
+            if let Some(b) = created_before {
+                qp.append_pair("created-before", b);
+            }
+        }
+        if url.query() == Some("") {
+            url.set_query(None);
+        }
+        let response = self.client.get(url).send().await?;
+        self.handle_response::<BulkItemsResponse>(response)
+            .await
+            .map(|r| r.items)
+    }
+
+    /// Download one bulk-data item's bytes
+    /// (`GET /{c}/bulk-data/{category}/{id}`). Follows the redirect a `307`
+    /// download may return; a `202` (async staging) surfaces as an error here
+    /// (poll the item instead — not yet a client concern).
+    #[instrument(skip(self))]
+    pub async fn get_bulk_data(
+        &self,
+        component_id: &str,
+        category: &str,
+        id: &str,
+    ) -> Result<Vec<u8>> {
+        let url = self.base_url.join(&format!(
+            "/vehicle/v1/components/{}/bulk-data/{}/{}",
+            component_id,
+            encode_path_segment(category),
+            encode_path_segment(id)
+        ))?;
+        let response = self.client.get(url).send().await?;
+        if response.status().is_success() {
+            Ok(response.bytes().await?.to_vec())
+        } else {
+            Err(self.extract_error(response).await)
+        }
+    }
+
+    // =========================================================================
     // Operation Execution
     // =========================================================================
 

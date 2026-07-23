@@ -78,6 +78,49 @@ pub struct ComponentList {
 }
 
 // =============================================================================
+// Bulk-data (SOVD §7.20) — the spec-native large-payload / log-file download.
+// =============================================================================
+
+/// `GET /{entity}/bulk-data` — one category.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BulkCategoryRef {
+    pub id: String,
+    #[serde(default)]
+    pub href: Option<String>,
+}
+
+/// `GET /{entity}/bulk-data/{category}` — one downloadable item's metadata.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BulkItemRef {
+    pub id: String,
+    #[serde(default)]
+    pub size: u64,
+    /// RFC 3339 UTC creation/mtime.
+    #[serde(default)]
+    pub created: Option<String>,
+    #[serde(default)]
+    pub mime: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub href: Option<String>,
+}
+
+/// Envelope for the category list.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BulkCategoriesResponse {
+    #[serde(default)]
+    pub items: Vec<BulkCategoryRef>,
+}
+
+/// Envelope for the item list.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BulkItemsResponse {
+    #[serde(default)]
+    pub items: Vec<BulkItemRef>,
+}
+
+// =============================================================================
 // Data/Parameter Types
 // =============================================================================
 
