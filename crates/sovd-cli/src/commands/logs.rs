@@ -43,6 +43,8 @@ impl LogArgs {
             priority: self.priority.clone(),
             source: self.source.clone(),
             limit: self.limit,
+            // Paging (cursor loop) is wired in a later step; single-shot for now.
+            after: None,
         }
     }
 }

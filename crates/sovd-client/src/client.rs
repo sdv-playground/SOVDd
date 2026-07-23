@@ -688,24 +688,32 @@ impl SovdClient {
             .base_url
             .join(&format!("/vehicle/v1/components/{}/logs", component_id))?;
 
-        let mut query_parts = Vec::new();
-        if let Some(ref t) = filter.log_type {
-            query_parts.push(format!("type={}", t));
+        // Build the query via query_pairs_mut so values are percent-encoded —
+        // the `after` cursor (base64 / journald __CURSOR) can carry +, /, =, ;.
+        {
+            let mut qp = url.query_pairs_mut();
+            if let Some(ref t) = filter.log_type {
+                qp.append_pair("type", t);
+            }
+            if let Some(ref s) = filter.status {
+                qp.append_pair("status", s);
+            }
+            if let Some(ref p) = filter.priority {
+                qp.append_pair("priority", p);
+            }
+            if let Some(ref src) = filter.source {
+                qp.append_pair("source", src);
+            }
+            if let Some(n) = filter.limit {
+                qp.append_pair("limit", &n.to_string());
+            }
+            if let Some(ref c) = filter.after {
+                qp.append_pair("after", c);
+            }
         }
-        if let Some(ref s) = filter.status {
-            query_parts.push(format!("status={}", s));
-        }
-        if let Some(ref p) = filter.priority {
-            query_parts.push(format!("priority={}", p));
-        }
-        if let Some(ref src) = filter.source {
-            query_parts.push(format!("source={}", src));
-        }
-        if let Some(n) = filter.limit {
-            query_parts.push(format!("limit={}", n));
-        }
-        if !query_parts.is_empty() {
-            url.set_query(Some(&query_parts.join("&")));
+        // An empty query set leaves a trailing "?"; strip it for tidiness.
+        if url.query() == Some("") {
+            url.set_query(None);
         }
 
         let response = self.client.get(url).send().await?;

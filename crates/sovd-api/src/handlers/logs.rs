@@ -21,6 +21,15 @@ use crate::state::AppState;
 pub struct LogsResponse {
     pub items: Vec<LogEntryResponse>,
     pub total_count: usize,
+    /// Opaque cursor for the NEXT page; feed back as `?after=`. `null` once the
+    /// caller has reached the head — a paging loop stops here. Absent when the
+    /// backend doesn't paginate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Oldest position still available; if a caller's `after` predates it,
+    /// history in between rotated away (gap detection). Absent when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oldest_cursor: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -59,6 +68,9 @@ pub struct LogFilterQuery {
     pub log_type: Option<String>,
     /// Filter by retrieval status (pending, retrieved)
     pub status: Option<String>,
+    /// Opaque pagination cursor — return entries strictly after this position.
+    /// Omit to start at the oldest available. Never parsed by the client.
+    pub after: Option<String>,
 }
 
 impl From<&LogEntry> for LogEntryResponse {
@@ -134,14 +146,22 @@ pub async fn get_logs(
             "processed" => Some(LogStatus::Processed),
             _ => None,
         }),
+        after: query.after,
     };
 
-    let logs = backend.get_logs(&filter).await?;
-    let total_count = logs.len();
+    // Paged path: a non-paging backend's default impl returns everything in one
+    // terminal page (next_cursor = None), so this is byte-compatible for existing
+    // clients while giving cursor-aware clients pagination + gap detection.
+    let page = backend.get_logs_paged(&filter).await?;
+    let total_count = page.items.len();
+    let items: Vec<LogEntryResponse> = page.items.iter().map(LogEntryResponse::from).collect();
 
-    let items: Vec<LogEntryResponse> = logs.iter().map(LogEntryResponse::from).collect();
-
-    Ok(Json(LogsResponse { items, total_count }))
+    Ok(Json(LogsResponse {
+        items,
+        total_count,
+        next_cursor: page.next_cursor,
+        oldest_cursor: page.oldest_cursor,
+    }))
 }
 
 /// Path parameters for log routes with ID

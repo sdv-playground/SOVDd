@@ -14,7 +14,7 @@ use crate::error::BackendResult;
 use crate::models::{
     Capabilities, ClearFaultsResult, CommControlMode, DataPoint, DataValue, DtcSettingMode,
     EntityInfo, Fault, FaultFilter, FaultsResult, IoControlAction, IoControlResult,
-    LinkControlResult, LinkMode, LogEntry, LogFilter, OperationExecution, OperationInfo,
+    LinkControlResult, LinkMode, LogEntry, LogFilter, LogPage, OperationExecution, OperationInfo,
     OutputDetail, OutputInfo, ParameterInfo, SecurityMode, SessionMode,
 };
 
@@ -494,6 +494,25 @@ pub trait DiagnosticBackend: Send + Sync {
     /// Get logs (default: empty, override for HPC)
     async fn get_logs(&self, _filter: &LogFilter) -> BackendResult<Vec<LogEntry>> {
         Ok(vec![])
+    }
+
+    /// Get one page of logs plus pagination cursors (SOVD §7.21 + our cursor
+    /// extension — see `tasks/log-retrieval-design.md`).
+    ///
+    /// Default: delegate to [`get_logs`](Self::get_logs) and return the whole
+    /// result as a single terminal page (`next_cursor: None`). A backend with a
+    /// monotonic ordering key (journald `__CURSOR`, or a host `(boot,gen,offset)`)
+    /// overrides this to page reboot-safely: honour `filter.after`, set
+    /// `next_cursor` until the head is reached, and report `oldest_cursor` so a
+    /// caller can detect history that rotated away. Because the default never
+    /// sets `next_cursor`, a client's "loop until next_cursor is None" terminates
+    /// immediately against a non-paging backend — no behaviour change for them.
+    async fn get_logs_paged(&self, filter: &LogFilter) -> BackendResult<LogPage> {
+        Ok(LogPage {
+            items: self.get_logs(filter).await?,
+            next_cursor: None,
+            oldest_cursor: None,
+        })
     }
 
     /// Get a single log entry by ID

@@ -402,6 +402,14 @@ pub struct LogsResponse {
     /// Total count of logs
     #[serde(default, alias = "total")]
     pub total_count: Option<usize>,
+    /// Opaque cursor for the next page; feed back as `LogFilter::after`. `None`
+    /// once the head is reached — a paging loop stops here. Absent when the
+    /// backend doesn't paginate.
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+    /// Oldest position still available (gap detection). Absent when unknown.
+    #[serde(default)]
+    pub oldest_cursor: Option<String>,
 }
 
 /// Log filter for querying logs
@@ -422,6 +430,10 @@ pub struct LogFilter {
     /// Maximum number of entries to return
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// Opaque pagination cursor — return entries strictly after this position.
+    /// From a prior response's `next_cursor`; never constructed by hand.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
 }
 
 // =============================================================================

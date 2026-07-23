@@ -125,4 +125,32 @@ pub struct LogFilter {
     /// Filter by retrieval status (pending, retrieved)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<LogStatus>,
+    /// Opaque pagination cursor: return entries STRICTLY AFTER this position.
+    /// A backend that supports paging returns [`LogPage::next_cursor`]; the
+    /// client feeds it back here to get the next batch, looping until
+    /// `next_cursor` is `None`. Clients never parse the token. `None` starts at
+    /// the oldest available entry. The cursor encodes the backend's monotonic
+    /// ordering key (journald `__CURSOR`, or a host `(boot,gen,offset)`), so it
+    /// is reboot-safe where wall-clock time is not — see
+    /// `tasks/log-retrieval-design.md`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+}
+
+/// One page of logs plus the cursors that make "get all logs" a terminating
+/// loop. Returned by [`crate::DiagnosticBackend::get_logs_paged`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LogPage {
+    /// The entries in this page, oldest-first within the page.
+    pub items: Vec<LogEntry>,
+    /// Feed back as [`LogFilter::after`] for the next batch. `None` means the
+    /// caller has reached the head (all currently-available logs consumed) — a
+    /// paging loop stops here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// The oldest position the backend can still serve. If a caller's `after`
+    /// predates this, history in between was rotated/dropped — the caller can
+    /// detect the gap rather than silently missing entries. `None` if unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oldest_cursor: Option<String>,
 }
