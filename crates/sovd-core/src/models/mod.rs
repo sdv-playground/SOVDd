@@ -9,6 +9,7 @@ mod log;
 mod mode;
 mod operation;
 mod output;
+mod script;
 
 pub use bulk_data::*;
 pub use data::*;
@@ -19,3 +20,4 @@ pub use log::*;
 pub use mode::*;
 pub use operation::*;
 pub use output::*;
+pub use script::*;

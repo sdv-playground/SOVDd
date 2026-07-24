@@ -288,28 +288,9 @@ pub async fn delete_communication_log(
 // scripts — §7.15
 // =============================================================================
 
-#[derive(Debug, Serialize)]
-pub struct ScriptSummary {
-    pub id: String,
-    pub href: String,
-}
-
-pub async fn list_scripts(
-    State(state): State<AppState>,
-    Path(component_id): Path<String>,
-) -> Result<Json<EmptyListResponse<ScriptSummary>>, ApiError> {
-    require_component(&state, &component_id)?;
-    Ok(Json(EmptyListResponse::default()))
-}
-
-pub async fn read_script(
-    Path((_component_id, script_id)): Path<(String, String)>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    Err(ApiError::NotFound(format!(
-        "Script not found: {}",
-        script_id
-    )))
-}
+// list_scripts / read_script moved to handlers::scripts (real, backend-backed —
+// §7.15 used for registered tests). execute_script stays a stub until the
+// execution slice.
 
 pub async fn execute_script(
     State(state): State<AppState>,

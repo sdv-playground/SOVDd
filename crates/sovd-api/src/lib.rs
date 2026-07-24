@@ -215,14 +215,15 @@ pub fn create_router(state: AppState) -> Router {
                 .put(handlers::stubs::control_communication_log)
                 .delete(handlers::stubs::delete_communication_log),
         )
-        // §7.15 scripts
+        // §7.15 scripts — used for developer-registered TESTS (discovery wired to
+        // the backend; execute still stubbed — see handlers::scripts).
         .route(
             "/vehicle/v1/components/{component_id}/scripts",
-            get(handlers::stubs::list_scripts),
+            get(handlers::scripts::list_scripts),
         )
         .route(
             "/vehicle/v1/components/{component_id}/scripts/{script_id}",
-            get(handlers::stubs::read_script),
+            get(handlers::scripts::read_script),
         )
         .route(
             "/vehicle/v1/components/{component_id}/scripts/{script_id}/executions",

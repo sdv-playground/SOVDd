@@ -16,6 +16,7 @@ use crate::models::{
     CommControlMode, DataPoint, DataValue, DtcSettingMode, EntityInfo, Fault, FaultFilter,
     FaultsResult, IoControlAction, IoControlResult, LinkControlResult, LinkMode, LogEntry,
     LogFilter, LogPage, OperationExecution, OperationInfo, OutputDetail, OutputInfo, ParameterInfo,
+    ScriptInfo,
     SecurityMode, SessionMode,
 };
 
@@ -621,6 +622,21 @@ pub trait DiagnosticBackend: Send + Sync {
         Err(crate::error::BackendError::NotSupported(
             "stop_operation".to_string(),
         ))
+    }
+
+    // =========================================================================
+    // Scripts (SOVD §7.15 — "Manage & execute scripts", dev/production). We use
+    // this collection for developer-registered TESTS: a script = a registered
+    // test, an execution = a test run. Default: none (a backend with no test
+    // surface exposes an empty scripts collection). See
+    // `tasks/sovd-tests-as-operations-design.md`.
+    // =========================================================================
+
+    /// List the scripts (registered tests) this entity exposes
+    /// (`GET /{entity}/scripts`). Default: none. A machine-manager guest backend
+    /// overrides this to proxy its in-guest test-agent's `/tests`.
+    async fn list_scripts(&self) -> BackendResult<Vec<ScriptInfo>> {
+        Ok(vec![])
     }
 
     // =========================================================================

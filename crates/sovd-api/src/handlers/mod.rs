@@ -5,6 +5,7 @@
 pub mod apps;
 pub mod bulk_data;
 pub mod clear_data;
+pub mod scripts;
 pub mod components;
 pub mod data;
 pub mod data_lists;
