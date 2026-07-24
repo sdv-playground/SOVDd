@@ -282,6 +282,12 @@ enum Commands {
         /// Poll interval (seconds) for --follow.
         #[arg(long, default_value = "1.0")]
         interval: f64,
+
+        /// Page the whole log via the server cursor (oldest→newest), following
+        /// `next_cursor` until exhausted. The interactive "get all" over the
+        /// inline JSON surface — for a WHOLE-FILE download use `bulk-data`.
+        #[arg(long)]
+        all: bool,
     },
 
     /// Access §7.20 bulk-data (log files / large payloads). The spec-native
@@ -471,6 +477,7 @@ async fn main() -> Result<()> {
             out,
             follow,
             interval,
+            all,
         } => {
             let client = create_client(&merged.server, &auth)?;
             match action.as_str() {
@@ -485,6 +492,7 @@ async fn main() -> Result<()> {
                         tail: *tail,
                         follow: *follow,
                         interval_secs: *interval,
+                        all: *all,
                     };
                     commands::logs::list(&client, ecu, &args, &ctx).await?;
                 }

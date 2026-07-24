@@ -33,6 +33,8 @@ pub struct LogArgs {
     /// Poll the list every `interval`, printing only new entries.
     pub follow: bool,
     pub interval_secs: f64,
+    /// Page the whole log via the server cursor (oldest→newest) until exhausted.
+    pub all: bool,
 }
 
 impl LogArgs {
@@ -57,6 +59,48 @@ pub async fn list(
     ctx: &OutputContext,
 ) -> Result<()> {
     let filter = args.to_filter();
+
+    // --all: page the whole log via the server cursor. Each response's
+    // `next_cursor` feeds the next request's `after`; stop when it is None (the
+    // server has no more — see the backend `get_logs_paged` contract). A server
+    // that doesn't paginate returns next_cursor=None on the first page, so this
+    // degrades to a single fetch. Client-side `pattern` still filters; `tail`
+    // is ignored here (it contradicts "all") — warn if both were given.
+    if args.all {
+        if args.follow {
+            anyhow::bail!("--all and --follow are mutually exclusive (one drains history, the other tails live)");
+        }
+        if args.tail.is_some() {
+            ctx.info("--tail ignored with --all (paging the whole log)");
+        }
+        let mut after: Option<String> = None;
+        let mut printed = 0usize;
+        // Bound the loop defensively so a misbehaving server (a cursor that never
+        // clears) can't spin forever; 100k pages × server page size is far beyond
+        // any real log.
+        for _ in 0..100_000 {
+            let mut f = filter.clone();
+            f.after = after.clone();
+            let resp = client.get_logs_filtered(ecu, &f).await?;
+            for e in &resp.items {
+                if let Some(pat) = &args.pattern {
+                    if !e.message.to_lowercase().contains(&pat.to_lowercase()) {
+                        continue;
+                    }
+                }
+                ctx.print_one(&LogRow::from(e));
+                printed += 1;
+            }
+            match resp.next_cursor {
+                Some(c) => after = Some(c),
+                None => break,
+            }
+        }
+        if printed == 0 {
+            ctx.info("No log entries");
+        }
+        return Ok(());
+    }
 
     if !args.follow {
         let entries = fetch(client, ecu, &filter, args).await?;
