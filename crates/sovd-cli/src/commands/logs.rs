@@ -118,26 +118,92 @@ pub async fn list(
         return Ok(());
     }
 
-    // --follow: poll, printing only entries whose id we haven't emitted. The
-    // seen-set is bounded to the last window so it can't grow without bound on a
-    // long-lived tail (ids are re-checked against the most recent fetch only).
+    // --follow: prefer the CURSOR. First call establishes a resume point — the
+    // server's tip_cursor ("now"), unless --since anchored an earlier start —
+    // then each poll requests `after=<last cursor>` and prints what arrived. The
+    // cursor is reboot-safe, so a follow survives a device reboot (unlike an
+    // id-dedup window). If the server returns no cursors at all (a non-paging
+    // backend), fall back to id-dedup polling.
     ctx.info(&format!(
         "Following {ecu} logs (poll every {:.1}s, Ctrl-C to stop)…",
         args.interval_secs
     ));
-    let mut seen: HashSet<String> = HashSet::new();
     let poll = Duration::from_secs_f64(args.interval_secs.max(0.1));
+
+    // Seed: one fetch to learn the starting cursor. With --since we START from
+    // that bound (print the matching backlog, then follow past it); without, we
+    // jump to the tip and follow only NEW entries.
+    let seed = client.get_logs_filtered(ecu, &filter).await?;
+    let cursor_mode = seed.next_cursor.is_some() || seed.tip_cursor.is_some();
+
+    if !cursor_mode {
+        // No server cursor → legacy id-dedup poll (bounded seen-set).
+        return follow_by_id_dedup(client, ecu, &filter, args, poll, ctx).await;
+    }
+
+    // If the user anchored with --since, emit the seed backlog first; otherwise
+    // start silent at the tip. Resume cursor = wherever the seed left off.
+    let mut after: Option<String> = if args.since.is_some() {
+        for e in &seed.items {
+            if pattern_ok(&e.message, args) {
+                ctx.print_one(&LogRow::from(e));
+            }
+        }
+        seed.next_cursor.clone().or_else(|| seed.tip_cursor.clone())
+    } else {
+        seed.tip_cursor.clone().or_else(|| seed.next_cursor.clone())
+    };
+
     loop {
-        match fetch(client, ecu, &filter, args).await {
+        tokio::time::sleep(poll).await;
+        let mut f = filter.clone();
+        f.after = after.clone();
+        match client.get_logs_filtered(ecu, &f).await {
+            Ok(resp) => {
+                for e in &resp.items {
+                    if pattern_ok(&e.message, args) {
+                        ctx.print_one(&LogRow::from(e));
+                    }
+                }
+                // Advance only when the server moved us forward; keep the last
+                // cursor otherwise (an empty poll shouldn't reset the position).
+                if let Some(c) = resp.next_cursor.or(resp.tip_cursor) {
+                    after = Some(c);
+                }
+            }
+            Err(e) => ctx.error(&format!("poll failed (retrying): {e}")),
+        }
+    }
+}
+
+/// Client-side substring filter (the server `LogFilter` has no pattern field).
+fn pattern_ok(message: &str, args: &LogArgs) -> bool {
+    match &args.pattern {
+        Some(p) => message.to_lowercase().contains(&p.to_lowercase()),
+        None => true,
+    }
+}
+
+/// Legacy follow for a backend that returns no cursor: re-fetch the list and
+/// print only ids not seen in the bounded window. Reboot-unsafe (id-based), but
+/// the only option when the server can't paginate.
+async fn follow_by_id_dedup(
+    client: &SovdClient,
+    ecu: &str,
+    filter: &LogFilter,
+    args: &LogArgs,
+    poll: Duration,
+    ctx: &OutputContext,
+) -> Result<()> {
+    let mut seen: HashSet<String> = HashSet::new();
+    loop {
+        match fetch(client, ecu, filter, args).await {
             Ok(entries) => {
-                // Oldest-first for a natural tail; the list arrives newest-first.
                 for e in entries.iter().rev() {
                     if seen.insert(e.id.clone()) {
                         ctx.print_one(&LogRow::from(e));
                     }
                 }
-                // Bound the seen-set: retain only ids present this round, so it
-                // tracks the live window rather than all history ever seen.
                 if seen.len() > 4096 {
                     let current: HashSet<String> = entries.iter().map(|e| e.id.clone()).collect();
                     seen.retain(|id| current.contains(id));
