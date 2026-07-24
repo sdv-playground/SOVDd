@@ -58,8 +58,13 @@ pub struct LogEntryResponse {
 pub struct LogFilterQuery {
     pub priority: Option<String>,
     pub source: Option<String>,
-    pub since: Option<DateTime<Utc>>,
-    pub until: Option<DateTime<Utc>>,
+    /// RFC 3339, or a position sentinel: `BEGIN` (oldest, no lower bound),
+    /// `END` (device now), `END-<N>{s,m,h}` (now minus a duration — the last N of
+    /// THIS boot). Resolved server-side against the device clock — see
+    /// [`resolve_time_bound`]. A cursor (`after`) is the reboot-safe resume tool;
+    /// these time bounds are a within-boot convenience.
+    pub since: Option<String>,
+    pub until: Option<String>,
     pub pattern: Option<String>,
     pub limit: Option<usize>,
     pub tail: Option<usize>,
@@ -71,6 +76,67 @@ pub struct LogFilterQuery {
     /// Opaque pagination cursor — return entries strictly after this position.
     /// Omit to start at the oldest available. Never parsed by the client.
     pub after: Option<String>,
+}
+
+/// Resolve a `since`/`until` value to an absolute time. Accepts RFC 3339, or a
+/// position sentinel resolved against the DEVICE clock (the server is the
+/// device, and log entries are stamped with the same clock, so "now" and
+/// "now − N" bound this boot's entries correctly):
+///
+///   BEGIN        → no bound (None) — the oldest available (a lower-bound `since`
+///                  of BEGIN means "from the start"; an upper-bound `until` of
+///                  BEGIN is meaningless but harmlessly yields no bound).
+///   END | NOW    → device now.
+///   END-<N>{s,m,h,d} | NOW-<N>…  → now minus the duration.
+///
+/// `None` input → `None` (unbounded). A malformed value → `BadRequest` (400), so
+/// a typo surfaces instead of silently widening the query. Case-insensitive
+/// sentinels; RFC 3339 is tried after the keyword forms.
+fn resolve_time_bound(raw: Option<&str>) -> Result<Option<DateTime<Utc>>, ApiError> {
+    let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let upper = s.to_ascii_uppercase();
+    if upper == "BEGIN" {
+        return Ok(None); // oldest — no lower bound
+    }
+    // END / NOW, optionally minus a duration: END-10m, NOW-2h, END-30s, END-1d.
+    for kw in ["END", "NOW"] {
+        if upper == kw {
+            return Ok(Some(Utc::now()));
+        }
+        if let Some(rest) = upper.strip_prefix(kw).and_then(|r| r.strip_prefix('-')) {
+            let secs = parse_duration_secs(rest).ok_or_else(|| {
+                ApiError::BadRequest(format!(
+                    "bad time value {s:?}: expected {kw}-<N>{{s,m,h,d}} (e.g. {kw}-10m)"
+                ))
+            })?;
+            return Ok(Some(Utc::now() - chrono::Duration::seconds(secs as i64)));
+        }
+    }
+    // Otherwise a literal RFC 3339 timestamp.
+    DateTime::parse_from_rfc3339(s)
+        .map(|t| Some(t.with_timezone(&Utc)))
+        .map_err(|_| {
+            ApiError::BadRequest(format!(
+                "bad time value {s:?}: expected RFC 3339, or BEGIN / END / END-<N>{{s,m,h,d}}"
+            ))
+        })
+}
+
+/// Parse a compact duration like `10m`, `2h`, `30s`, `1d` into seconds.
+fn parse_duration_secs(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (num, unit) = s.split_at(s.len().checked_sub(1)?);
+    let n: u64 = num.parse().ok()?;
+    let mult = match unit {
+        "s" | "S" => 1,
+        "m" | "M" => 60,
+        "h" | "H" => 3_600,
+        "d" | "D" => 86_400,
+        _ => return None,
+    };
+    n.checked_mul(mult)
 }
 
 impl From<&LogEntry> for LogEntryResponse {
@@ -134,8 +200,10 @@ pub async fn get_logs(
             _ => None,
         }),
         source: query.source,
-        since: query.since,
-        until: query.until,
+        // Resolve BEGIN/END/END-Nm sentinels (or RFC 3339) server-side against
+        // the device clock. A bad value is a 400, not a silent drop.
+        since: resolve_time_bound(query.since.as_deref())?,
+        until: resolve_time_bound(query.until.as_deref())?,
         pattern: query.pattern,
         limit: query.limit,
         tail: query.tail,
@@ -234,4 +302,49 @@ pub async fn delete_log(
     backend.delete_log(&params.log_id).await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_time_bound_sentinels_and_rfc3339() {
+        // BEGIN and absent → unbounded.
+        assert!(resolve_time_bound(Some("BEGIN")).unwrap().is_none());
+        assert!(resolve_time_bound(Some("begin")).unwrap().is_none()); // case-insensitive
+        assert!(resolve_time_bound(None).unwrap().is_none());
+        assert!(resolve_time_bound(Some("  ")).unwrap().is_none()); // blank → unbounded
+
+        // END / NOW → ~device now (within a generous window of the call).
+        let before = Utc::now();
+        let end = resolve_time_bound(Some("END")).unwrap().unwrap();
+        let after = Utc::now();
+        assert!(end >= before && end <= after, "END resolves to ~now");
+        assert!(resolve_time_bound(Some("now")).unwrap().is_some());
+
+        // END-<N> subtracts the duration.
+        let now = Utc::now();
+        let ten_min = resolve_time_bound(Some("END-10m")).unwrap().unwrap();
+        let delta = (now - ten_min).num_seconds();
+        assert!((595..=605).contains(&delta), "END-10m ≈ 600s ago, got {delta}");
+        // units s/h/d all parse.
+        assert!(resolve_time_bound(Some("NOW-30s")).unwrap().is_some());
+        assert!(resolve_time_bound(Some("END-2h")).unwrap().is_some());
+        assert!(resolve_time_bound(Some("END-1d")).unwrap().is_some());
+
+        // RFC 3339 passes through.
+        let t = resolve_time_bound(Some("2026-07-24T10:00:00Z")).unwrap().unwrap();
+        assert_eq!(t.to_rfc3339(), "2026-07-24T10:00:00+00:00");
+    }
+
+    #[test]
+    fn resolve_time_bound_rejects_garbage() {
+        for bad in ["END-10x", "END-", "yesterday", "END-abc", "10m", "2026-13-99"] {
+            assert!(
+                matches!(resolve_time_bound(Some(bad)), Err(ApiError::BadRequest(_))),
+                "{bad:?} should be a 400"
+            );
+        }
+    }
 }

@@ -289,13 +289,14 @@ enum Commands {
         #[arg(long)]
         all: bool,
 
-        /// Only entries at/after this time (RFC 3339). Precise on journald,
-        /// coarse (file mtime) on host files; a cursor is the reliable resume
-        /// token since CVC wall-clock resets across reboots.
+        /// Lower time bound: RFC 3339, or a position sentinel BEGIN (oldest) /
+        /// END (now) / END-<N>{s,m,h,d} (e.g. END-10m = last 10 min of this
+        /// boot). Resolved server-side. Precise on journald, coarse (file mtime)
+        /// on host files; a cursor is the reliable resume token across reboots.
         #[arg(long)]
         since: Option<String>,
 
-        /// Only entries at/before this time (RFC 3339). Same caveats as --since.
+        /// Upper time bound: RFC 3339 or BEGIN/END/END-<N>… (see --since).
         #[arg(long)]
         until: Option<String>,
     },
