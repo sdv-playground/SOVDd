@@ -153,4 +153,11 @@ pub struct LogPage {
     /// detect the gap rather than silently missing entries. `None` if unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oldest_cursor: Option<String>,
+    /// The cursor at the current HEAD ("now") — a resume point for FOLLOWING:
+    /// poll `after = tip_cursor` to get only entries that arrive after this call.
+    /// Set even when `next_cursor` is `None` (head reached), so `--since END`
+    /// / a follower has a starting handle. `None` when the backend can't name
+    /// its tip. Reboot-safe like the other cursors.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tip_cursor: Option<String>,
 }

@@ -513,6 +513,7 @@ pub trait DiagnosticBackend: Send + Sync {
             items: self.get_logs(filter).await?,
             next_cursor: None,
             oldest_cursor: None,
+            tip_cursor: None,
         })
     }
 

@@ -708,7 +708,7 @@ impl SovdClient {
                 qp.append_pair("limit", &n.to_string());
             }
             if let Some(ref c) = filter.after {
-                qp.append_pair("after", c);
+                qp.append_pair("x-sumo-after", c);
             }
             if let Some(ref s) = filter.since {
                 qp.append_pair("since", s);

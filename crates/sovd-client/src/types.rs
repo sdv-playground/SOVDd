@@ -450,12 +450,16 @@ pub struct LogsResponse {
     pub total_count: Option<usize>,
     /// Opaque cursor for the next page; feed back as `LogFilter::after`. `None`
     /// once the head is reached — a paging loop stops here. Absent when the
-    /// backend doesn't paginate.
-    #[serde(default)]
+    /// backend doesn't paginate. Wire name `x-sumo-next-cursor` (vendor ext).
+    #[serde(default, rename = "x-sumo-next-cursor")]
     pub next_cursor: Option<String>,
     /// Oldest position still available (gap detection). Absent when unknown.
-    #[serde(default)]
+    #[serde(default, rename = "x-sumo-oldest-cursor")]
     pub oldest_cursor: Option<String>,
+    /// Cursor at the current head ("now") — poll `after = tip_cursor` to follow
+    /// only new entries. Present even when `next_cursor` is None.
+    #[serde(default, rename = "x-sumo-tip-cursor")]
+    pub tip_cursor: Option<String>,
 }
 
 /// Log filter for querying logs

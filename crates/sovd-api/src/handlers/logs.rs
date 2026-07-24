@@ -21,15 +21,22 @@ use crate::state::AppState;
 pub struct LogsResponse {
     pub items: Vec<LogEntryResponse>,
     pub total_count: usize,
-    /// Opaque cursor for the NEXT page; feed back as `?after=`. `null` once the
-    /// caller has reached the head — a paging loop stops here. Absent when the
-    /// backend doesn't paginate.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Opaque cursor for the NEXT page; feed back as `?x-sumo-after=`. `null`
+    /// once the caller has reached the head — a paging loop stops here. Absent
+    /// when the backend doesn't paginate. Vendor extension (§6.2.7 `x-<ext>-`;
+    /// the SOVD log spec has no cursor).
+    #[serde(rename = "x-sumo-next-cursor", skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
-    /// Oldest position still available; if a caller's `after` predates it,
+    /// Oldest position still available; if a caller's `x-sumo-after` predates it,
     /// history in between rotated away (gap detection). Absent when unknown.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-sumo-oldest-cursor", skip_serializing_if = "Option::is_none")]
     pub oldest_cursor: Option<String>,
+    /// The cursor at the current HEAD ("now"): poll `x-sumo-after=<this>` to
+    /// follow only new entries. Present even when `next_cursor` is null (head
+    /// reached), so a follower has a resume point. Absent when the backend can't
+    /// name its tip. Vendor extension.
+    #[serde(rename = "x-sumo-tip-cursor", skip_serializing_if = "Option::is_none")]
+    pub tip_cursor: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -74,7 +81,9 @@ pub struct LogFilterQuery {
     /// Filter by retrieval status (pending, retrieved)
     pub status: Option<String>,
     /// Opaque pagination cursor — return entries strictly after this position.
-    /// Omit to start at the oldest available. Never parsed by the client.
+    /// Omit to start at the oldest available. Never parsed by the client. Vendor
+    /// extension (§6.2.7): the wire name is `x-sumo-after`.
+    #[serde(rename = "x-sumo-after")]
     pub after: Option<String>,
 }
 
@@ -229,6 +238,7 @@ pub async fn get_logs(
         total_count,
         next_cursor: page.next_cursor,
         oldest_cursor: page.oldest_cursor,
+        tip_cursor: page.tip_cursor,
     }))
 }
 
