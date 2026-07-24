@@ -710,6 +710,12 @@ impl SovdClient {
             if let Some(ref c) = filter.after {
                 qp.append_pair("after", c);
             }
+            if let Some(ref s) = filter.since {
+                qp.append_pair("since", s);
+            }
+            if let Some(ref u) = filter.until {
+                qp.append_pair("until", u);
+            }
         }
         // An empty query set leaves a trailing "?"; strip it for tidiness.
         if url.query() == Some("") {

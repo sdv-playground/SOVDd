@@ -480,6 +480,14 @@ pub struct LogFilter {
     /// From a prior response's `next_cursor`; never constructed by hand.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub after: Option<String>,
+    /// Lower time bound (RFC 3339). Coarse on the host tier (file mtime), precise
+    /// on journald. Caveat: CVC wall-clock is non-monotonic across reboots — a
+    /// cursor is the reliable resume token; time filters are a convenience.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// Upper time bound (RFC 3339). Same caveats as `since`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
 }
 
 // =============================================================================

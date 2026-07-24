@@ -288,6 +288,16 @@ enum Commands {
         /// inline JSON surface — for a WHOLE-FILE download use `bulk-data`.
         #[arg(long)]
         all: bool,
+
+        /// Only entries at/after this time (RFC 3339). Precise on journald,
+        /// coarse (file mtime) on host files; a cursor is the reliable resume
+        /// token since CVC wall-clock resets across reboots.
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Only entries at/before this time (RFC 3339). Same caveats as --since.
+        #[arg(long)]
+        until: Option<String>,
     },
 
     /// Access §7.20 bulk-data (log files / large payloads). The spec-native
@@ -478,6 +488,8 @@ async fn main() -> Result<()> {
             follow,
             interval,
             all,
+            since,
+            until,
         } => {
             let client = create_client(&merged.server, &auth)?;
             match action.as_str() {
@@ -493,6 +505,8 @@ async fn main() -> Result<()> {
                         follow: *follow,
                         interval_secs: *interval,
                         all: *all,
+                        since: since.clone(),
+                        until: until.clone(),
                     };
                     commands::logs::list(&client, ecu, &args, &ctx).await?;
                 }

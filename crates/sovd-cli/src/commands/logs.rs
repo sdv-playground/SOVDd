@@ -35,6 +35,10 @@ pub struct LogArgs {
     pub interval_secs: f64,
     /// Page the whole log via the server cursor (oldest→newest) until exhausted.
     pub all: bool,
+    /// Lower time bound (RFC 3339), server-side.
+    pub since: Option<String>,
+    /// Upper time bound (RFC 3339), server-side.
+    pub until: Option<String>,
 }
 
 impl LogArgs {
@@ -45,8 +49,10 @@ impl LogArgs {
             priority: self.priority.clone(),
             source: self.source.clone(),
             limit: self.limit,
-            // Paging (cursor loop) is wired in a later step; single-shot for now.
+            // `after` is set by the --all paging loop per-request; None here.
             after: None,
+            since: self.since.clone(),
+            until: self.until.clone(),
         }
     }
 }
