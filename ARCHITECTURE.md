@@ -272,7 +272,8 @@ The reference SOVD **app-entity** (ISO §6.5): it exposes synthetic params and o
 
 health · meta (`/version-info`, `/vehicle/v1/docs`, `/.well-known/sovd-extensions`) · components · data
 (+ `?raw=true` for raw DID, + `?categories=` filter) · faults (+ `?active_only=true`, `delete_fault`) ·
-data-lists (define-data operation + read/clear) · logs (+ `entries`, `config`) · **spec-presence stub
+data-lists (define-data operation + read/clear) · logs (+ `entries`, `config`, cursor paging — §6.3.1) ·
+bulk-data (real §7.20 collection: categories/list/download 200·307·202 — §6.3.1) · **spec-presence stub
 collections** (configurations, locks, triggers, communication-logs, scripts, data-groups — present for
 spec coverage, backend wiring TODO, honest 501s) · data-categories (real, DID-derived) ·
 modes/comm-ctrl + modes/dtcsetting (UDS 0x28/0x85, Table-343 names) · clear-data · operations (+ async
@@ -291,10 +292,40 @@ and `modes/link` (LinkControl 0x87 has no standardized mode name, C-130).
 ### 6.3 Handler organization
 
 One module per domain in `crates/sovd-api/src/handlers/`: `components`, `data`, `data_lists`,
-`clear_data`, `faults`, `logs` + `logs_ext`, `operations`, `modes`, `reset`, `subscriptions`,
-`sub_entity` (the entire `/apps/{app_id}/...` tree), `updates` (the full `/updates` wire + the vendor
-verbs), `stubs` (the spec-presence stub collections), `definitions` (`/admin`), `apps`, `software`,
-and `meta` (version-info, docs, `.well-known`, the 404/405 fallbacks).
+`clear_data`, `faults`, `logs` + `logs_ext`, `bulk_data`, `operations`, `modes`, `reset`,
+`subscriptions`, `sub_entity` (the entire `/apps/{app_id}/...` tree), `updates` (the full `/updates`
+wire + the vendor verbs), `stubs` (the spec-presence stub collections), `definitions` (`/admin`),
+`apps`, `software`, and `meta` (version-info, docs, `.well-known`, the 404/405 fallbacks).
+
+### 6.3.1 Log retrieval — two paths (§7.21 + §7.20)
+
+There are **two** ways to read a component's logs, by design:
+
+1. **Bulk-data download (§7.20, C-121 — the NORMATIVE "get all").** The spec says
+   logs are retrieved via bulk-data: `GET /{id}/logs/entries` links to log files
+   exposed as a `logs` bulk-data category. `GET /{id}/bulk-data` lists categories;
+   `/bulk-data/logs` lists items (one per log file, `created-before/after`
+   filterable); `/bulk-data/logs/{item}` downloads the whole file
+   (`BulkDataDownload` → 200 inline / 307 redirect / 202 async, gated on
+   `capabilities.bulk_data`). This is how you pull an ENTIRE log.
+2. **Inline `GET /{id}/logs` with an opaque cursor (vendor extension, the quick
+   interactive view).** The SOVD log spec has NO cursor, so the paging surface is
+   a vendor extension under the §6.2.7 `x-<ext>-` rule: request `x-sumo-after=`,
+   response carries `x-sumo-next-cursor` (feed back to page oldest→newest, `null`
+   at head), `x-sumo-oldest-cursor` (gap detection), and `x-sumo-tip-cursor`
+   ("now" — poll `after=<tip>` to FOLLOW only new entries). `since`/`until` accept
+   RFC 3339 **or** the position sentinels `BEGIN` / `END` / `END-<N>{s,m,h,d}`
+   (resolved server-side; e.g. `since=END-10m` = the last 10 min of this boot).
+
+WHY a cursor and not a timestamp for resume: the device clock is non-monotonic
+across reboots (1970 → safe-time floor → reboot → 1970), so an absolute time is an
+unreliable resume key; the cursor encodes the backend's monotonic ordering key
+(journald `__CURSOR` on Linux guests, a `(boot,gen,offset)` on host files) and is
+reboot-safe. `LogFilter.after` / `LogPage {items, next_cursor, oldest_cursor,
+tip_cursor}` are the sovd-core carriers; the backend does the real paging
+(`get_logs_paged`), the API/CLI just loop until `next_cursor` is `None`. The CLI
+exposes both: `logs list --all` (cursor loop), `logs list --follow` (poll the
+tip), `bulk-data get-all` (whole-file download).
 
 ### 6.4 Request lifecycle (worked example: `GET .../data/{param}`)
 

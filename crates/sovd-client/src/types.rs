@@ -954,3 +954,56 @@ pub struct DataDefinitionResponse {
     #[serde(default)]
     pub error: Option<String>,
 }
+
+#[cfg(test)]
+mod cursor_wire_tests {
+    use super::*;
+
+    /// The server emits the cursor fields as `x-sumo-*` (vendor-extension names,
+    /// §6.2.7). A rename typo here would silently break paging — pin the wire
+    /// contract: a server body with those exact keys must populate the struct.
+    #[test]
+    fn logs_response_deserializes_x_sumo_cursors() {
+        let body = r#"{
+            "items": [],
+            "total_count": 0,
+            "x-sumo-next-cursor": "NEXT",
+            "x-sumo-oldest-cursor": "OLD",
+            "x-sumo-tip-cursor": "TIP"
+        }"#;
+        let r: LogsResponse = serde_json::from_str(body).expect("parse");
+        assert_eq!(r.next_cursor.as_deref(), Some("NEXT"));
+        assert_eq!(r.oldest_cursor.as_deref(), Some("OLD"));
+        assert_eq!(r.tip_cursor.as_deref(), Some("TIP"));
+        // Absent cursors → None (a non-paging server omits them).
+        let none: LogsResponse = serde_json::from_str(r#"{"items":[],"total_count":0}"#).unwrap();
+        assert!(none.next_cursor.is_none() && none.tip_cursor.is_none());
+    }
+
+    /// `after` is the cursor a client feeds back; the field must be set-able and
+    /// serialize (the client sends it as the `x-sumo-after` query param, built in
+    /// client.rs). LogFilter is Serialize-only, so just assert serialization.
+    #[test]
+    fn log_filter_after_serializes() {
+        let f = LogFilter {
+            after: Some("CURSOR".into()),
+            ..Default::default()
+        };
+        let j = serde_json::to_string(&f).unwrap();
+        assert!(j.contains("CURSOR"), "after must serialize: {j}");
+        // An unset filter omits after (skip_serializing_if).
+        let empty = serde_json::to_string(&LogFilter::default()).unwrap();
+        assert!(!empty.contains("after"), "unset after omitted: {empty}");
+    }
+
+    /// Bulk-data item metadata deserializes from the server's item shape
+    /// (id/size/created/mime/source/href).
+    #[test]
+    fn bulk_item_deserializes() {
+        let body = r#"{"id":"abc","size":42,"created":"2026-07-24T10:00:00Z","mime":"text/plain","source":"svc","href":"/x/abc"}"#;
+        let it: BulkItemRef = serde_json::from_str(body).unwrap();
+        assert_eq!(it.id, "abc");
+        assert_eq!(it.size, 42);
+        assert_eq!(it.source.as_deref(), Some("svc"));
+    }
+}
