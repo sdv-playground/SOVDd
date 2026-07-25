@@ -594,9 +594,7 @@ impl ClientAuth {
 fn create_client(server: &str, auth: &ClientAuth) -> Result<SovdClient> {
     let ca = auth.ca_cert_pem.as_deref();
     match &auth.token {
-        Some(token) => {
-            SovdClient::with_bearer_token_verifying(server, token, auth.insecure, ca)
-        }
+        Some(token) => SovdClient::with_bearer_token_verifying(server, token, auth.insecure, ca),
         None => SovdClient::new_verifying(server, auth.insecure, ca),
     }
     .context("Failed to create SOVD client")
@@ -648,13 +646,8 @@ mod tests {
     /// not deferred to the first request.
     #[test]
     fn ca_cert_missing_file_errors_early() {
-        let cli = Cli::try_parse_from([
-            "sovd-cli",
-            "--ca-cert",
-            "/no/such/ca-cert.pem",
-            "list",
-        ])
-        .expect("args parse");
+        let cli = Cli::try_parse_from(["sovd-cli", "--ca-cert", "/no/such/ca-cert.pem", "list"])
+            .expect("args parse");
         // Not `.expect_err`: ClientAuth deliberately has no Debug (it holds the
         // bearer token — keep it out of any log/panic output).
         match ClientAuth::from_cli(&cli) {
@@ -669,7 +662,9 @@ mod tests {
     fn logs_action_and_id_are_positional() {
         let list = Cli::try_parse_from(["sovd-cli", "logs", "supernova"]).expect("parse list");
         match list.command {
-            Commands::Logs { ecu, action, id, .. } => {
+            Commands::Logs {
+                ecu, action, id, ..
+            } => {
                 assert_eq!(ecu, "supernova");
                 assert_eq!(action, "list"); // default
                 assert!(id.is_none());
@@ -680,7 +675,9 @@ mod tests {
         let get = Cli::try_parse_from(["sovd-cli", "logs", "vm1", "get", "line:x:abc"])
             .expect("parse get");
         match get.command {
-            Commands::Logs { ecu, action, id, .. } => {
+            Commands::Logs {
+                ecu, action, id, ..
+            } => {
                 assert_eq!(ecu, "vm1");
                 assert_eq!(action, "get");
                 assert_eq!(id.as_deref(), Some("line:x:abc"));

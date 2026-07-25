@@ -153,11 +153,9 @@ pub async fn download(
         )
             .into_response()),
         // 202: payload is being prepared; the client polls Location until ready.
-        BulkDataDownload::Async { location } => Ok((
-            StatusCode::ACCEPTED,
-            [(header::LOCATION, location)],
-        )
-            .into_response()),
+        BulkDataDownload::Async { location } => {
+            Ok((StatusCode::ACCEPTED, [(header::LOCATION, location)]).into_response())
+        }
     }
 }
 
@@ -166,8 +164,8 @@ mod tests {
     use super::*;
     use sovd_core::{
         BackendError, BackendResult, BulkCategory, BulkDataItem, Capabilities, DataValue,
-        DiagnosticBackend, EntityInfo, FaultFilter, FaultsResult, OperationExecution, OperationInfo,
-        ParameterInfo,
+        DiagnosticBackend, EntityInfo, FaultFilter, FaultsResult, OperationExecution,
+        OperationInfo, ParameterInfo,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -227,7 +225,9 @@ mod tests {
         }
         // ---- bulk-data surface under test ----
         async fn list_bulk_data_categories(&self) -> BackendResult<Vec<BulkCategory>> {
-            Ok(vec![BulkCategory { name: "logs".into() }])
+            Ok(vec![BulkCategory {
+                name: "logs".into(),
+            }])
         }
         async fn list_bulk_data(
             &self,
@@ -288,13 +288,10 @@ mod tests {
         assert_eq!(items.items[0].size, 5);
         assert!(items.items[0].href.ends_with("/bulk-data/logs/svc"));
 
-        let resp = download(
-            State(st),
-            Path(("vm1".into(), "logs".into(), "svc".into())),
-        )
-        .await
-        .expect("download")
-        .into_response();
+        let resp = download(State(st), Path(("vm1".into(), "logs".into(), "svc".into())))
+            .await
+            .expect("download")
+            .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
             resp.headers().get(header::CONTENT_TYPE).unwrap(),

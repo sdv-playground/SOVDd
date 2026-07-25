@@ -5,12 +5,12 @@
 pub mod apps;
 pub mod bulk_data;
 pub mod clear_data;
-pub mod scripts;
 pub mod components;
 pub mod data;
 pub mod data_lists;
 pub mod definitions;
 pub mod faults;
+pub mod scripts;
 // F.D8b: handlers::files + handlers::flash deleted.  The legacy
 // wire shapes they served are replaced by /updates (F.D2).
 // C-025: handlers::discovery (POST /discovery) + handlers::streams

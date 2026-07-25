@@ -53,7 +53,8 @@ pub async fn run(
                 ctx.info("No bulk-data categories");
                 return Ok(());
             }
-            let rows: Vec<CategoryRow> = cats.into_iter().map(|c| CategoryRow { id: c.id }).collect();
+            let rows: Vec<CategoryRow> =
+                cats.into_iter().map(|c| CategoryRow { id: c.id }).collect();
             ctx.print(&rows);
         }
         "list" => {
@@ -90,11 +91,12 @@ pub async fn run(
                 .list_bulk_data(ecu, category, created_after, created_before)
                 .await?;
             if items.is_empty() {
-                ctx.info(&format!("No items in category `{category}` — nothing to download"));
+                ctx.info(&format!(
+                    "No items in category `{category}` — nothing to download"
+                ));
                 return Ok(());
             }
-            std::fs::create_dir_all(dir)
-                .with_context(|| format!("create output dir {dir}"))?;
+            std::fs::create_dir_all(dir).with_context(|| format!("create output dir {dir}"))?;
             let mut total = 0usize;
             for it in &items {
                 let bytes = client.get_bulk_data(ecu, category, &it.id).await?;
@@ -115,7 +117,9 @@ pub async fn run(
                 items.len()
             ));
         }
-        other => bail!("unknown bulk-data action `{other}` (expected: categories, list, download, get-all)"),
+        other => bail!(
+            "unknown bulk-data action `{other}` (expected: categories, list, download, get-all)"
+        ),
     }
     Ok(())
 }
@@ -132,5 +136,8 @@ fn item_row(it: &sovd_client::BulkItemRef) -> ItemRow {
 /// A short, filesystem-safe slice of an opaque item id for building a filename
 /// (the full base64url id can be long; the source prefix carries the meaning).
 fn short_id(id: &str) -> String {
-    id.chars().filter(|c| c.is_alphanumeric()).take(12).collect()
+    id.chars()
+        .filter(|c| c.is_alphanumeric())
+        .take(12)
+        .collect()
 }

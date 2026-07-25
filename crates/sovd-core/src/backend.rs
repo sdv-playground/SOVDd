@@ -582,11 +582,7 @@ pub trait DiagnosticBackend: Send + Sync {
     /// (`GET /{entity}/bulk-data/{category}/{id}`). Returns the payload inline, a
     /// redirect, or an async-staging pointer (see [`BulkDataDownload`]). Default:
     /// not supported.
-    async fn get_bulk_data(
-        &self,
-        category: &str,
-        id: &str,
-    ) -> BackendResult<BulkDataDownload> {
+    async fn get_bulk_data(&self, category: &str, id: &str) -> BackendResult<BulkDataDownload> {
         let _ = (category, id);
         Err(crate::error::BackendError::NotSupported(
             "get_bulk_data".to_string(),

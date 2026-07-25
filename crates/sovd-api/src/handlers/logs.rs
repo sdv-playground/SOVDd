@@ -29,7 +29,10 @@ pub struct LogsResponse {
     pub next_cursor: Option<String>,
     /// Oldest position still available; if a caller's `x-sumo-after` predates it,
     /// history in between rotated away (gap detection). Absent when unknown.
-    #[serde(rename = "x-sumo-oldest-cursor", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "x-sumo-oldest-cursor",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub oldest_cursor: Option<String>,
     /// The cursor at the current HEAD ("now"): poll `x-sumo-after=<this>` to
     /// follow only new entries. Present even when `next_cursor` is null (head
@@ -337,20 +340,32 @@ mod tests {
         let now = Utc::now();
         let ten_min = resolve_time_bound(Some("END-10m")).unwrap().unwrap();
         let delta = (now - ten_min).num_seconds();
-        assert!((595..=605).contains(&delta), "END-10m ≈ 600s ago, got {delta}");
+        assert!(
+            (595..=605).contains(&delta),
+            "END-10m ≈ 600s ago, got {delta}"
+        );
         // units s/h/d all parse.
         assert!(resolve_time_bound(Some("NOW-30s")).unwrap().is_some());
         assert!(resolve_time_bound(Some("END-2h")).unwrap().is_some());
         assert!(resolve_time_bound(Some("END-1d")).unwrap().is_some());
 
         // RFC 3339 passes through.
-        let t = resolve_time_bound(Some("2026-07-24T10:00:00Z")).unwrap().unwrap();
+        let t = resolve_time_bound(Some("2026-07-24T10:00:00Z"))
+            .unwrap()
+            .unwrap();
         assert_eq!(t.to_rfc3339(), "2026-07-24T10:00:00+00:00");
     }
 
     #[test]
     fn resolve_time_bound_rejects_garbage() {
-        for bad in ["END-10x", "END-", "yesterday", "END-abc", "10m", "2026-13-99"] {
+        for bad in [
+            "END-10x",
+            "END-",
+            "yesterday",
+            "END-abc",
+            "10m",
+            "2026-13-99",
+        ] {
             assert!(
                 matches!(resolve_time_bound(Some(bad)), Err(ApiError::BadRequest(_))),
                 "{bad:?} should be a 400"
