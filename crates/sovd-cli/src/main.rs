@@ -334,38 +334,6 @@ enum Commands {
         #[arg(long, short = 'd')]
         dir: Option<String>,
     },
-
-    /// External TESTER over SOVD §7.15 scripts: run a component's registered
-    /// developer tests, capture each run's log window via its cursor bracket,
-    /// judge verdict + logs, and report. Exits non-zero if any test failed.
-    Test {
-        /// ECU / component id (a guest VM exposing a test-agent).
-        ecu: String,
-
-        /// Run only this test id (positional). Omit to run all registered tests.
-        test_id: Option<String>,
-
-        /// Discovery filter: only tests carrying this tag (e.g. smoke).
-        #[arg(long)]
-        tag: Option<String>,
-
-        /// Extra comma-separated substrings that mark a log line anomalous, on
-        /// top of the built-in crash markers (case-insensitive).
-        #[arg(long, value_delimiter = ',')]
-        grep: Vec<String>,
-
-        /// Judge on the framework verdict alone — skip the log-window scan.
-        #[arg(long)]
-        no_log_check: bool,
-
-        /// Print anomalous log lines from each test's window.
-        #[arg(long)]
-        show_logs: bool,
-
-        /// Write the full JSON report to this path.
-        #[arg(long, short = 'o')]
-        report: Option<String>,
-    },
 }
 
 #[tokio::main]
@@ -586,27 +554,6 @@ async fn main() -> Result<()> {
                 &ctx,
             )
             .await?;
-        }
-
-        Commands::Test {
-            ecu,
-            test_id,
-            tag,
-            grep,
-            no_log_check,
-            show_logs,
-            report,
-        } => {
-            let client = create_client(&merged.server, &auth)?;
-            let args = commands::test::TestArgs {
-                only: test_id.clone(),
-                tag: tag.clone(),
-                grep: grep.clone(),
-                no_log_check: *no_log_check,
-                show_logs: *show_logs,
-                report: report.clone(),
-            };
-            commands::test::test(&client, ecu, &args, &ctx).await?;
         }
     }
 

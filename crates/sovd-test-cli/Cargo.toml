@@ -1,0 +1,32 @@
+[package]
+name = "sovd-test-cli"
+version.workspace = true
+edition.workspace = true
+description = "External test runner over SOVD §7.15 scripts (verdict + log-window capture)"
+
+[[bin]]
+name = "sovd-test-cli"
+path = "src/main.rs"
+
+[dependencies]
+# Client library — the generic SOVD protocol binding (scripts, logs, …).
+sovd-client = { path = "../sovd-client" }
+
+# CLI parsing
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization (the JSON report artifact)
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Output formatting
+tabled = "0.15"
+colored = "2.1"
+
+# Utilities
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

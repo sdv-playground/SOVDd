@@ -1,6 +1,6 @@
-//! Test command — the external TESTER over SOVD §7.15 scripts.
+//! The tester harness — the payoff of the tests-as-scripts work.
 //!
-//! This is the payoff of the tests-as-scripts work: a harness that
+//! A run:
 //!   1. DISCOVERS a component's registered tests (`GET /scripts`, optional
 //!      `--tag`), or runs one named test,
 //!   2. EXECUTES each over SOVD (`POST /scripts/{id}/executions`) — the guest
@@ -16,7 +16,9 @@
 //!
 //! It owns NO test semantics — the developer's framework (inside the guest
 //! entry's `cmd`) produces the verdict; this only runs it and reads the result +
-//! the log window. See `tasks/sovd-tests-as-operations-design.md`.
+//! the log window. Living in its OWN binary (not the generic sovd-cli) keeps this
+//! policy layer — anomaly heuristics, verdict+logs pairing, exit-code-as-result —
+//! out of the protocol client. See `tasks/sovd-tests-as-operations-design.md`.
 
 use anyhow::Result;
 use serde::Serialize;
@@ -25,7 +27,7 @@ use tabled::Tabled;
 
 use crate::output::OutputContext;
 
-/// CLI knobs for the tester.
+/// Knobs for a tester run.
 #[derive(Debug, Clone, Default)]
 pub struct TestArgs {
     /// Run only this test id (else all registered on the component).
@@ -33,11 +35,11 @@ pub struct TestArgs {
     /// Discovery filter — only tests carrying this tag (§6.2.7 `tags`).
     pub tag: Option<String>,
     /// Extra case-insensitive substrings that mark a log line anomalous, on top
-    /// of the built-in crash set. Repeatable via comma-split upstream.
+    /// of the built-in crash set.
     pub grep: Vec<String>,
     /// Skip the log-window anomaly scan — judge on the framework verdict alone.
     pub no_log_check: bool,
-    /// Print the captured log window for each test (not just anomalies).
+    /// Print anomalous log lines from each test's window.
     pub show_logs: bool,
     /// Write the full machine-readable report (JSON) to this path.
     pub report: Option<String>,
@@ -131,13 +133,14 @@ impl From<&TestOutcome> for TestRow {
     }
 }
 
-/// Entry point for `sovd-cli test <ecu> [test-id] ...`.
-pub async fn test(
+/// Run the tester. Returns the number of FAILED tests (0 = all passed) so the
+/// binary can map it to an exit code — the tester's result IS its exit status.
+pub async fn run(
     client: &SovdClient,
     ecu: &str,
     args: &TestArgs,
     ctx: &OutputContext,
-) -> Result<()> {
+) -> Result<usize> {
     // 1. Discover (or take the single named test).
     let script_ids: Vec<String> = match &args.only {
         Some(id) => vec![id.clone()],
@@ -151,7 +154,7 @@ pub async fn test(
                         .map(|t| format!(" (tag `{t}`)"))
                         .unwrap_or_default()
                 ));
-                return Ok(());
+                return Ok(0);
             }
             scripts.into_iter().map(|s| s.id).collect()
         }
@@ -177,12 +180,11 @@ pub async fn test(
 
     let failed = outcomes.iter().filter(|o| !o.ok).count();
     if failed > 0 {
-        // A tester's exit code IS its result — a CI/rig caller keys off it.
         ctx.error(&format!("{failed}/{} test(s) failed", outcomes.len()));
-        std::process::exit(1);
+    } else {
+        ctx.success(&format!("all {} test(s) passed", outcomes.len()));
     }
-    ctx.success(&format!("all {} test(s) passed", outcomes.len()));
-    Ok(())
+    Ok(failed)
 }
 
 /// Execute one test, capture its log window, and judge it. Never bails — an

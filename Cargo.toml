@@ -15,6 +15,7 @@ members = [
     "crates/example-ecu",
     "crates/example-app",
     "crates/sovd-cli",
+    "crates/sovd-test-cli",
     # Tests
     "crates/sovd-tests",
 ]
