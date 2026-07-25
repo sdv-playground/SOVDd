@@ -347,7 +347,7 @@ const PATHS: &[PathEntry] = &[
         path: "/vehicle/v1/components/{component_id}/bulk-data/{category}/{bulk_data_id}",
         summary: "Download a bulk-data item (200/202/307).",
     },
-    // scripts (§7.15) — developer-registered tests (discovery wired; execute stubbed)
+    // scripts (§7.15) — developer-registered tests (discovery + execution wired)
     PathEntry {
         method: "GET",
         path: "/vehicle/v1/components/{component_id}/scripts",
@@ -357,6 +357,21 @@ const PATHS: &[PathEntry] = &[
         method: "GET",
         path: "/vehicle/v1/components/{component_id}/scripts/{script_id}",
         summary: "Read one registered test's metadata.",
+    },
+    PathEntry {
+        method: "POST",
+        path: "/vehicle/v1/components/{component_id}/scripts/{script_id}/executions",
+        summary: "Run a registered test — 202 + Location.",
+    },
+    PathEntry {
+        method: "GET",
+        path: "/vehicle/v1/components/{component_id}/scripts/{script_id}/executions",
+        summary: "List a test's execution ids.",
+    },
+    PathEntry {
+        method: "GET",
+        path: "/vehicle/v1/components/{component_id}/scripts/{script_id}/executions/{exec_id}",
+        summary: "Poll a test run: status, verdict, log-cursor bracket.",
     },
     // clear-data (§7.13)
     PathEntry {

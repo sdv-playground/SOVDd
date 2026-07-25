@@ -16,8 +16,7 @@ use crate::models::{
     CommControlMode, DataPoint, DataValue, DtcSettingMode, EntityInfo, Fault, FaultFilter,
     FaultsResult, IoControlAction, IoControlResult, LinkControlResult, LinkMode, LogEntry,
     LogFilter, LogPage, OperationExecution, OperationInfo, OutputDetail, OutputInfo, ParameterInfo,
-    ScriptInfo,
-    SecurityMode, SessionMode,
+    ScriptExecution, ScriptInfo, SecurityMode, SessionMode,
 };
 
 /// Byte stream for streaming package upload (HTTP/1.1 chunked transfer).
@@ -637,6 +636,40 @@ pub trait DiagnosticBackend: Send + Sync {
     /// overrides this to proxy its in-guest test-agent's `/tests`.
     async fn list_scripts(&self) -> BackendResult<Vec<ScriptInfo>> {
         Ok(vec![])
+    }
+
+    /// Start a script (test) execution — `POST /{entity}/scripts/{id}/executions`.
+    /// A machine-manager guest backend overrides this to proxy its in-guest
+    /// test-agent's synchronous `POST /tests/{id}/run`, store the finished
+    /// [`ScriptExecution`], and return it (already `Done`). Default: not
+    /// supported (mirrors [`get_operation_status`](Self::get_operation_status)).
+    async fn start_script(&self, script_id: &str) -> BackendResult<ScriptExecution> {
+        let _ = script_id;
+        Err(crate::error::BackendError::NotSupported(
+            "start_script".to_string(),
+        ))
+    }
+
+    /// Read one script execution's status + result —
+    /// `GET /{entity}/scripts/{id}/executions/{exec-id}`. Default: not supported.
+    async fn get_script_execution(
+        &self,
+        script_id: &str,
+        exec_id: &str,
+    ) -> BackendResult<ScriptExecution> {
+        let _ = (script_id, exec_id);
+        Err(crate::error::BackendError::NotSupported(
+            "get_script_execution".to_string(),
+        ))
+    }
+
+    /// List a script's execution ids —
+    /// `GET /{entity}/scripts/{id}/executions`. Default: not supported.
+    async fn list_script_executions(&self, script_id: &str) -> BackendResult<Vec<String>> {
+        let _ = script_id;
+        Err(crate::error::BackendError::NotSupported(
+            "list_script_executions".to_string(),
+        ))
     }
 
     // =========================================================================

@@ -215,8 +215,10 @@ pub fn create_router(state: AppState) -> Router {
                 .put(handlers::stubs::control_communication_log)
                 .delete(handlers::stubs::delete_communication_log),
         )
-        // §7.15 scripts — used for developer-registered TESTS (discovery wired to
-        // the backend; execute still stubbed — see handlers::scripts).
+        // §7.15 scripts — used for developer-registered TESTS. Discovery
+        // (list/read) + execution (execute/executions/status) both wired to the
+        // backend — see handlers::scripts. A test run = a script execution,
+        // async 202 + Location + poll (mirrors §7.14 operations).
         .route(
             "/vehicle/v1/components/{component_id}/scripts",
             get(handlers::scripts::list_scripts),
@@ -227,7 +229,11 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/vehicle/v1/components/{component_id}/scripts/{script_id}/executions",
-            post(handlers::stubs::execute_script),
+            post(handlers::scripts::execute_script).get(handlers::scripts::list_executions),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/scripts/{script_id}/executions/{exec_id}",
+            get(handlers::scripts::get_execution).put(handlers::scripts::terminate_execution),
         )
         // §7.9 data-categories (real, DID-derived) + Table 9 data-groups stub
         .route(

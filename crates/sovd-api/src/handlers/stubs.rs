@@ -288,20 +288,9 @@ pub async fn delete_communication_log(
 // scripts — §7.15
 // =============================================================================
 
-// list_scripts / read_script moved to handlers::scripts (real, backend-backed —
-// §7.15 used for registered tests). execute_script stays a stub until the
-// execution slice.
-
-pub async fn execute_script(
-    State(state): State<AppState>,
-    Path((component_id, _script_id)): Path<(String, String)>,
-    Json(_req): Json<serde_json::Value>,
-) -> Result<StatusCode, ApiError> {
-    require_component(&state, &component_id)?;
-    Err(ApiError::NotImplemented(
-        "scripts.execute not yet wired".into(),
-    ))
-}
+// list_scripts / read_script / execute_script / list_executions / get_execution
+// / terminate_execution all moved to handlers::scripts (real, backend-backed —
+// §7.15 used for developer-registered tests).
 
 // =============================================================================
 // data-groups — Table 9
