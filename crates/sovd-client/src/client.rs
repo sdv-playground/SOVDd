@@ -988,6 +988,90 @@ impl SovdClient {
     }
 
     // =========================================================================
+    // Scripts (developer-registered tests) — SOVD §7.15
+    // =========================================================================
+
+    /// List a component's registered tests (scripts).
+    ///
+    /// Wire: `GET /components/{id}/scripts` (+ optional `?tags=<tag>` filter,
+    /// §6.2.7 — keep only scripts carrying that tag). An entity with no test
+    /// surface serves an empty collection.
+    #[instrument(skip(self))]
+    pub async fn list_scripts(
+        &self,
+        component_id: &str,
+        tag: Option<&str>,
+    ) -> Result<Vec<ScriptInfo>> {
+        let mut url = self
+            .base_url
+            .join(&format!("/vehicle/v1/components/{}/scripts", component_id))?;
+        if let Some(t) = tag {
+            url.query_pairs_mut().append_pair("tags", t);
+        }
+        let response = self.client.get(url).send().await?;
+        self.handle_response::<ScriptsResponse>(response)
+            .await
+            .map(|r| r.items)
+    }
+
+    /// Read one registered test's metadata.
+    ///
+    /// Wire: `GET /components/{id}/scripts/{script_id}`.
+    #[instrument(skip(self))]
+    pub async fn get_script(&self, component_id: &str, script_id: &str) -> Result<ScriptInfo> {
+        let url = self.base_url.join(&format!(
+            "/vehicle/v1/components/{}/scripts/{}",
+            component_id,
+            encode_path_segment(script_id)
+        ))?;
+        let response = self.client.get(url).send().await?;
+        self.handle_response(response).await
+    }
+
+    /// Execute a registered test — §7.15 script.execute.
+    ///
+    /// Wire: `POST /components/{id}/scripts/{script_id}/executions`
+    /// → 202 + `Location`. The guest test-agent run is SYNCHRONOUS, so the
+    /// returned execution is already `Done` (verdict + output tails + the
+    /// log-cursor bracket populated); no separate poll is required, though
+    /// [`get_script_execution`](Self::get_script_execution) re-reads it.
+    #[instrument(skip(self))]
+    pub async fn execute_script(
+        &self,
+        component_id: &str,
+        script_id: &str,
+    ) -> Result<ScriptExecution> {
+        let url = self.base_url.join(&format!(
+            "/vehicle/v1/components/{}/scripts/{}/executions",
+            component_id,
+            encode_path_segment(script_id)
+        ))?;
+        // No request body — the test's cmd is a backend/guest-agent internal.
+        let response = self.client.post(url).send().await?;
+        self.handle_response(response).await
+    }
+
+    /// Poll / re-read one test execution — §7.15 execution.status.
+    ///
+    /// Wire: `GET /components/{id}/scripts/{script_id}/executions/{exec_id}`.
+    #[instrument(skip(self))]
+    pub async fn get_script_execution(
+        &self,
+        component_id: &str,
+        script_id: &str,
+        exec_id: &str,
+    ) -> Result<ScriptExecution> {
+        let url = self.base_url.join(&format!(
+            "/vehicle/v1/components/{}/scripts/{}/executions/{}",
+            component_id,
+            encode_path_segment(script_id),
+            encode_path_segment(exec_id),
+        ))?;
+        let response = self.client.get(url).send().await?;
+        self.handle_response(response).await
+    }
+
+    // =========================================================================
     // Sub-entity (App) Operations
     // =========================================================================
 

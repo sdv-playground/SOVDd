@@ -401,6 +401,112 @@ pub struct OperationExecution {
 }
 
 // =============================================================================
+// Script (developer-registered test) Types — SOVD §7.15
+// =============================================================================
+//
+// `scripts` exposes developer-registered TESTS: a script = a registered test,
+// an execution = a test run. Mirrors the server wire shapes in
+// `sovd-api::handlers::scripts` (which map `sovd_core::{ScriptInfo,
+// ScriptExecution}`). The mechanism is framework-agnostic — the test's own
+// framework output rides in `stdout_tail`; the log-cursor BRACKET
+// (`log_from`/`log_to`) lets a tester page exactly the run's log window.
+
+/// One registered script (test) — §7.15 metadata (mirror of the server
+/// `ScriptRef` / `sovd_core::ScriptInfo`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScriptInfo {
+    /// Script id, unique within the entity — for tests, `<layer>.<id>`.
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Resource URL for this script (server-provided).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScriptsResponse {
+    pub items: Vec<ScriptInfo>,
+}
+
+/// Lifecycle status of a script (test) execution — §7.15 execution.status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScriptStatus {
+    /// The test is still running (async backend); poll again.
+    Running,
+    /// The test has finished — `verdict` + output tails are populated.
+    Done,
+}
+
+impl std::fmt::Display for ScriptStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScriptStatus::Running => write!(f, "running"),
+            ScriptStatus::Done => write!(f, "done"),
+        }
+    }
+}
+
+/// A finished test's verdict — passed through the developer's framework outcome
+/// per the entry's `result` interpreter. `Error` (couldn't run / read the
+/// result) is distinct from a clean `Fail`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScriptVerdict {
+    Pass,
+    Fail,
+    Error,
+}
+
+impl std::fmt::Display for ScriptVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScriptVerdict::Pass => write!(f, "pass"),
+            ScriptVerdict::Fail => write!(f, "fail"),
+            ScriptVerdict::Error => write!(f, "error"),
+        }
+    }
+}
+
+/// One execution of a script (test) — §7.15 execution resource (mirror of the
+/// server `ScriptExecutionResponse` / `sovd_core::ScriptExecution`). Carries the
+/// framework's native output tails plus the x-sumo log-cursor BRACKET.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScriptExecution {
+    pub exec_id: String,
+    pub script_id: String,
+    pub status: ScriptStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<ScriptVerdict>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_tail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_tail: Option<String>,
+    pub started: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<String>,
+    /// x-sumo log-cursor BRACKET: the log tip just BEFORE the run (`log_from`)
+    /// and just AFTER (`log_to`). Page `logs after = log_from` to capture
+    /// exactly this run's window. Best-effort — `None` when the source can't
+    /// name a tip.
+    #[serde(default, rename = "x-sumo-log-from")]
+    pub log_from: Option<String>,
+    #[serde(default, rename = "x-sumo-log-to")]
+    pub log_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+}
+
+// =============================================================================
 // Log Types (for message passing pattern and HPC logs)
 // =============================================================================
 

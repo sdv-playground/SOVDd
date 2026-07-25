@@ -13,6 +13,7 @@ pub mod outputs;
 pub mod read;
 pub mod reset;
 pub mod session;
+pub mod test;
 pub mod unlock;
 pub mod write;
 
