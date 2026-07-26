@@ -69,6 +69,9 @@ pub struct ComponentCapabilities {
     /// §7.20 bulk-data collection (log-file download / large payloads).
     #[serde(default)]
     pub bulk_data: bool,
+    /// §7.9 diagnostics collection (read-only system probes).
+    #[serde(default)]
+    pub diagnostics: bool,
 }
 
 /// List of components response
@@ -504,6 +507,48 @@ pub struct ScriptExecution {
     pub log_to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub href: Option<String>,
+}
+
+// =============================================================================
+// Diagnostic (read-only system probe) Types — SOVD §7.9
+// =============================================================================
+//
+// `diagnostics` exposes a guest's READ-ONLY system probes (mem/df/du/…),
+// proxied from its diag-agent. Mirrors the server wire shapes in
+// `sovd-api::handlers::diagnostics` (which map `sovd_core::{DiagnosticInfo,
+// DiagnosticResult}`). See tasks/diag-agent-design.md.
+
+/// One registered diagnostic probe — §7.9 metadata (mirror of the server
+/// `DiagnosticRef` / `sovd_core::DiagnosticInfo`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticInfo {
+    /// Probe id, unique within the entity — for guests, `<layer>.<id>`.
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Resource URL for this probe (server-provided).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiagnosticsResponse {
+    pub items: Vec<DiagnosticInfo>,
+}
+
+/// A gathered probe's result — `GET /diagnostics/{id}`. `ok` distinguishes a
+/// clean read from a gather failure; `output` is the captured text (bounded by
+/// the agent). Mirror of `sovd_core::DiagnosticResult`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticResult {
+    pub id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub output: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 // =============================================================================

@@ -13,10 +13,11 @@ use tokio::sync::broadcast;
 use crate::error::BackendResult;
 use crate::models::{
     BulkCategory, BulkDataDownload, BulkDataFilter, BulkDataItem, Capabilities, ClearFaultsResult,
-    CommControlMode, DataPoint, DataValue, DtcSettingMode, EntityInfo, Fault, FaultFilter,
-    FaultsResult, IoControlAction, IoControlResult, LinkControlResult, LinkMode, LogEntry,
-    LogFilter, LogPage, OperationExecution, OperationInfo, OutputDetail, OutputInfo, ParameterInfo,
-    ScriptExecution, ScriptInfo, SecurityMode, SessionMode,
+    CommControlMode, DataPoint, DataValue, DiagnosticInfo, DiagnosticResult, DtcSettingMode,
+    EntityInfo, Fault, FaultFilter, FaultsResult, IoControlAction, IoControlResult,
+    LinkControlResult, LinkMode, LogEntry, LogFilter, LogPage, OperationExecution, OperationInfo,
+    OutputDetail, OutputInfo, ParameterInfo, ScriptExecution, ScriptInfo, SecurityMode,
+    SessionMode,
 };
 
 /// Byte stream for streaming package upload (HTTP/1.1 chunked transfer).
@@ -665,6 +666,27 @@ pub trait DiagnosticBackend: Send + Sync {
         let _ = script_id;
         Err(crate::error::BackendError::NotSupported(
             "list_script_executions".to_string(),
+        ))
+    }
+
+    // =========================================================================
+    // Diagnostics (§7.9 — read-only system probes)
+    // =========================================================================
+
+    /// List the diagnostic probes this entity exposes
+    /// (`GET /{entity}/diagnostics`). Default: none. A machine-manager guest
+    /// backend overrides this to proxy its in-guest diag-agent's `/probes`.
+    async fn list_diagnostics(&self) -> BackendResult<Vec<DiagnosticInfo>> {
+        Ok(vec![])
+    }
+
+    /// Gather one diagnostic probe now — `GET /{entity}/diagnostics/{id}`. A
+    /// machine-manager guest backend overrides this to proxy the diag-agent's
+    /// `GET /probes/{id}`. Default: not supported.
+    async fn read_diagnostic(&self, probe_id: &str) -> BackendResult<DiagnosticResult> {
+        let _ = probe_id;
+        Err(crate::error::BackendError::NotSupported(
+            "read_diagnostic".to_string(),
         ))
     }
 

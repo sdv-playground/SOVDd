@@ -9,6 +9,7 @@ pub mod components;
 pub mod data;
 pub mod data_lists;
 pub mod definitions;
+pub mod diagnostics;
 pub mod faults;
 pub mod scripts;
 // F.D8b: handlers::files + handlers::flash deleted.  The legacy

@@ -54,6 +54,12 @@ pub struct Capabilities {
     /// capability doc from an older server (no field) deserializes as `false`.
     #[serde(default)]
     pub bulk_data: bool,
+    /// Supports the §7.9 `diagnostics` collection (read-only system probes —
+    /// mem/df/du/…, proxied from a guest's diag-agent). Gates the
+    /// `/diagnostics` routes. `#[serde(default)]` for back-compat with older
+    /// capability docs (deserializes as `false`).
+    #[serde(default)]
+    pub diagnostics: bool,
 }
 
 impl Capabilities {
@@ -73,6 +79,7 @@ impl Capabilities {
             sub_entities: false,
             subscriptions: true,
             bulk_data: false,
+            diagnostics: false,
         }
     }
 
@@ -94,6 +101,7 @@ impl Capabilities {
             // Logs are retrieved via bulk-data (§7.21/C-121), so an HPC that has
             // logs also exposes the bulk-data collection.
             bulk_data: true,
+            diagnostics: false,
         }
     }
 
@@ -113,6 +121,7 @@ impl Capabilities {
             sub_entities: false,
             subscriptions: true,
             bulk_data: true,
+            diagnostics: false,
         }
     }
 
@@ -132,6 +141,7 @@ impl Capabilities {
             sub_entities: true, // Gateway always has sub-entities
             subscriptions: false,
             bulk_data: false,
+            diagnostics: false,
         }
     }
 }

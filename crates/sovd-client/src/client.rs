@@ -1072,6 +1072,53 @@ impl SovdClient {
     }
 
     // =========================================================================
+    // Diagnostics (read-only system probes) — SOVD §7.9
+    // =========================================================================
+
+    /// List a component's registered diagnostic probes.
+    ///
+    /// Wire: `GET /components/{id}/diagnostics` (+ optional `?tags=<tag>`
+    /// filter). An entity with no diag surface serves an empty collection.
+    #[instrument(skip(self))]
+    pub async fn list_diagnostics(
+        &self,
+        component_id: &str,
+        tag: Option<&str>,
+    ) -> Result<Vec<DiagnosticInfo>> {
+        let mut url = self.base_url.join(&format!(
+            "/vehicle/v1/components/{}/diagnostics",
+            component_id
+        ))?;
+        if let Some(t) = tag {
+            url.query_pairs_mut().append_pair("tags", t);
+        }
+        let response = self.client.get(url).send().await?;
+        self.handle_response::<DiagnosticsResponse>(response)
+            .await
+            .map(|r| r.items)
+    }
+
+    /// Gather one diagnostic probe now — the guest diag-agent reads its source
+    /// (mem/df/du/… or a layer cmd) and returns the result. A probe that fails
+    /// to gather is a normal response with `ok=false` (not an error).
+    ///
+    /// Wire: `GET /components/{id}/diagnostics/{probe_id}`.
+    #[instrument(skip(self))]
+    pub async fn read_diagnostic(
+        &self,
+        component_id: &str,
+        probe_id: &str,
+    ) -> Result<DiagnosticResult> {
+        let url = self.base_url.join(&format!(
+            "/vehicle/v1/components/{}/diagnostics/{}",
+            component_id,
+            encode_path_segment(probe_id)
+        ))?;
+        let response = self.client.get(url).send().await?;
+        self.handle_response(response).await
+    }
+
+    // =========================================================================
     // Sub-entity (App) Operations
     // =========================================================================
 

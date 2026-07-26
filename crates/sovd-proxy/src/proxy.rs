@@ -32,6 +32,7 @@ fn to_capabilities(rc: sovd_client::ComponentCapabilities) -> Capabilities {
         sub_entities: rc.sub_entities,
         subscriptions: rc.subscriptions,
         bulk_data: rc.bulk_data,
+        diagnostics: rc.diagnostics,
     }
 }
 

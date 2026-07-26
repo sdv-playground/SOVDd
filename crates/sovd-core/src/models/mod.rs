@@ -2,6 +2,7 @@
 
 mod bulk_data;
 mod data;
+mod diagnostic;
 mod entity;
 pub mod error;
 mod fault;
@@ -13,6 +14,7 @@ mod script;
 
 pub use bulk_data::*;
 pub use data::*;
+pub use diagnostic::*;
 pub use entity::*;
 pub use error::{error_code, DataError, GenericError};
 pub use fault::*;

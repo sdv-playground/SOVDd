@@ -235,6 +235,18 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/scripts/{script_id}/executions/{exec_id}",
             get(handlers::scripts::get_execution).put(handlers::scripts::terminate_execution),
         )
+        // §7.9 diagnostics — READ-ONLY system probes (mem/df/du/…), proxied from
+        // a guest's diag-agent. Discovery (list, +?tags=) + gather-one; both
+        // default on the trait, so a backend with no diag surface serves empty /
+        // not-supported. See handlers::diagnostics + tasks/diag-agent-design.md.
+        .route(
+            "/vehicle/v1/components/{component_id}/diagnostics",
+            get(handlers::diagnostics::list_diagnostics),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/diagnostics/{probe_id}",
+            get(handlers::diagnostics::read_diagnostic),
+        )
         // §7.9 data-categories (real, DID-derived) + Table 9 data-groups stub
         .route(
             "/vehicle/v1/components/{component_id}/data-categories",
