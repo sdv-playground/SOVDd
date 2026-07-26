@@ -58,6 +58,10 @@ pub struct CapabilitiesResponse {
     pub security: bool,
     pub sub_entities: bool,
     pub subscriptions: bool,
+    /// §7.20 bulk-data collection (log-file download / large payloads).
+    pub bulk_data: bool,
+    /// §7.9 diagnostics collection (read-only system probes — mem/df/du/…).
+    pub diagnostics: bool,
 }
 
 impl From<&Capabilities> for CapabilitiesResponse {
@@ -75,6 +79,8 @@ impl From<&Capabilities> for CapabilitiesResponse {
             security: caps.security,
             sub_entities: caps.sub_entities,
             subscriptions: caps.subscriptions,
+            bulk_data: caps.bulk_data,
+            diagnostics: caps.diagnostics,
         }
     }
 }
