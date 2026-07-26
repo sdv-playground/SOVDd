@@ -2,6 +2,7 @@
 
 pub mod actuate;
 pub mod bulk_data;
+pub mod diagnostics;
 pub mod faults;
 pub mod flash;
 pub mod info;

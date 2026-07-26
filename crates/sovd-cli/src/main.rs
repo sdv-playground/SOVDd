@@ -334,6 +334,21 @@ enum Commands {
         #[arg(long, short = 'd')]
         dir: Option<String>,
     },
+
+    /// Read §7.9 diagnostics — a guest's READ-ONLY system probes (mem/df/du/
+    /// logs/procs/…), proxied from its diag-agent. `diagnostics <ecu>` lists
+    /// probes; `diagnostics <ecu> <probe-id>` gathers one now.
+    Diagnostics {
+        /// ECU / component id (a guest VM exposing a diag-agent).
+        ecu: String,
+
+        /// Probe id (positional). Omit to list all registered probes.
+        probe_id: Option<String>,
+
+        /// Discovery filter: only probes carrying this tag (e.g. smoke).
+        #[arg(long)]
+        tag: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -551,6 +566,18 @@ async fn main() -> Result<()> {
                 created_before.as_deref(),
                 out.as_deref(),
                 dir.as_deref(),
+                &ctx,
+            )
+            .await?;
+        }
+
+        Commands::Diagnostics { ecu, probe_id, tag } => {
+            let client = create_client(&merged.server, &auth)?;
+            commands::diagnostics::diagnostics(
+                &client,
+                ecu,
+                probe_id.as_deref(),
+                tag.as_deref(),
                 &ctx,
             )
             .await?;
