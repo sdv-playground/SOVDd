@@ -132,6 +132,77 @@ impl OutputContext {
             }
         }
     }
+
+    /// Print a batch of log entries. In Table format these render LINE-per-entry
+    /// (journalctl-style), NOT a boxed grid — logs are a stream, and a `+---+` box
+    /// with a separator per row is unscannable and inflates to the widest message.
+    /// Json/Csv keep the structured `LogRow` shape (for tooling).
+    pub fn print_logs(&self, entries: &[sovd_client::LogEntry]) {
+        match self.format {
+            OutputFormat::Table => {
+                for e in entries {
+                    self.print_log_line(e);
+                }
+            }
+            OutputFormat::Json => {
+                let rows: Vec<LogRow> = entries.iter().map(LogRow::from).collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".to_string())
+                );
+            }
+            OutputFormat::Csv => {
+                let rows: Vec<LogRow> = entries.iter().map(LogRow::from).collect();
+                print_csv(&rows);
+            }
+        }
+    }
+
+    /// Print ONE log entry as a compact line (used by `--follow` / whole-log
+    /// paging, so each new entry is one line, not a fresh box). Non-Table formats
+    /// print the single structured row.
+    pub fn print_log_line(&self, e: &sovd_client::LogEntry) {
+        match self.format {
+            OutputFormat::Table => {
+                let row = LogRow::from(e);
+                // `TIME LEVEL SOURCE [emitter] message` — emitter only when present.
+                let level = colorize_level(&row.level);
+                let emitter = if row.emitter.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", row.emitter.cyan())
+                };
+                println!(
+                    "{}  {:<7}  {}{}  {}",
+                    row.time.dimmed(),
+                    level,
+                    row.source,
+                    emitter,
+                    row.message
+                );
+            }
+            OutputFormat::Json => {
+                let row = LogRow::from(e);
+                println!(
+                    "{}",
+                    serde_json::to_string(&row).unwrap_or_else(|_| "{}".to_string())
+                );
+            }
+            OutputFormat::Csv => print_csv(&[LogRow::from(e)]),
+        }
+    }
+}
+
+/// Colorize a syslog level name for the line log view (no-op when colour is off,
+/// which `OutputContext::new` already globally disables via `--no-color`).
+fn colorize_level(level: &str) -> colored::ColoredString {
+    match level {
+        "emergency" | "alert" | "critical" | "error" => level.red().bold(),
+        "warning" => level.yellow(),
+        "notice" | "info" => level.normal(),
+        "debug" | "trace" => level.dimmed(),
+        _ => level.normal(),
+    }
 }
 
 /// Print data as CSV

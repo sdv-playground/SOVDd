@@ -94,7 +94,7 @@ pub async fn list(
                         continue;
                     }
                 }
-                ctx.print_one(&LogRow::from(e));
+                ctx.print_log_line(e);
                 printed += 1;
             }
             match resp.next_cursor {
@@ -114,7 +114,7 @@ pub async fn list(
             ctx.info("No log entries");
             return Ok(());
         }
-        ctx.print(&entries.iter().map(LogRow::from).collect::<Vec<_>>());
+        ctx.print_logs(&entries);
         return Ok(());
     }
 
@@ -146,7 +146,7 @@ pub async fn list(
     let mut after: Option<String> = if args.since.is_some() {
         for e in &seed.items {
             if pattern_ok(&e.message, args) {
-                ctx.print_one(&LogRow::from(e));
+                ctx.print_log_line(e);
             }
         }
         seed.next_cursor.clone().or_else(|| seed.tip_cursor.clone())
@@ -162,7 +162,7 @@ pub async fn list(
             Ok(resp) => {
                 for e in &resp.items {
                     if pattern_ok(&e.message, args) {
-                        ctx.print_one(&LogRow::from(e));
+                        ctx.print_log_line(e);
                     }
                 }
                 // Advance only when the server moved us forward; keep the last
@@ -201,7 +201,7 @@ async fn follow_by_id_dedup(
             Ok(entries) => {
                 for e in entries.iter().rev() {
                     if seen.insert(e.id.clone()) {
-                        ctx.print_one(&LogRow::from(e));
+                        ctx.print_log_line(e);
                     }
                 }
                 if seen.len() > 4096 {
