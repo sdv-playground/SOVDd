@@ -585,6 +585,9 @@ pub struct LogEntry {
     /// URL to download content (for large binary data)
     #[serde(default)]
     pub href: Option<String>,
+    /// Structured key/value fields (journald fields, the slog2 `emitter`, …).
+    #[serde(default)]
+    pub fields: Option<serde_json::Value>,
     /// Additional metadata (trigger, fault codes, etc.)
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,

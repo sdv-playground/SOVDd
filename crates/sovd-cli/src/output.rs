@@ -243,6 +243,11 @@ pub struct LogRow {
     pub level: String,
     #[tabled(rename = "Source")]
     pub source: String,
+    /// The emitter within a multi-emitter source (the slog2 buffer name:
+    /// supernova / vhsm-ssd / devb_sdmmc / …). Blank for single-emitter sources
+    /// (files, guest agent) that don't carry `fields.emitter`.
+    #[tabled(rename = "Emitter")]
+    pub emitter: String,
     #[tabled(rename = "Message")]
     pub message: String,
     #[tabled(rename = "ID")]
@@ -256,6 +261,15 @@ impl From<&sovd_client::LogEntry> for LogRow {
             time: e.timestamp.clone(),
             level: e.priority.clone(),
             source: e.source.clone().unwrap_or_default(),
+            // Pull the emitter out of the structured fields (slog2 records set
+            // fields.emitter to the buffer name); blank when absent.
+            emitter: e
+                .fields
+                .as_ref()
+                .and_then(|f| f.get("emitter"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             message: e.message.clone(),
             id: e.id.clone(),
         }
