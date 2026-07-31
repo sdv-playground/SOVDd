@@ -251,21 +251,18 @@ pub async fn list_sources(client: &SovdClient, ecu: &str, ctx: &OutputContext) -
         ctx.info("No log sources");
         return Ok(());
     }
-    let rows: Vec<LogSourceRow> = resp
-        .items
-        .into_iter()
-        .map(|s| LogSourceRow {
-            name: s.name,
-            kind: format!("{:?}", s.kind).to_lowercase(),
-            cursor: if s.cursor { "yes" } else { "no" }.to_string(),
-            emitters: if s.emitters.is_empty() {
-                "-".to_string()
-            } else {
-                s.emitters.join(",")
-            },
-        })
-        .collect();
-    ctx.print(&rows);
+    // Table = pretty rows; Json = the raw LogSourceInfo verbatim (native
+    // cursor:bool, emitters:[], the href) — machine/LLM-faithful.
+    ctx.print_entities(&resp.items, |s| LogSourceRow {
+        name: s.name.clone(),
+        kind: format!("{:?}", s.kind).to_lowercase(),
+        cursor: if s.cursor { "yes" } else { "no" }.to_string(),
+        emitters: if s.emitters.is_empty() {
+            "-".to_string()
+        } else {
+            s.emitters.join(",")
+        },
+    });
     Ok(())
 }
 

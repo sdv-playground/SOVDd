@@ -1,4 +1,12 @@
-//! Output formatting for sovd-cli (table, json, csv)
+//! Output formatting for sovd-cli.
+//!
+//! Two audiences, two formats:
+//! - **Table** — the human view: pretty, colourised, lossy (renamed columns,
+//!   flattened fields). Not meant to be parsed.
+//! - **Json** — the MACHINE view: the raw wire entity serialized verbatim
+//!   (server field names, native types, full nested `fields`). Logs emit
+//!   **NDJSON** (one object per line — streams, `--follow`-safe, jq/grep-able);
+//!   bounded catalogs emit a JSON array.
 
 use clap::ValueEnum;
 use colored::Colorize;
@@ -8,13 +16,11 @@ use tabled::{Table, Tabled};
 /// Output format options
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
-    /// ASCII table format (default)
+    /// ASCII table format (default) — the human view.
     #[default]
     Table,
-    /// JSON format
+    /// JSON — the raw wire entity (NDJSON for log streams). The machine view.
     Json,
-    /// CSV format
-    Csv,
 }
 
 /// Context for output rendering
@@ -81,8 +87,29 @@ impl OutputContext {
                     serde_json::to_string_pretty(data).unwrap_or_else(|_| "[]".to_string())
                 );
             }
-            OutputFormat::Csv => {
-                print_csv(data);
+        }
+    }
+
+    /// Print a collection where the human (Table) and machine (Json) views are
+    /// DIFFERENT objects: `entities` are the raw wire values (serialized verbatim
+    /// for Json — lossless, server field names), and `to_row` maps each to a
+    /// pretty display row for the Table. Use this whenever the table columns are a
+    /// lossy projection of a richer wire type (e.g. the log-source catalog).
+    pub fn print_entities<E, R>(&self, entities: &[E], to_row: impl Fn(&E) -> R)
+    where
+        E: Serialize,
+        R: Tabled + Serialize,
+    {
+        match self.format {
+            OutputFormat::Table => {
+                let rows: Vec<R> = entities.iter().map(&to_row).collect();
+                self.print(&rows);
+            }
+            OutputFormat::Json => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(entities).unwrap_or_else(|_| "[]".to_string())
+                );
             }
         }
     }
@@ -99,9 +126,6 @@ impl OutputContext {
                     "{}",
                     serde_json::to_string_pretty(data).unwrap_or_else(|_| "{}".to_string())
                 );
-            }
-            OutputFormat::Csv => {
-                print_csv(&[data]);
             }
         }
     }
@@ -122,45 +146,24 @@ impl OutputContext {
                     serde_json::to_string_pretty(&map).unwrap_or_else(|_| "{}".to_string())
                 );
             }
-            OutputFormat::Csv => {
-                // Header
-                let keys: Vec<&str> = pairs.iter().map(|(k, _)| *k).collect();
-                println!("{}", keys.join(","));
-                // Values
-                let values: Vec<&str> = pairs.iter().map(|(_, v)| v.as_str()).collect();
-                println!("{}", values.join(","));
-            }
         }
     }
 
-    /// Print a batch of log entries. In Table format these render LINE-per-entry
-    /// (journalctl-style), NOT a boxed grid — logs are a stream, and a `+---+` box
-    /// with a separator per row is unscannable and inflates to the widest message.
-    /// Json/Csv keep the structured `LogRow` shape (for tooling).
+    /// Print a batch of log entries. Table = LINE-per-entry (journalctl-style),
+    /// NOT a boxed grid — logs are a stream, and a `+---+` box with a separator
+    /// per row is unscannable and inflates to the widest message. Json = NDJSON:
+    /// one RAW `LogEntry` per line (server field names, native types, full nested
+    /// `fields` — machine/LLM-faithful, and the same shape a `--follow` stream
+    /// appends incrementally).
     pub fn print_logs(&self, entries: &[sovd_client::LogEntry]) {
-        match self.format {
-            OutputFormat::Table => {
-                for e in entries {
-                    self.print_log_line(e);
-                }
-            }
-            OutputFormat::Json => {
-                let rows: Vec<LogRow> = entries.iter().map(LogRow::from).collect();
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".to_string())
-                );
-            }
-            OutputFormat::Csv => {
-                let rows: Vec<LogRow> = entries.iter().map(LogRow::from).collect();
-                print_csv(&rows);
-            }
+        for e in entries {
+            self.print_log_line(e);
         }
     }
 
-    /// Print ONE log entry as a compact line (used by `--follow` / whole-log
-    /// paging, so each new entry is one line, not a fresh box). Non-Table formats
-    /// print the single structured row.
+    /// Print ONE log entry — one Table line, or one NDJSON object. Because both
+    /// formats are per-entry, `print_logs` and the `--follow` loop share this and
+    /// stream identically (no buffered array to close).
     pub fn print_log_line(&self, e: &sovd_client::LogEntry) {
         match self.format {
             OutputFormat::Table => {
@@ -181,14 +184,15 @@ impl OutputContext {
                     row.message
                 );
             }
+            // NDJSON: the RAW wire entity, one compact object per line — NOT the
+            // lossy display `LogRow` (which renames priority→level, drops
+            // pid/status/href, and flattens `fields` to just the emitter).
             OutputFormat::Json => {
-                let row = LogRow::from(e);
                 println!(
                     "{}",
-                    serde_json::to_string(&row).unwrap_or_else(|_| "{}".to_string())
+                    serde_json::to_string(e).unwrap_or_else(|_| "{}".to_string())
                 );
             }
-            OutputFormat::Csv => print_csv(&[LogRow::from(e)]),
         }
     }
 }
@@ -202,48 +206,6 @@ fn colorize_level(level: &str) -> colored::ColoredString {
         "notice" | "info" => level.normal(),
         "debug" | "trace" => level.dimmed(),
         _ => level.normal(),
-    }
-}
-
-/// Print data as CSV
-fn print_csv<T: Serialize>(data: &[T]) {
-    if data.is_empty() {
-        return;
-    }
-
-    // Get field names from the first item
-    let first = serde_json::to_value(&data[0]).unwrap_or_default();
-    if let serde_json::Value::Object(map) = &first {
-        // Print header
-        let headers: Vec<&str> = map.keys().map(|s| s.as_str()).collect();
-        println!("{}", headers.join(","));
-
-        // Print rows
-        for item in data {
-            if let Ok(serde_json::Value::Object(row)) = serde_json::to_value(item) {
-                let values: Vec<String> = headers
-                    .iter()
-                    .map(|h| {
-                        row.get(*h)
-                            .map(|v| match v {
-                                serde_json::Value::String(s) => escape_csv(s),
-                                other => escape_csv(&other.to_string()),
-                            })
-                            .unwrap_or_default()
-                    })
-                    .collect();
-                println!("{}", values.join(","));
-            }
-        }
-    }
-}
-
-/// Escape a value for CSV output
-fn escape_csv(value: &str) -> String {
-    if value.contains(',') || value.contains('"') || value.contains('\n') {
-        format!("\"{}\"", value.replace('"', "\"\""))
-    } else {
-        value.to_string()
     }
 }
 

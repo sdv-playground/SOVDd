@@ -654,7 +654,6 @@ impl From<OutputFormat> for &str {
         match format {
             OutputFormat::Table => "table",
             OutputFormat::Json => "json",
-            OutputFormat::Csv => "csv",
         }
     }
 }

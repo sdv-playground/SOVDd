@@ -89,15 +89,6 @@ pub async fn monitor(
         println!();
     }
 
-    // For CSV, print header once
-    if ctx.format == OutputFormat::Csv {
-        let headers: Vec<&str> = std::iter::once("timestamp")
-            .chain(std::iter::once("sequence"))
-            .chain(params.iter().map(|s| s.as_str()))
-            .collect();
-        println!("{}", headers.join(","));
-    }
-
     while running.load(Ordering::SeqCst) {
         tokio::select! {
             event = stream.next() => {
@@ -163,18 +154,6 @@ fn print_stream_event(event: &sovd_client::StreamEvent, params: &[String], ctx: 
             if let Ok(json) = serde_json::to_string(event) {
                 println!("{}", json);
             }
-        }
-        OutputFormat::Csv => {
-            // Print as CSV row
-            let values: Vec<String> = std::iter::once(event.timestamp.to_string())
-                .chain(std::iter::once(sequence.to_string()))
-                .chain(
-                    params
-                        .iter()
-                        .map(|p| values.get(p).map(format_json_value).unwrap_or_default()),
-                )
-                .collect();
-            println!("{}", values.join(","));
         }
     }
 }
