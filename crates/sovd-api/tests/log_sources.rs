@@ -111,7 +111,10 @@ impl DiagnosticBackend for MultiSourceBackend {
     async fn list_parameters(&self) -> sovd_core::BackendResult<Vec<sovd_core::ParameterInfo>> {
         Ok(vec![])
     }
-    async fn read_data(&self, _ids: &[String]) -> sovd_core::BackendResult<Vec<sovd_core::DataValue>> {
+    async fn read_data(
+        &self,
+        _ids: &[String],
+    ) -> sovd_core::BackendResult<Vec<sovd_core::DataValue>> {
         Ok(vec![])
     }
     async fn get_faults(
@@ -168,9 +171,15 @@ async fn logs_sources_lists_the_catalog() {
         "href addresses the source: {slog2}"
     );
     // Empty emitters must be OMITTED from the wire.
-    assert!(slog2.get("emitters").is_none(), "empty emitters skipped: {slog2}");
+    assert!(
+        slog2.get("emitters").is_none(),
+        "empty emitters skipped: {slog2}"
+    );
 
-    let hb = items.iter().find(|i| i["name"] == "host-boot").expect("host-boot");
+    let hb = items
+        .iter()
+        .find(|i| i["name"] == "host-boot")
+        .expect("host-boot");
     assert_eq!(hb["kind"], "file");
     assert_eq!(hb["cursor"], true);
 }

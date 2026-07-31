@@ -316,7 +316,10 @@ mod tests {
         };
         let j = serde_json::to_string(&slog2).unwrap();
         assert!(j.contains("\"kind\":\"journal\""), "{j}");
-        assert!(!j.contains("emitters"), "empty emitters must be skipped: {j}");
+        assert!(
+            !j.contains("emitters"),
+            "empty emitters must be skipped: {j}"
+        );
         let back: LogSourceInfo = serde_json::from_str(&j).unwrap();
         assert_eq!(back.name, "slog2");
         assert_eq!(back.kind, LogSourceKind::Journal);

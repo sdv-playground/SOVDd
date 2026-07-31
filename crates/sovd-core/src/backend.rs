@@ -16,9 +16,8 @@ use crate::models::{
     CommControlMode, DataPoint, DataValue, DiagnosticInfo, DiagnosticResult, DtcSettingMode,
     EntityInfo, Fault, FaultFilter, FaultsResult, IoControlAction, IoControlResult,
     LinkControlResult, LinkMode, LogEntry, LogFilter, LogPage, LogSourceInfo, OperationExecution,
-    OperationInfo,
-    OutputDetail, OutputInfo, ParameterInfo, ScriptExecution, ScriptInfo, SecurityMode,
-    SessionMode,
+    OperationInfo, OutputDetail, OutputInfo, ParameterInfo, ScriptExecution, ScriptInfo,
+    SecurityMode, SessionMode,
 };
 
 /// Byte stream for streaming package upload (HTTP/1.1 chunked transfer).
