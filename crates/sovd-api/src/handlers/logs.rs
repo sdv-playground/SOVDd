@@ -60,6 +60,11 @@ pub struct LogEntryResponse {
     pub status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub href: Option<String>,
+    /// Structured key/value fields (journald fields, the slog2 `emitter`, …).
+    /// Carried through from `LogEntry.fields` — was previously dropped here, so a
+    /// slog2 record's emitter never reached the wire.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fields: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
 }
@@ -178,6 +183,7 @@ impl From<&LogEntry> for LogEntryResponse {
                 LogStatus::Processed => "processed".to_string(),
             }),
             href: entry.href.clone(),
+            fields: entry.fields.clone(),
             metadata: entry.metadata.clone(),
         }
     }
