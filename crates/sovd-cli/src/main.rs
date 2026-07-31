@@ -251,6 +251,18 @@ enum Commands {
         #[arg(long)]
         source: Option<String>,
 
+        /// Keep only these EMITTERs (sub-sources): comma-separated, prefix-matched
+        /// (server-side). Narrows within a multi-emitter source like the slog2
+        /// ring — e.g. `--emitter snova` for the host manager's own records.
+        #[arg(long)]
+        emitter: Option<String>,
+
+        /// Drop these EMITTERs (comma-separated, prefix-matched; server-side).
+        /// Mute a high-volume sub-source — e.g. `--emitter-exclude devb_,CAM`
+        /// hides the eMMC/CAM driver firehose. The device still serves them.
+        #[arg(long = "emitter-exclude")]
+        emitter_exclude: Option<String>,
+
         /// Filter by log type (e.g. engine_dump, diagnostic).
         #[arg(long = "type")]
         log_type: Option<String>,
@@ -495,6 +507,8 @@ async fn main() -> Result<()> {
             id,
             priority,
             source,
+            emitter,
+            emitter_exclude,
             log_type,
             status,
             grep,
@@ -513,6 +527,8 @@ async fn main() -> Result<()> {
                     let args = commands::logs::LogArgs {
                         priority: priority.clone(),
                         source: source.clone(),
+                        emitter: emitter.clone(),
+                        emitter_exclude: emitter_exclude.clone(),
                         log_type: log_type.clone(),
                         status: status.clone(),
                         limit: *limit,

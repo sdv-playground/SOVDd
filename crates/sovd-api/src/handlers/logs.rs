@@ -73,6 +73,17 @@ pub struct LogEntryResponse {
 pub struct LogFilterQuery {
     pub priority: Option<String>,
     pub source: Option<String>,
+    /// Vendor extension: filter by EMITTER (sub-source) — comma-separated,
+    /// prefix-matched. Where one `source` multiplexes emitters (the slog2 ring),
+    /// this narrows to the named ones. Wire name `x-sumo-emitter`.
+    #[serde(rename = "x-sumo-emitter")]
+    pub emitter: Option<String>,
+    /// Vendor extension: EXCLUDE emitters (comma-separated, prefix-matched),
+    /// applied after the include. Mutes a high-volume sub-source (e.g. the
+    /// `devb_` eMMC driver firehose) without the device hiding it. Wire name
+    /// `x-sumo-emitter-exclude`.
+    #[serde(rename = "x-sumo-emitter-exclude")]
+    pub emitter_exclude: Option<String>,
     /// RFC 3339, or a position sentinel: `BEGIN` (oldest, no lower bound),
     /// `END` (device now), `END-<N>{s,m,h}` (now minus a duration — the last N of
     /// THIS boot). Resolved server-side against the device clock — see
@@ -218,6 +229,8 @@ pub async fn get_logs(
             _ => None,
         }),
         source: query.source,
+        emitter: query.emitter,
+        emitter_exclude: query.emitter_exclude,
         // Resolve BEGIN/END/END-Nm sentinels (or RFC 3339) server-side against
         // the device clock. A bad value is a 400, not a silent drop.
         since: resolve_time_bound(query.since.as_deref())?,

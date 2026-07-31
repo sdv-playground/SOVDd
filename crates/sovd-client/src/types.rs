@@ -631,6 +631,14 @@ pub struct LogFilter {
     /// Filter by source
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Filter by EMITTER (sub-source) — comma-separated, prefix-matched. Narrows
+    /// within a multi-emitter source (the slog2 ring). Sent as `x-sumo-emitter`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emitter: Option<String>,
+    /// EXCLUDE emitters (comma-separated, prefix-matched) — mute a high-volume
+    /// sub-source (e.g. `devb_`). Sent as `x-sumo-emitter-exclude`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emitter_exclude: Option<String>,
     /// Maximum number of entries to return
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,

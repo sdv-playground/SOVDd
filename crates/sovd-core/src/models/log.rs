@@ -104,6 +104,23 @@ pub struct LogFilter {
     /// Filter by source (service/unit name)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Filter by EMITTER (sub-source): the buffer/daemon name carried in
+    /// `LogEntry.fields.emitter`, distinct from `source`. Where one physical
+    /// `source` multiplexes many emitters (the slog2 ring: `source="slog2"`,
+    /// emitters `snova`/`vhsm`/`devb_sdmmc_mx8x`/…), this narrows to the named
+    /// ones — INCLUDE semantics, comma-separated, prefix-matched (so `devb`
+    /// selects `devb_sdmmc_mx8x`). A backend whose source has no emitter
+    /// dimension ignores it. Vendor extension (wire name `x-sumo-emitter`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emitter: Option<String>,
+    /// EXCLUDE emitters: the inverse of `emitter`, applied after it. The device
+    /// still SERVES every emitter; this drops the named ones from the response
+    /// (comma-separated, prefix-matched). The intended use is muting a
+    /// high-volume sub-source — e.g. `emitter_exclude="devb_,CAM"` drops the
+    /// eMMC/CAM driver firehose so real records aren't crowded out of a tail.
+    /// Vendor extension (wire name `x-sumo-emitter-exclude`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emitter_exclude: Option<String>,
     /// Logs since this time
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since: Option<DateTime<Utc>>,
@@ -137,6 +154,33 @@ pub struct LogFilter {
     pub after: Option<String>,
 }
 
+impl LogFilter {
+    /// Decide whether an entry with the given `emitter` passes the
+    /// `emitter` (include) / `emitter_exclude` filters. Both are
+    /// comma-separated PREFIX lists (so `devb` matches `devb_sdmmc_mx8x`);
+    /// include is applied first (empty ⇒ all pass), then exclude removes.
+    /// Backends whose source has no emitter dimension needn't call this.
+    pub fn emitter_allows(&self, emitter: &str) -> bool {
+        let matches_any = |list: &str| {
+            list.split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .any(|p| emitter.starts_with(p))
+        };
+        if let Some(inc) = self.emitter.as_deref() {
+            if !inc.trim().is_empty() && !matches_any(inc) {
+                return false;
+            }
+        }
+        if let Some(exc) = self.emitter_exclude.as_deref() {
+            if matches_any(exc) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 /// One page of logs plus the cursors that make "get all logs" a terminating
 /// loop. Returned by [`crate::DiagnosticBackend::get_logs_paged`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -160,4 +204,55 @@ pub struct LogPage {
     /// its tip. Reboot-safe like the other cursors.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tip_cursor: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LogFilter;
+
+    fn f(inc: Option<&str>, exc: Option<&str>) -> LogFilter {
+        LogFilter {
+            emitter: inc.map(str::to_string),
+            emitter_exclude: exc.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn emitter_allows_default_passes_all() {
+        assert!(f(None, None).emitter_allows("devb_sdmmc_mx8x"));
+        assert!(f(None, None).emitter_allows("snova"));
+    }
+
+    #[test]
+    fn emitter_include_is_prefix_matched() {
+        let inc = f(Some("snova,vhsm"), None);
+        assert!(inc.emitter_allows("snova"));
+        assert!(inc.emitter_allows("vhsm"));
+        assert!(!inc.emitter_allows("devb_sdmmc_mx8x"));
+        // prefix: "devb" selects the pid-suffixed buffer name.
+        assert!(f(Some("devb"), None).emitter_allows("devb_sdmmc_mx8x"));
+    }
+
+    #[test]
+    fn emitter_exclude_drops_the_firehose() {
+        let exc = f(None, Some("devb_,CAM"));
+        assert!(!exc.emitter_allows("devb_sdmmc_mx8x"));
+        assert!(exc.emitter_allows("snova"));
+        assert!(exc.emitter_allows("vhsm"));
+    }
+
+    #[test]
+    fn exclude_wins_over_include() {
+        // include narrows, then exclude removes from within it.
+        let both = f(Some("devb"), Some("devb_sdmmc"));
+        assert!(!both.emitter_allows("devb_sdmmc_mx8x"));
+    }
+
+    #[test]
+    fn blank_and_whitespace_lists_are_noops() {
+        assert!(f(Some(""), None).emitter_allows("anything"));
+        assert!(f(Some("  "), None).emitter_allows("anything"));
+        assert!(f(None, Some("")).emitter_allows("anything"));
+    }
 }

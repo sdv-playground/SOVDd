@@ -23,6 +23,10 @@ use crate::output::{LogRow, OutputContext};
 pub struct LogArgs {
     pub priority: Option<String>,
     pub source: Option<String>,
+    /// Keep only these emitters (comma-separated, prefix-matched; server-side).
+    pub emitter: Option<String>,
+    /// Drop these emitters (comma-separated, prefix-matched; server-side).
+    pub emitter_exclude: Option<String>,
     pub log_type: Option<String>,
     pub status: Option<String>,
     pub limit: Option<u32>,
@@ -48,6 +52,8 @@ impl LogArgs {
             status: self.status.clone(),
             priority: self.priority.clone(),
             source: self.source.clone(),
+            emitter: self.emitter.clone(),
+            emitter_exclude: self.emitter_exclude.clone(),
             limit: self.limit,
             // `after` is set by the --all paging loop per-request; None here.
             after: None,

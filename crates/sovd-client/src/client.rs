@@ -704,6 +704,12 @@ impl SovdClient {
             if let Some(ref src) = filter.source {
                 qp.append_pair("source", src);
             }
+            if let Some(ref em) = filter.emitter {
+                qp.append_pair("x-sumo-emitter", em);
+            }
+            if let Some(ref ex) = filter.emitter_exclude {
+                qp.append_pair("x-sumo-emitter-exclude", ex);
+            }
             if let Some(n) = filter.limit {
                 qp.append_pair("limit", &n.to_string());
             }
