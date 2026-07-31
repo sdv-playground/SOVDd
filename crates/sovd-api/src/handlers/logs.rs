@@ -202,6 +202,67 @@ impl From<&LogEntry> for LogEntryResponse {
 
 /// GET /vehicle/v1/components/:component_id/logs
 /// Get logs (primarily for HPC backends)
+impl LogFilterQuery {
+    /// Map the query string into a [`LogFilter`], resolving the priority/status
+    /// enums and the `since`/`until` time sentinels (a bad time value is a 400,
+    /// not a silent drop). Shared by `get_logs` (bare `/logs`) and
+    /// `get_source_logs` (`/logs/sources/{name}`) so both parse identically.
+    fn into_filter(self) -> Result<LogFilter, ApiError> {
+        Ok(LogFilter {
+            priority: self.priority.and_then(|s| match s.as_str() {
+                "emergency" => Some(LogPriority::Emergency),
+                "alert" => Some(LogPriority::Alert),
+                "critical" => Some(LogPriority::Critical),
+                "error" => Some(LogPriority::Error),
+                "warning" => Some(LogPriority::Warning),
+                "notice" => Some(LogPriority::Notice),
+                "info" => Some(LogPriority::Info),
+                "debug" => Some(LogPriority::Debug),
+                _ => None,
+            }),
+            source: self.source,
+            emitter: self.emitter,
+            emitter_exclude: self.emitter_exclude,
+            // Resolve BEGIN/END/END-Nm sentinels (or RFC 3339) server-side against
+            // the device clock. A bad value is a 400, not a silent drop.
+            since: resolve_time_bound(self.since.as_deref())?,
+            until: resolve_time_bound(self.until.as_deref())?,
+            pattern: self.pattern,
+            limit: self.limit,
+            tail: self.tail,
+            log_type: self.log_type,
+            status: self.status.and_then(|s| match s.as_str() {
+                "pending" => Some(LogStatus::Pending),
+                "retrieved" => Some(LogStatus::Retrieved),
+                "processed" => Some(LogStatus::Processed),
+                _ => None,
+            }),
+            after: self.after,
+        })
+    }
+}
+
+/// Run the paged read for a resolved filter and shape the response. Shared tail
+/// of `get_logs` / `get_source_logs`.
+async fn logs_response(
+    backend: &std::sync::Arc<dyn sovd_core::DiagnosticBackend>,
+    filter: &LogFilter,
+) -> Result<Json<LogsResponse>, ApiError> {
+    // Paged path: a non-paging backend's default impl returns everything in one
+    // terminal page (next_cursor = None), so this is byte-compatible for existing
+    // clients while giving cursor-aware clients pagination + gap detection.
+    let page = backend.get_logs_paged(filter).await?;
+    let total_count = page.items.len();
+    let items: Vec<LogEntryResponse> = page.items.iter().map(LogEntryResponse::from).collect();
+    Ok(Json(LogsResponse {
+        items,
+        total_count,
+        next_cursor: page.next_cursor,
+        oldest_cursor: page.oldest_cursor,
+        tip_cursor: page.tip_cursor,
+    }))
+}
+
 pub async fn get_logs(
     State(state): State<AppState>,
     Path(component_id): Path<String>,
@@ -216,52 +277,48 @@ pub async fn get_logs(
         ));
     }
 
-    let filter = LogFilter {
-        priority: query.priority.and_then(|s| match s.as_str() {
-            "emergency" => Some(LogPriority::Emergency),
-            "alert" => Some(LogPriority::Alert),
-            "critical" => Some(LogPriority::Critical),
-            "error" => Some(LogPriority::Error),
-            "warning" => Some(LogPriority::Warning),
-            "notice" => Some(LogPriority::Notice),
-            "info" => Some(LogPriority::Info),
-            "debug" => Some(LogPriority::Debug),
-            _ => None,
-        }),
-        source: query.source,
-        emitter: query.emitter,
-        emitter_exclude: query.emitter_exclude,
-        // Resolve BEGIN/END/END-Nm sentinels (or RFC 3339) server-side against
-        // the device clock. A bad value is a 400, not a silent drop.
-        since: resolve_time_bound(query.since.as_deref())?,
-        until: resolve_time_bound(query.until.as_deref())?,
-        pattern: query.pattern,
-        limit: query.limit,
-        tail: query.tail,
-        log_type: query.log_type,
-        status: query.status.and_then(|s| match s.as_str() {
-            "pending" => Some(LogStatus::Pending),
-            "retrieved" => Some(LogStatus::Retrieved),
-            "processed" => Some(LogStatus::Processed),
-            _ => None,
-        }),
-        after: query.after,
-    };
+    let mut filter = query.into_filter()?;
 
-    // Paged path: a non-paging backend's default impl returns everything in one
-    // terminal page (next_cursor = None), so this is byte-compatible for existing
-    // clients while giving cursor-aware clients pagination + gap detection.
-    let page = backend.get_logs_paged(&filter).await?;
-    let total_count = page.items.len();
-    let items: Vec<LogEntryResponse> = page.items.iter().map(LogEntryResponse::from).collect();
+    // Bare `/logs` with NO explicit source: pick the PRIMARY source rather than
+    // merge across sources (a cross-source merge time-sorts independent clocks —
+    // a live journal at real time vs. a boot file stamped 1970 — and lies about
+    // ordering). Primary = the first Journal source, else the first source. Only
+    // applied when the component exposes >1 source; a single/zero-source component
+    // keeps its exact prior behaviour. Per-source reads use /logs/sources/{name}.
+    if filter.source.is_none() {
+        let sources = backend.list_log_sources().await.unwrap_or_default();
+        if sources.len() > 1 {
+            let primary = sources
+                .iter()
+                .find(|s| s.kind == sovd_core::LogSourceKind::Journal)
+                .or_else(|| sources.first());
+            if let Some(p) = primary {
+                filter.source = Some(p.name.clone());
+            }
+        }
+    }
 
-    Ok(Json(LogsResponse {
-        items,
-        total_count,
-        next_cursor: page.next_cursor,
-        oldest_cursor: page.oldest_cursor,
-        tip_cursor: page.tip_cursor,
-    }))
+    logs_response(backend, &filter).await
+}
+
+/// `GET /vehicle/v1/components/{component_id}/logs/sources/{source}` — the entries
+/// of ONE named log source (a journal), paged with its own cursor. The source is
+/// addressed by PATH (discovered via `GET /logs/sources`), not a query filter.
+pub async fn get_source_logs(
+    State(state): State<AppState>,
+    Path((component_id, source)): Path<(String, String)>,
+    Query(query): Query<LogFilterQuery>,
+) -> Result<Json<LogsResponse>, ApiError> {
+    let backend = state.get_backend(&component_id)?;
+    if !backend.capabilities().logs {
+        return Err(ApiError::NotImplemented(
+            "This component does not support logs".to_string(),
+        ));
+    }
+    let mut filter = query.into_filter()?;
+    // The path segment is authoritative — it overrides any `?source=` query.
+    filter.source = Some(source);
+    logs_response(backend, &filter).await
 }
 
 /// Path parameters for log routes with ID

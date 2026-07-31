@@ -15,7 +15,8 @@ use crate::models::{
     BulkCategory, BulkDataDownload, BulkDataFilter, BulkDataItem, Capabilities, ClearFaultsResult,
     CommControlMode, DataPoint, DataValue, DiagnosticInfo, DiagnosticResult, DtcSettingMode,
     EntityInfo, Fault, FaultFilter, FaultsResult, IoControlAction, IoControlResult,
-    LinkControlResult, LinkMode, LogEntry, LogFilter, LogPage, OperationExecution, OperationInfo,
+    LinkControlResult, LinkMode, LogEntry, LogFilter, LogPage, LogSourceInfo, OperationExecution,
+    OperationInfo,
     OutputDetail, OutputInfo, ParameterInfo, ScriptExecution, ScriptInfo, SecurityMode,
     SessionMode,
 };
@@ -516,6 +517,19 @@ pub trait DiagnosticBackend: Send + Sync {
             oldest_cursor: None,
             tip_cursor: None,
         })
+    }
+
+    /// List this entity's log SOURCES (`GET /logs/sources`) — the catalog a
+    /// client enumerates, then addresses one at a time via
+    /// `GET /logs/sources/{name}` (journals) or the entry's bulk-data `href`
+    /// (files/dumps). Distinct sources are never merged/time-sorted (independent
+    /// clocks), so this catalog is how a caller discovers what to read.
+    ///
+    /// Default: empty — a backend that hasn't modelled sources exposes none, and
+    /// the (spec-native) `/logs`, `/logs/entries`, `/bulk-data` paths are
+    /// unaffected. Vendor extension (`x-sumo`).
+    async fn list_log_sources(&self) -> BackendResult<Vec<LogSourceInfo>> {
+        Ok(vec![])
     }
 
     /// Get a single log entry by ID

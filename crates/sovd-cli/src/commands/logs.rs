@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::Result;
 use sovd_client::{LogEntry, LogFilter, SovdClient};
 
-use crate::output::{LogRow, OutputContext};
+use crate::output::{LogRow, LogSourceRow, OutputContext};
 
 /// Filters accepted on the CLI, mapped onto the client `LogFilter` (server-side)
 /// plus the client-side refinements the server filter can't express (`pattern`,
@@ -240,6 +240,33 @@ async fn fetch(
         entries.truncate(n);
     }
     Ok(entries)
+}
+
+/// `sovd-cli logs <ecu> sources` — the log-source catalog. Each source is read
+/// on its own (`list --source <name>`); they are never merged (independent
+/// clocks). Empty (not an error) when the component models no sources.
+pub async fn list_sources(client: &SovdClient, ecu: &str, ctx: &OutputContext) -> Result<()> {
+    let resp = client.list_log_sources(ecu).await?;
+    if resp.items.is_empty() {
+        ctx.info("No log sources");
+        return Ok(());
+    }
+    let rows: Vec<LogSourceRow> = resp
+        .items
+        .into_iter()
+        .map(|s| LogSourceRow {
+            name: s.name,
+            kind: format!("{:?}", s.kind).to_lowercase(),
+            cursor: if s.cursor { "yes" } else { "no" }.to_string(),
+            emitters: if s.emitters.is_empty() {
+                "-".to_string()
+            } else {
+                s.emitters.join(",")
+            },
+        })
+        .collect();
+    ctx.print(&rows);
+    Ok(())
 }
 
 /// `sovd-cli logs get <ecu> <id>` — one entry's metadata.

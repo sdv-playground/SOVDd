@@ -149,6 +149,18 @@ pub fn create_router(state: AppState) -> Router {
                 .put(handlers::logs_ext::put_log_config)
                 .delete(handlers::logs_ext::reset_log_config),
         )
+        // Per-source model (x-sumo): the source CATALOG + one source's entries.
+        // Static two-segment `/logs/sources` + three-segment `/logs/sources/{name}`
+        // — matchit gives statics priority over the `/logs/{log_id}` catch-all,
+        // and the 3-segment form can't collide with the 2-segment {log_id} anyway.
+        .route(
+            "/vehicle/v1/components/{component_id}/logs/sources",
+            get(handlers::logs_ext::list_log_sources),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/logs/sources/{source}",
+            get(handlers::logs::get_source_logs),
+        )
         .route(
             "/vehicle/v1/components/{component_id}/logs/{log_id}",
             get(handlers::logs::get_log).delete(handlers::logs::delete_log),

@@ -262,6 +262,19 @@ pub struct ComponentRow {
     pub status: String,
 }
 
+/// A log source in the `logs <ecu> sources` catalog.
+#[derive(Debug, Tabled, Serialize)]
+pub struct LogSourceRow {
+    #[tabled(rename = "SOURCE")]
+    pub name: String,
+    #[tabled(rename = "KIND")]
+    pub kind: String,
+    #[tabled(rename = "CURSOR")]
+    pub cursor: String,
+    #[tabled(rename = "EMITTERS")]
+    pub emitters: String,
+}
+
 /// Parameter display for data command
 #[derive(Debug, Tabled, Serialize)]
 pub struct ParameterRow {

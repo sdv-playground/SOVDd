@@ -688,46 +688,38 @@ impl SovdClient {
             .base_url
             .join(&format!("/vehicle/v1/components/{}/logs", component_id))?;
 
-        // Build the query via query_pairs_mut so values are percent-encoded —
-        // the `after` cursor (base64 / journald __CURSOR) can carry +, /, =, ;.
-        {
-            let mut qp = url.query_pairs_mut();
-            if let Some(ref t) = filter.log_type {
-                qp.append_pair("type", t);
-            }
-            if let Some(ref s) = filter.status {
-                qp.append_pair("status", s);
-            }
-            if let Some(ref p) = filter.priority {
-                qp.append_pair("priority", p);
-            }
-            if let Some(ref src) = filter.source {
-                qp.append_pair("source", src);
-            }
-            if let Some(ref em) = filter.emitter {
-                qp.append_pair("x-sumo-emitter", em);
-            }
-            if let Some(ref ex) = filter.emitter_exclude {
-                qp.append_pair("x-sumo-emitter-exclude", ex);
-            }
-            if let Some(n) = filter.limit {
-                qp.append_pair("limit", &n.to_string());
-            }
-            if let Some(ref c) = filter.after {
-                qp.append_pair("x-sumo-after", c);
-            }
-            if let Some(ref s) = filter.since {
-                qp.append_pair("since", s);
-            }
-            if let Some(ref u) = filter.until {
-                qp.append_pair("until", u);
-            }
-        }
-        // An empty query set leaves a trailing "?"; strip it for tidiness.
-        if url.query() == Some("") {
-            url.set_query(None);
-        }
+        append_log_query(&mut url, filter, true);
+        let response = self.client.get(url).send().await?;
+        self.handle_response(response).await
+    }
 
+    /// List a component's log SOURCES (`GET /logs/sources`) — the x-sumo catalog
+    /// a client enumerates before reading one source at a time.
+    #[instrument(skip(self))]
+    pub async fn list_log_sources(&self, component_id: &str) -> Result<LogSourcesResponse> {
+        let url = self.base_url.join(&format!(
+            "/vehicle/v1/components/{}/logs/sources",
+            component_id
+        ))?;
+        let response = self.client.get(url).send().await?;
+        self.handle_response(response).await
+    }
+
+    /// Read ONE named source's entries (`GET /logs/sources/{name}`), paged with
+    /// its own cursor. The source is in the PATH, so `filter.source` is ignored.
+    #[instrument(skip(self))]
+    pub async fn get_source_logs(
+        &self,
+        component_id: &str,
+        source: &str,
+        filter: &LogFilter,
+    ) -> Result<LogsResponse> {
+        let mut url = self.base_url.join(&format!(
+            "/vehicle/v1/components/{}/logs/sources/{}",
+            component_id, source
+        ))?;
+        // source is in the path — don't also send it as a query.
+        append_log_query(&mut url, filter, false);
         let response = self.client.get(url).send().await?;
         self.handle_response(response).await
     }
@@ -1956,6 +1948,51 @@ impl SovdClient {
             StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => SovdClientError::Timeout,
             _ => SovdClientError::server_error(status.as_u16(), message),
         }
+    }
+}
+
+/// Append a `LogFilter` as percent-encoded query pairs (values may carry +,/,=
+/// — the `after` cursor / journald `__CURSOR`), then strip an empty trailing `?`.
+/// `include_source` is false for the per-source route where the source is in the
+/// path. Shared by `get_logs_filtered` and `get_source_logs`.
+fn append_log_query(url: &mut Url, filter: &LogFilter, include_source: bool) {
+    {
+        let mut qp = url.query_pairs_mut();
+        if let Some(ref t) = filter.log_type {
+            qp.append_pair("type", t);
+        }
+        if let Some(ref s) = filter.status {
+            qp.append_pair("status", s);
+        }
+        if let Some(ref p) = filter.priority {
+            qp.append_pair("priority", p);
+        }
+        if include_source {
+            if let Some(ref src) = filter.source {
+                qp.append_pair("source", src);
+            }
+        }
+        if let Some(ref em) = filter.emitter {
+            qp.append_pair("x-sumo-emitter", em);
+        }
+        if let Some(ref ex) = filter.emitter_exclude {
+            qp.append_pair("x-sumo-emitter-exclude", ex);
+        }
+        if let Some(n) = filter.limit {
+            qp.append_pair("limit", &n.to_string());
+        }
+        if let Some(ref c) = filter.after {
+            qp.append_pair("x-sumo-after", c);
+        }
+        if let Some(ref s) = filter.since {
+            qp.append_pair("since", s);
+        }
+        if let Some(ref u) = filter.until {
+            qp.append_pair("until", u);
+        }
+    }
+    if url.query() == Some("") {
+        url.set_query(None);
     }
 }
 

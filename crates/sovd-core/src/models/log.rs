@@ -56,6 +56,52 @@ pub enum LogStatus {
     Processed,
 }
 
+/// What KIND of log source an entry in the source catalog is — the retrieval
+/// model differs by kind, so a client knows how to read it before it asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogSourceKind {
+    /// A live line stream you PAGE (a journal): the QNX slog2 ring, journald.
+    /// Read via `GET /logs/sources/{name}` (entries + cursor). No file to
+    /// download.
+    Journal,
+    /// A discrete text FILE you download whole via bulk-data
+    /// (`GET /bulk-data/logs/{id}`). The `href` on the catalog entry points there.
+    File,
+    /// A dump artifact (crash dump / trace) — the §7.21 message-passing pattern
+    /// (retrieve then acknowledge). Also downloaded, distinguished from `File`
+    /// so a client can treat it as a discrete event.
+    Dump,
+}
+
+/// One entry in a component's log-source CATALOG (`GET /logs/sources`). A source
+/// is a thing you ENUMERATE then ADDRESS — not a filter value you must know in
+/// advance. Distinct sources are NEVER merged/time-sorted with each other (their
+/// clocks are independent — a live journal at real time vs. a boot file stamped
+/// 1970), so each is read on its own via `GET /logs/sources/{name}` (journals) or
+/// its bulk-data `href` (files/dumps). Vendor extension (`x-sumo`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogSourceInfo {
+    /// The source name — the `{name}` path segment. For slog2 this is the fixed
+    /// physical source `"slog2"`; for a host file it is the file stem; for a
+    /// guest it is the guest's own source label.
+    pub name: String,
+    /// How to retrieve this source (see [`LogSourceKind`]).
+    pub kind: LogSourceKind,
+    /// Whether this source supports reboot-safe cursor paging on
+    /// `GET /logs/sources/{name}` (`x-sumo-after` + response cursors). `false`
+    /// ⇒ a single terminal page (e.g. the slog2 ring, until its segment cursor
+    /// lands) — a client must NOT loop expecting a cursor.
+    pub cursor: bool,
+    /// For a `Journal` source that multiplexes sub-sources (the slog2 ring's
+    /// per-buffer emitters: `snova`/`vhsm`/`devb_sdmmc_mx8x`/…), the known emitter
+    /// names — narrowable via `x-sumo-emitter[-exclude]`. Empty when the source
+    /// has no sub-dimension OR when enumeration is deferred (a client can still
+    /// discover emitters from each entry's `fields.emitter`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emitters: Vec<String>,
+}
+
 /// Log priority levels (aligned with syslog priorities)
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -254,5 +300,47 @@ mod tests {
         assert!(f(Some(""), None).emitter_allows("anything"));
         assert!(f(Some("  "), None).emitter_allows("anything"));
         assert!(f(None, Some("")).emitter_allows("anything"));
+    }
+
+    #[test]
+    fn log_source_info_serde_round_trips() {
+        use super::{LogSourceInfo, LogSourceKind};
+
+        // A journal source with no emitters: `emitters` must be OMITTED (skip if
+        // empty), and `kind` must serialize lowercase.
+        let slog2 = LogSourceInfo {
+            name: "slog2".into(),
+            kind: LogSourceKind::Journal,
+            cursor: false,
+            emitters: vec![],
+        };
+        let j = serde_json::to_string(&slog2).unwrap();
+        assert!(j.contains("\"kind\":\"journal\""), "{j}");
+        assert!(!j.contains("emitters"), "empty emitters must be skipped: {j}");
+        let back: LogSourceInfo = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.name, "slog2");
+        assert_eq!(back.kind, LogSourceKind::Journal);
+        assert!(!back.cursor);
+        assert!(back.emitters.is_empty());
+
+        // A file source WITH emitters present round-trips them + the kind.
+        let f = LogSourceInfo {
+            name: "host-boot".into(),
+            kind: LogSourceKind::File,
+            cursor: true,
+            emitters: vec!["a".into(), "b".into()],
+        };
+        let j = serde_json::to_string(&f).unwrap();
+        assert!(j.contains("\"kind\":\"file\""), "{j}");
+        let back: LogSourceInfo = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.emitters, vec!["a".to_string(), "b".to_string()]);
+        assert!(back.cursor);
+        assert_eq!(back.kind, LogSourceKind::File);
+
+        // Absent `emitters` in the wire JSON deserializes to empty (serde default).
+        let back: LogSourceInfo =
+            serde_json::from_str(r#"{"name":"x","kind":"dump","cursor":false}"#).unwrap();
+        assert_eq!(back.kind, LogSourceKind::Dump);
+        assert!(back.emitters.is_empty());
     }
 }

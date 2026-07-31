@@ -236,7 +236,9 @@ enum Commands {
         /// ECU / component id (a gateway id gives the merged vehicle view).
         ecu: String,
 
-        /// Action (positional): list (default), get, content, delete.
+        /// Action (positional): list (default), sources, get, content, delete.
+        /// `sources` prints the log-source catalog; `list --source <name>` reads
+        /// one source.
         #[arg(default_value = "list")]
         action: String,
 
@@ -542,6 +544,9 @@ async fn main() -> Result<()> {
                     };
                     commands::logs::list(&client, ecu, &args, &ctx).await?;
                 }
+                "sources" => {
+                    commands::logs::list_sources(&client, ecu, &ctx).await?;
+                }
                 "get" | "content" | "delete" => {
                     let Some(id) = id else {
                         anyhow::bail!("a log id is required: `logs <ecu> {action} <id>`");
@@ -556,7 +561,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 other => anyhow::bail!(
-                    "unknown logs action `{other}` (expected: list, get, content, delete)"
+                    "unknown logs action `{other}` (expected: list, sources, get, content, delete)"
                 ),
             }
         }

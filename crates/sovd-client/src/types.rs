@@ -616,6 +616,40 @@ pub struct LogsResponse {
     pub tip_cursor: Option<String>,
 }
 
+/// Kind of a log source (how to retrieve it) — mirrors `sovd_core::LogSourceKind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogSourceKind {
+    /// A live line stream you page (slog2 ring, journald).
+    Journal,
+    /// A text file downloaded whole via bulk-data.
+    File,
+    /// A dump artifact (message-passing pattern).
+    Dump,
+}
+
+/// One entry in the `GET /logs/sources` catalog (x-sumo).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogSourceInfo {
+    pub name: String,
+    pub kind: LogSourceKind,
+    /// Whether `/logs/sources/{name}` supports cursor paging.
+    #[serde(default)]
+    pub cursor: bool,
+    /// Known emitter (sub-source) names for a multiplexed journal; may be empty.
+    #[serde(default)]
+    pub emitters: Vec<String>,
+    /// URL to read/download this source.
+    #[serde(default)]
+    pub href: String,
+}
+
+/// Response of `GET /logs/sources`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogSourcesResponse {
+    pub items: Vec<LogSourceInfo>,
+}
+
 /// Log filter for querying logs
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct LogFilter {

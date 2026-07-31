@@ -34,6 +34,30 @@ pub struct LogEntryRef {
     pub href: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct LogSourcesResponse {
+    /// The component's log sources — empty when the backend models none.
+    pub items: Vec<LogSourceRef>,
+}
+
+/// One source in the `GET /logs/sources` catalog. `href` addresses the source:
+/// for a `journal` it is `/logs/sources/{name}` (entries + cursor); for a
+/// `file`/`dump` it is the source's own read path (also `/logs/sources/{name}`,
+/// which the backend maps to the file's entries — the whole-file download stays
+/// the spec-native `/logs/entries` → `/bulk-data/logs/{id}` path).
+#[derive(Debug, Serialize)]
+pub struct LogSourceRef {
+    pub name: String,
+    pub kind: sovd_core::LogSourceKind,
+    /// Whether `/logs/sources/{name}` supports cursor paging.
+    pub cursor: bool,
+    /// Known emitter (sub-source) names for a multiplexed journal; omitted when
+    /// empty (a client can still discover them from each entry's `fields.emitter`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub emitters: Vec<String>,
+    pub href: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogConfig {
     /// Log context — e.g. `"rfc5424"` or `"autosar-dlt"`.
@@ -94,6 +118,34 @@ pub async fn list_log_entries(
         Err(_) => Vec::new(),
     };
     Ok(Json(LogEntriesResponse { items }))
+}
+
+/// GET /vehicle/v1/components/:component_id/logs/sources
+///
+/// The source CATALOG (x-sumo): every log source this component exposes, so a
+/// client can DISCOVER sources and then read one at a time via
+/// `GET /logs/sources/{name}` — never a cross-source merge. Empty (not an error)
+/// when the backend models no sources.
+pub async fn list_log_sources(
+    State(state): State<AppState>,
+    Path(component_id): Path<String>,
+) -> Result<Json<LogSourcesResponse>, ApiError> {
+    let backend = state.get_backend(&component_id)?;
+    let base = format!("/vehicle/v1/components/{component_id}/logs/sources");
+    let items = backend
+        .list_log_sources()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| LogSourceRef {
+            href: format!("{base}/{}", s.name),
+            name: s.name,
+            kind: s.kind,
+            cursor: s.cursor,
+            emitters: s.emitters,
+        })
+        .collect();
+    Ok(Json(LogSourcesResponse { items }))
 }
 
 /// GET /vehicle/v1/components/:component_id/logs/config
