@@ -1990,6 +1990,9 @@ fn append_log_query(url: &mut Url, filter: &LogFilter, include_source: bool) {
         if let Some(ref u) = filter.until {
             qp.append_pair("until", u);
         }
+        if let Some(ref r) = filter.runtime {
+            qp.append_pair("x-sumo-runtime", r);
+        }
     }
     if url.query() == Some("") {
         url.set_query(None);

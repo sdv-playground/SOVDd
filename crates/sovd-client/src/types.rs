@@ -693,6 +693,13 @@ pub struct LogFilter {
     /// Upper time bound (RFC 3339). Same caveats as `since`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub until: Option<String>,
+    /// RUNTIME window — the last N of the producer's MONOTONIC runtime, as a
+    /// duration string (`3h`/`90s`) or bare seconds. Jump-proof: the right axis on
+    /// the CVC whose wall clock is unreliable (and, offboard, is the workstation's,
+    /// not the device's). Sent as `x-sumo-runtime`; resolved by the backend against
+    /// each source's tip uptime. Prefer this over since/until for "last N".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
 }
 
 // =============================================================================
