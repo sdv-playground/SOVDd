@@ -591,6 +591,11 @@ pub struct LogEntry {
     /// Additional metadata (trigger, fault codes, etc.)
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+    /// Monotonic runtime (seconds since the producer's boot) at which this entry
+    /// was logged — jump-proof, unlike `timestamp` (wall clock). The axis the
+    /// `x-sumo-runtime` window filters on. Wire name `x-sumo-uptime-secs`.
+    #[serde(default, rename = "x-sumo-uptime-secs")]
+    pub uptime_secs: Option<u64>,
 }
 
 /// Logs response

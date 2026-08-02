@@ -41,6 +41,14 @@ pub struct LogEntry {
     /// Additional metadata (trigger, fault codes, etc.)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+    /// Monotonic runtime at which this entry was logged — seconds since the
+    /// producer's boot (CLOCK_MONOTONIC on the host slog2 path,
+    /// `__MONOTONIC_TIMESTAMP` on guest journald). Unlike `timestamp` (wall clock,
+    /// unreliable on the CVC — boots at epoch, jumps when NTP sets it), this is
+    /// jump-proof and is the axis the `x-sumo-runtime` window filters on. `None`
+    /// when the source doesn't carry a monotonic clock.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "x-sumo-uptime-secs")]
+    pub uptime_secs: Option<u64>,
 }
 
 /// Status of a log entry for message passing pattern
@@ -198,6 +206,16 @@ pub struct LogFilter {
     /// `tasks/log-retrieval-design.md`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub after: Option<String>,
+    /// RUNTIME window in seconds — keep only entries within the last N seconds of
+    /// the producer's runtime (monotonic uptime), measured back from the newest
+    /// record (the "tip"). Unlike `since`/`until` (absolute wall-clock times, which
+    /// the CVC's unreliable clock makes useless — especially offboard, where the
+    /// server clock is the workstation's), this is jump-proof and resolved by the
+    /// BACKEND against each source's tip uptime (the only party that knows it), not
+    /// by wall-clock in the API layer. Wire name `x-sumo-runtime` (a duration like
+    /// `3h`/`90s`, parsed to seconds). Backends without a monotonic axis ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_secs: Option<u64>,
 }
 
 impl LogFilter {

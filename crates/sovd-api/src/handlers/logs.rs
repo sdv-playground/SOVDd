@@ -67,6 +67,11 @@ pub struct LogEntryResponse {
     pub fields: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+    /// Monotonic runtime (seconds since the producer's boot) at which this entry
+    /// was logged — the jump-proof axis the `x-sumo-runtime` window filters on.
+    /// Carried through from `LogEntry.uptime_secs`. Wire name `x-sumo-uptime-secs`.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "x-sumo-uptime-secs")]
+    pub uptime_secs: Option<u64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -104,6 +109,14 @@ pub struct LogFilterQuery {
     /// extension (§6.2.7): the wire name is `x-sumo-after`.
     #[serde(rename = "x-sumo-after")]
     pub after: Option<String>,
+    /// Vendor extension: RUNTIME window — keep only entries within the last
+    /// `<N>{s,m,h,d}` of the producer's MONOTONIC runtime, measured back from the
+    /// newest record. The jump-proof alternative to `since`/`until` (which use the
+    /// CVC's unreliable wall clock). Resolved in the backend against the source's
+    /// tip uptime, NOT here against wall-clock. Wire name `x-sumo-runtime`
+    /// (e.g. `x-sumo-runtime=3h`).
+    #[serde(rename = "x-sumo-runtime")]
+    pub runtime: Option<String>,
 }
 
 /// Resolve a `since`/`until` value to an absolute time. Accepts RFC 3339, or a
@@ -196,6 +209,7 @@ impl From<&LogEntry> for LogEntryResponse {
             href: entry.href.clone(),
             fields: entry.fields.clone(),
             metadata: entry.metadata.clone(),
+            uptime_secs: entry.uptime_secs,
         }
     }
 }
@@ -238,6 +252,17 @@ impl LogFilterQuery {
                 _ => None,
             }),
             after: self.after,
+            // Runtime window: a duration (`3h`/`90s`) → seconds. Resolved by the
+            // backend against the source's tip uptime (NOT wall-clock here); a bad
+            // value is a 400, matching the since/until strictness.
+            runtime_secs: match self.runtime.as_deref() {
+                None => None,
+                Some(s) => Some(parse_duration_secs(s).ok_or_else(|| {
+                    ApiError::BadRequest(format!(
+                        "bad x-sumo-runtime {s:?}: expected <N>{{s,m,h,d}} (e.g. 3h)"
+                    ))
+                })?),
+            },
         })
     }
 }

@@ -920,6 +920,7 @@ impl DiagnosticBackend for SovdProxyBackend {
                 status: None,
                 href: l.href,
                 metadata: None,
+                uptime_secs: l.uptime_secs,
             })
             .collect();
 
@@ -946,6 +947,7 @@ impl DiagnosticBackend for SovdProxyBackend {
             status: None,
             href: l.href,
             metadata: None,
+            uptime_secs: l.uptime_secs,
         })
     }
 
