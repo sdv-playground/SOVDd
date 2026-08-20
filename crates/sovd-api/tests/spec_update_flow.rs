@@ -1154,8 +1154,8 @@ async fn cyclic_subscription_gateway_child_resource_201() {
 // C-005 — version-info lists ALL supported versions  (§7.4.2)
 // ---------------------------------------------------------------------------
 
-/// C-005: `/version-info` derives its `versions` array from the shared
-/// `API_VERSIONS` source of truth (v1 / /vehicle/v1 / x-sovd-version 1.1).
+/// C-005: `/version-info` derives its `sovd_info` array (§7.4.2 Table 36)
+/// from the shared `API_VERSIONS` source of truth (/vehicle/v1 @ SemVer 1.1.0).
 #[tokio::test]
 async fn version_info_lists_all_supported_versions() {
     let (server, _backend) = spawn_with("singleshot").await;
@@ -1164,12 +1164,19 @@ async fn version_info_lists_all_supported_versions() {
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: Value = resp.json().await.unwrap();
 
-    let versions = body["versions"].as_array().expect("versions array");
-    assert_eq!(versions.len(), 1, "exactly the one mounted edition");
-    let v1 = &versions[0];
-    assert_eq!(v1["version_identifier"], "v1");
-    assert_eq!(v1["base_path"], "/vehicle/v1");
-    assert_eq!(v1["x-sovd-version"], "1.1");
+    // Top-level element is `sovd_info` (SOVDInfo[]), per §7.4.2 Table 36.
+    let sovd_info = body["sovd_info"].as_array().expect("sovd_info array");
+    assert_eq!(sovd_info.len(), 1, "exactly the one mounted edition");
+    let v1 = &sovd_info[0];
+    // Table 37: `version` is a SemVer 2.0.0 string, `base_uri` a uri-reference.
+    assert_eq!(v1["version"], "1.1.0");
+    assert_eq!(v1["base_uri"], "/vehicle/v1");
+    // Table 38 VendorInfo (optional) — name + version both mandatory when present.
+    assert_eq!(v1["vendor_info"]["name"], "SOVDd");
+    assert!(
+        v1["vendor_info"]["version"].is_string(),
+        "vendor_info.version must be a string"
+    );
 }
 
 /// C-005: the HTTP body is exactly what the shared `API_VERSIONS` builder
@@ -1178,13 +1185,13 @@ async fn version_info_lists_all_supported_versions() {
 async fn version_info_is_sourced_from_shared_definition() {
     use sovd_api::handlers::meta::{build_version_info, API_VERSIONS};
 
-    // The builder reflects the const slice 1:1.
+    // The builder reflects the const slice 1:1 (SOVDInfo maps base_uri +
+    // sovd_version; the tuple's version_identifier is internal-only).
     let built = build_version_info();
-    assert_eq!(built.versions.len(), API_VERSIONS.len());
-    for (entry, (id, base, sovd)) in built.versions.iter().zip(API_VERSIONS) {
-        assert_eq!(entry.version_identifier, *id);
-        assert_eq!(entry.base_path, *base);
-        assert_eq!(entry.x_sovd_version, *sovd);
+    assert_eq!(built.sovd_info.len(), API_VERSIONS.len());
+    for (entry, (_id, base_uri, sovd_version)) in built.sovd_info.iter().zip(API_VERSIONS) {
+        assert_eq!(entry.base_uri, *base_uri);
+        assert_eq!(entry.version, *sovd_version);
     }
 
     // …and the served body equals the builder output.

@@ -11,23 +11,42 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 
-/// One row of `/version-info` — describes a supported SOVD API edition.
+/// One entry of `/version-info`'s `sovd_info[]` array — ISO 17978-3
+/// §7.4.2 Table 37 (SOVDInfo). Describes one supported SOVD version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VersionEntry {
-    /// URI version segment, e.g. `"v1"`.
-    pub version_identifier: String,
-    /// Base path this version serves at, e.g. `"/vehicle/v1"`.
-    pub base_path: String,
-    /// Spec edition / x-sovd-version this maps to.
-    #[serde(rename = "x-sovd-version")]
-    pub x_sovd_version: String,
+pub struct SovdInfo {
+    /// Version of the SOVD standard supported, as a SemVer 2.0.0 string
+    /// (Table 37 `version`, convention M).
+    pub version: String,
+    /// Version-specific base URI for interacting with the server; a
+    /// uri-reference that carries the `v1` URI version segment, e.g.
+    /// `"/vehicle/v1"` (Table 37 `base_uri`, convention M).
+    pub base_uri: String,
+    /// Vendor-specific information (Table 37 `vendor_info`, convention O).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor_info: Option<VendorInfo>,
 }
 
-/// Response body for `GET /version-info`.
+/// Vendor-specific server info — ISO 17978-3 §7.4.2 Table 38 (VendorInfo).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VendorInfo {
+    /// Name of the vendor of the SOVD server (Table 38 `name`, M).
+    pub name: String,
+    /// Version of the SOVD server — a vendor-specific string
+    /// (Table 38 `version`, M).
+    pub version: String,
+}
+
+/// Response body for `GET /version-info` — ISO 17978-3 §7.4.2 Table 36.
+///
+/// The single top-level element is `sovd_info` (SOVDInfo[]). We always
+/// return the list; the optional `include-schema` query parameter (which
+/// would add a `schema` sibling) is not implemented — unconditionally
+/// returning the version list is the useful reading of Table 36.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VersionInfoResponse {
-    /// All API versions this server serves.
-    pub versions: Vec<VersionEntry>,
+    /// Supported SOVD versions (Table 36 `sovd_info`).
+    pub sovd_info: Vec<SovdInfo>,
 }
 
 /// Single source of truth for the SOVD API edition(s) this server mounts.
@@ -37,22 +56,30 @@ pub struct VersionInfoResponse {
 /// so the advertised list can't drift from the actual surface (C-005).  Add a
 /// row here (and the matching routes) when introducing a new API edition.
 ///
-/// Each tuple is `(version_identifier, base_path, x-sovd-version)`:
-///   * `version_identifier` — the URI version segment (`base_uri` §5.6 rule:
-///     value `v1` for this edition).
-///   * `base_path` — where that version serves (`/vehicle/{version}`).
-///   * `x-sovd-version` — the ASAM SOVD protocol version this maps to.
-pub const API_VERSIONS: &[(&str, &str, &str)] = &[("v1", "/vehicle/v1", "1.1")];
+/// Each tuple is `(version_identifier, base_uri, sovd_version)`:
+///   * `version_identifier` — the URI version segment (§5.6 rule: value `v1`
+///     for this edition). Not serialized on its own — it is carried inside
+///     `base_uri`; kept here as the internal routing key.
+///   * `base_uri` — the version-specific base URI (`/vehicle/{version}`),
+///     emitted as SOVDInfo `base_uri` (§7.4.2 Table 37).
+///   * `sovd_version` — the SOVD standard version this maps to, as a SemVer
+///     2.0.0 string, emitted as SOVDInfo `version` (Table 37). Aligned with
+///     ASAM SOVD 1.1 (info.x-sovd-version) but expressed as `1.1.0` so it is
+///     valid SemVer 2.0.0.
+pub const API_VERSIONS: &[(&str, &str, &str)] = &[("v1", "/vehicle/v1", "1.1.0")];
 
 /// Build the `version-info` body from [`API_VERSIONS`].
 pub fn build_version_info() -> VersionInfoResponse {
     VersionInfoResponse {
-        versions: API_VERSIONS
+        sovd_info: API_VERSIONS
             .iter()
-            .map(|(id, base, sovd)| VersionEntry {
-                version_identifier: (*id).to_string(),
-                base_path: (*base).to_string(),
-                x_sovd_version: (*sovd).to_string(),
+            .map(|(_id, base_uri, sovd_version)| SovdInfo {
+                version: (*sovd_version).to_string(),
+                base_uri: (*base_uri).to_string(),
+                vendor_info: Some(VendorInfo {
+                    name: "SOVDd".to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                }),
             })
             .collect(),
     }
