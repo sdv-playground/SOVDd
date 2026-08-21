@@ -30,8 +30,10 @@ struct MultiSourceBackend {
 
 impl MultiSourceBackend {
     fn new(id: &str) -> Self {
-        let mut capabilities = Capabilities::default();
-        capabilities.logs = true;
+        let capabilities = Capabilities {
+            logs: true,
+            ..Default::default()
+        };
         Self {
             info: EntityInfo {
                 id: id.to_string(),
@@ -95,6 +97,7 @@ impl DiagnosticBackend for MultiSourceBackend {
             status: None,
             href: None,
             metadata: None,
+            uptime_secs: None,
         }])
     }
 

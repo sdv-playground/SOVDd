@@ -270,6 +270,46 @@ impl Default for UpdatesConfig {
     }
 }
 
+/// Capability-description content contributed by the embedding server, merged
+/// into the ISO 17978-3 §7.5 document (`GET /vehicle/v1/docs` and the
+/// entity-scoped `{entity}/docs`). Neutral: SOVDd attaches no meaning to the
+/// contents. `paths` are OpenAPI Path Item Objects keyed by path template and
+/// are scoped into entity docs by the same matching as native paths; `schemas`
+/// are merged verbatim into `components/schemas`. Empty by default — a server
+/// that registers nothing emits the identical document as before.
+#[derive(Clone, Debug, Default)]
+pub struct CapabilityExtensions {
+    /// Path templates (`{param}` form) → OpenAPI Path Item Object.
+    pub paths: serde_json::Map<String, serde_json::Value>,
+    /// Schema name → schema object, merged into `components/schemas`.
+    pub schemas: serde_json::Map<String, serde_json::Value>,
+}
+
+impl CapabilityExtensions {
+    /// Extract the `paths` object and `components/schemas` object from a
+    /// serialized OpenAPI document (or fragment). Absent or non-object members
+    /// contribute nothing.
+    pub fn from_openapi(doc: &serde_json::Value) -> Self {
+        let paths = doc
+            .get("paths")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let schemas = doc
+            .get("components")
+            .and_then(|c| c.get("schemas"))
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        Self { paths, schemas }
+    }
+
+    /// True when nothing has been contributed.
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty() && self.schemas.is_empty()
+    }
+}
+
 /// Application state shared across all handlers
 #[derive(Clone)]
 pub struct AppState {
@@ -294,6 +334,10 @@ pub struct AppState {
     /// Client→SOVDd authentication context (JWT-bearer slice). Defaults to
     /// disabled (open surface); set via [`AppState::with_auth`].
     auth: Arc<dyn Authorizer>,
+    /// Embedder-contributed capability-description content, merged into the
+    /// §7.5 document. Empty by default; set via
+    /// [`AppState::with_capability_extensions`].
+    capability_extensions: Arc<CapabilityExtensions>,
 }
 
 impl AppState {
@@ -310,6 +354,7 @@ impl AppState {
             updates: UpdatesStore::default(),
             updates_config: Arc::new(UpdatesConfig::default()),
             auth: Arc::new(AuthContext::default()),
+            capability_extensions: Arc::new(CapabilityExtensions::default()),
         }
     }
 
@@ -329,6 +374,7 @@ impl AppState {
             updates: UpdatesStore::default(),
             updates_config: Arc::new(UpdatesConfig::default()),
             auth: Arc::new(AuthContext::default()),
+            capability_extensions: Arc::new(CapabilityExtensions::default()),
         }
     }
 
@@ -349,6 +395,7 @@ impl AppState {
             updates: UpdatesStore::default(),
             updates_config: Arc::new(UpdatesConfig::default()),
             auth: Arc::new(AuthContext::default()),
+            capability_extensions: Arc::new(CapabilityExtensions::default()),
         }
     }
 
@@ -378,6 +425,19 @@ impl AppState {
     /// The authorizer, read by the auth middleware.
     pub fn auth(&self) -> &dyn Authorizer {
         self.auth.as_ref()
+    }
+
+    /// Attach embedder-contributed capability-description content, merged into
+    /// the §7.5 document. Builder-style consume + return.
+    pub fn with_capability_extensions(mut self, extensions: CapabilityExtensions) -> Self {
+        self.capability_extensions = Arc::new(extensions);
+        self
+    }
+
+    /// The embedder-contributed capability-description content, read by the
+    /// §7.5 doc builder.
+    pub fn capability_extensions(&self) -> &CapabilityExtensions {
+        &self.capability_extensions
     }
 
     /// Create AppState from a single backend (for simple single-entity servers)

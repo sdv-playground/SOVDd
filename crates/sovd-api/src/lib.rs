@@ -25,7 +25,7 @@ pub use auth::{
     IssuerConfig,
 };
 pub use error::ApiError;
-pub use state::AppState;
+pub use state::{AppState, CapabilityExtensions};
 
 // Re-export DidStore from sovd-conv for convenience
 pub use sovd_conv::{DataType, DidDefinition, DidStore};

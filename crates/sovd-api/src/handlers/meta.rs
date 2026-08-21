@@ -4,12 +4,14 @@
 //! change across API editions), which is why the version-info route
 //! is mounted at `/version-info` not `/vehicle/v1/version-info`.
 
+use axum::extract::State;
 use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
+use crate::state::{AppState, CapabilityExtensions};
 
 /// One entry of `/version-info`'s `sovd_info[]` array — ISO 17978-3
 /// §7.4.2 Table 37 (SOVDInfo). Describes one supported SOVD version.
@@ -108,7 +110,7 @@ pub async fn version_info() -> Json<VersionInfoResponse> {
 ///
 /// 2. **Spec-conforming 404** for everything else — emit `GenericError`
 ///    with the spec shape instead of axum's plain-text default.
-pub async fn not_found_fallback(uri: Uri) -> Response {
+pub async fn not_found_fallback(State(state): State<AppState>, uri: Uri) -> Response {
     let path = uri.path();
     if let Some(entity) = path.strip_suffix("/docs") {
         // Strip a trailing slash if the entity itself ended with one
@@ -117,7 +119,11 @@ pub async fn not_found_fallback(uri: Uri) -> Response {
         // request still 404s rather than aliasing the global doc.
         let entity = entity.strip_suffix('/').unwrap_or(entity);
         if !entity.is_empty() {
-            return Json(build_capability_doc(Some(entity))).into_response();
+            return Json(build_capability_doc_ext(
+                Some(entity),
+                state.capability_extensions(),
+            ))
+            .into_response();
         }
     }
     ApiError::NotFound(format!("No resource at {}", path)).into_response()
@@ -508,11 +514,22 @@ const PATHS: &[PathEntry] = &[
 /// [`not_found_fallback`] on `{entity}/docs`.  A full path-walker that
 /// introspects the axum router is a TODO — axum 0.8 doesn't expose its
 /// routing table.
-pub async fn capability_description() -> Json<serde_json::Value> {
-    Json(build_capability_doc(None))
+pub async fn capability_description(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(build_capability_doc_ext(
+        None,
+        state.capability_extensions(),
+    ))
 }
 
-/// Build the OpenAPI 3.1.0 capability description (§7.5, C-063).
+/// Build the OpenAPI 3.1.0 capability description (§7.5, C-063) with no
+/// embedder extensions — a thin wrapper over [`build_capability_doc_ext`].
+pub fn build_capability_doc(scope: Option<&str>) -> serde_json::Value {
+    build_capability_doc_ext(scope, &CapabilityExtensions::default())
+}
+
+/// Build the OpenAPI 3.1.0 capability description (§7.5, C-063), merging any
+/// embedder-contributed `extensions` (opaque to SOVDd — see
+/// [`CapabilityExtensions`]).
 ///
 /// `scope == None` → the global document: every entry in `PATHS`.
 ///
@@ -521,6 +538,11 @@ pub async fn capability_description() -> Json<serde_json::Value> {
 /// template is *at or under* that entity path are emitted, with the
 /// concrete ids substituted in for the matched prefix.  The envelope
 /// (`openapi`/`info`/`servers`/`components`) is identical in both modes.
+///
+/// Contributed `extensions.paths` are scoped by the SAME algorithm below (so
+/// an entity-scoped doc carries only the contributed ops at or under that
+/// entity); contributed `extensions.schemas` are merged verbatim into
+/// `components/schemas`. Empty extensions reproduce the document byte-for-byte.
 ///
 /// ## Scoping algorithm
 ///
@@ -533,7 +555,10 @@ pub async fn capability_description() -> Json<serde_json::Value> {
 /// `/vehicle/v1/components/{component_id}/data/{param_id}` scoped to
 /// `/vehicle/v1/components/vtx_ecm` emits
 /// `/vehicle/v1/components/vtx_ecm/data/{param_id}`.
-pub fn build_capability_doc(scope: Option<&str>) -> serde_json::Value {
+pub fn build_capability_doc_ext(
+    scope: Option<&str>,
+    extensions: &CapabilityExtensions,
+) -> serde_json::Value {
     // Pre-split the requested entity path (if any) into non-empty
     // segments.  Leading/trailing slashes drop out cleanly.
     let scope_segs: Vec<&str> = scope
@@ -582,7 +607,23 @@ pub fn build_capability_doc(scope: Option<&str>) -> serde_json::Value {
         }
     }
 
-    serde_json::json!({
+    // Merge embedder-contributed path items, scoped identically to native
+    // paths. Their content is opaque here — the embedder owns its meaning.
+    for (template, item) in &extensions.paths {
+        let Some(emitted) = emit_scoped_path(template, &scope_segs) else {
+            continue;
+        };
+        let slot = paths
+            .entry(emitted)
+            .or_insert_with(|| serde_json::json!({}));
+        if let (Some(dst), Some(src)) = (slot.as_object_mut(), item.as_object()) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
+        }
+    }
+
+    let mut doc = serde_json::json!({
         "openapi": "3.1.0",
         "info": {
             "title": "SOVDd",
@@ -683,7 +724,22 @@ pub fn build_capability_doc(scope: Option<&str>) -> serde_json::Value {
                 }
             }
         }
-    })
+    });
+
+    // Merge embedder-contributed schemas into `components/schemas` (verbatim).
+    if !extensions.schemas.is_empty() {
+        if let Some(schemas) = doc
+            .get_mut("components")
+            .and_then(|c| c.get_mut("schemas"))
+            .and_then(|s| s.as_object_mut())
+        {
+            for (k, v) in &extensions.schemas {
+                schemas.insert(k.clone(), v.clone());
+            }
+        }
+    }
+
+    doc
 }
 
 /// Compute the emitted OpenAPI path for `template` under `scope_segs`.

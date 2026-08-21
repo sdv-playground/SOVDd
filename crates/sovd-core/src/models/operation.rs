@@ -54,6 +54,7 @@ pub enum ParamType {
 
 /// Result of starting an operation
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct OperationExecution {
     /// Unique execution ID (for tracking async operations)
     pub execution_id: String,
@@ -63,6 +64,7 @@ pub struct OperationExecution {
     pub status: OperationStatus,
     /// Result data (if completed)
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(value_type = Object))]
     pub result: Option<serde_json::Value>,
     /// Error message (if failed)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -82,6 +84,7 @@ pub struct OperationExecution {
 /// resource exists; `cancelled` is spelled `stopped` by the spec.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum OperationStatus {
     /// Operation is currently running.
     Running,

@@ -903,6 +903,51 @@ fn build_capability_doc_scopes_to_component_prefix() {
     assert!(empty["paths"].as_object().unwrap().is_empty());
 }
 
+/// The embedder hook: injected capability-extension paths appear in the §7.5
+/// document and are scoped by the SAME path-template matching as native paths.
+/// Neutral — the `x-vendor-*` names are the embedder's; SOVDd attaches no
+/// meaning to them.
+#[test]
+fn injected_capability_extension_appears_and_scopes() {
+    use sovd_api::handlers::meta::{build_capability_doc, build_capability_doc_ext};
+    use sovd_api::CapabilityExtensions;
+
+    let ext = CapabilityExtensions::from_openapi(&serde_json::json!({
+        "paths": {
+            "/vehicle/v1/components/{component_id}/x-vendor-thing": {
+                "get": { "summary": "component-scoped vendor op" }
+            },
+            "/vehicle/v1/operations/x-vendor-op/executions": {
+                "post": { "summary": "entity-root vendor op" }
+            }
+        },
+        "components": { "schemas": { "VendorThing": { "type": "object" } } }
+    }));
+    assert!(!ext.is_empty());
+
+    // Global doc: both contributed paths + the contributed schema appear.
+    let global = build_capability_doc_ext(None, &ext);
+    assert!(
+        global["paths"]["/vehicle/v1/components/{component_id}/x-vendor-thing"]["get"].is_object()
+    );
+    assert!(global["paths"]["/vehicle/v1/operations/x-vendor-op/executions"]["post"].is_object());
+    assert!(global["components"]["schemas"]["VendorThing"].is_object());
+
+    // Scoped to a component: the component-scoped op is rewritten with the
+    // concrete id; the entity-root op is out of scope and omitted.
+    let scoped = build_capability_doc_ext(Some("/vehicle/v1/components/vm1"), &ext);
+    let scoped_paths = scoped["paths"].as_object().unwrap();
+    assert!(scoped_paths.contains_key("/vehicle/v1/components/vm1/x-vendor-thing"));
+    assert!(!scoped_paths.contains_key("/vehicle/v1/operations/x-vendor-op/executions"));
+
+    // No extensions ⇒ document identical to the plain builder: a server that
+    // registers nothing sees no drift.
+    assert_eq!(
+        build_capability_doc_ext(None, &CapabilityExtensions::default()),
+        build_capability_doc(None),
+    );
+}
+
 /// C-060 (ISO 17978-3 §6.2.1 / Table 21): the capability description
 /// declares `security` plus a bearer `securityScheme` — for both the
 /// global and scoped docs. Token enforcement is the deferred auth slice;
