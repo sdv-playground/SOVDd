@@ -414,7 +414,9 @@ mod tests {
             size: None,
             status: None,
             href: None,
+            fields: None,
             metadata: None,
+            uptime_secs: None,
         };
         assert!(anomaly(&e, &TestArgs::default()).is_some());
     }
@@ -433,7 +435,9 @@ mod tests {
             size: None,
             status: None,
             href: None,
+            fields: None,
             metadata: None,
+            uptime_secs: None,
         };
         assert!(anomaly(&e, &TestArgs::default()).is_none());
     }
@@ -451,7 +455,9 @@ mod tests {
             size: None,
             status: None,
             href: None,
+            fields: None,
             metadata: None,
+            uptime_secs: None,
         };
         assert!(anomaly(&e, &TestArgs::default()).is_some());
     }
@@ -469,7 +475,9 @@ mod tests {
             size: None,
             status: None,
             href: None,
+            fields: None,
             metadata: None,
+            uptime_secs: None,
         };
         let args = TestArgs {
             grep: vec!["watchdog tripped".into()],

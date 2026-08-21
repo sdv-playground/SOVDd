@@ -59,6 +59,7 @@ impl LogArgs {
             after: None,
             since: self.since.clone(),
             until: self.until.clone(),
+            runtime: None,
         }
     }
 }
