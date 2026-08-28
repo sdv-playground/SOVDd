@@ -190,9 +190,10 @@ impl UpdateState {
     }
 }
 
-/// ISO 17978-3 §7.18.7 Table 271 `Phase` enum.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
+/// ISO 17978-3 §7.18.7 Table 271 `Phase` enum. Wire literals come from
+/// `as_str()` only — do not add a serde derive; two serialization paths
+/// can drift.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Phase {
     /// Default — no phase started yet. Wire emits this until the
     /// first `PUT /prepare` or `PUT /automated`.
@@ -211,9 +212,11 @@ impl Phase {
 }
 
 /// ISO 17978-3 §7.18.7 Table 273 `Status` enum.  Same four values for
-/// both phases; semantics shift per phase per Table 273.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+/// both phases; semantics shift per phase per Table 273. Wire literals
+/// come from `as_str()` only (camelCase per Table 270, e.g.
+/// `inProgress`) — do not add a serde derive; two serialization paths
+/// can drift.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Status {
     /// Phase hasn't started yet (initial state after register or
     /// transition into a new phase).
@@ -484,5 +487,43 @@ impl AppState {
     /// Get all output configs for a component
     pub fn get_output_configs(&self, component_id: &str) -> Option<&Vec<OutputConfig>> {
         self.output_configs.get(component_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Phase, Status, UpdateState};
+
+    // These literals ARE the frozen ISO 17978-3 wire format (Tables
+    // 270/271/273), consumed by e.g. `GET /updates/{id}/status`. Now that
+    // the redundant serde derives are gone from `Phase` and `Status`,
+    // `as_str()` is the single serialization source — pin every variant
+    // here so a drifted literal fails loudly instead of silently breaking
+    // spec conformance. In particular `"inProgress"` is camelCase per the
+    // spec, not snake_case — do not "fix" it to `in_progress`.
+
+    #[test]
+    fn update_state_wire_literals() {
+        assert_eq!(UpdateState::Registered.as_str(), "registered");
+        assert_eq!(UpdateState::Uploading.as_str(), "uploading");
+        assert_eq!(UpdateState::Verified.as_str(), "verified");
+        assert_eq!(UpdateState::Finalized.as_str(), "finalized");
+        assert_eq!(UpdateState::Committed.as_str(), "committed");
+        assert_eq!(UpdateState::RolledBack.as_str(), "rolledback");
+        assert_eq!(UpdateState::Aborted.as_str(), "aborted");
+    }
+
+    #[test]
+    fn phase_wire_literals() {
+        assert_eq!(Phase::Prepare.as_str(), "prepare");
+        assert_eq!(Phase::Execute.as_str(), "execute");
+    }
+
+    #[test]
+    fn status_wire_literals() {
+        assert_eq!(Status::Pending.as_str(), "pending");
+        assert_eq!(Status::InProgress.as_str(), "inProgress");
+        assert_eq!(Status::Failed.as_str(), "failed");
+        assert_eq!(Status::Completed.as_str(), "completed");
     }
 }
