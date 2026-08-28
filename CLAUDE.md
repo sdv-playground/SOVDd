@@ -153,6 +153,6 @@ Server config is TOML (`config/*.toml`). DID definitions are YAML (`config/did-d
 - Error types: `BackendError` (sovd-core) wraps into `ApiError` (sovd-api) which produces HTTP responses
 - Concurrency: `parking_lot::RwLock` for flash/activation state, `DashMap` for DID lookups, tokio broadcast channels for subscriptions/SSE
 - E2E tests require Linux with `vcan` kernel module loaded; tests use `serial_test` crate on shared vcan0
-- E2E `TestHarness` spawns example-ecu + sovdd on port 18080; flash tests need `setup_programming_and_security()` before `start_flash()` and `setup_extended_and_security()` before `commit_flash()`/`rollback_flash()`
+- E2E `TestHarness` spawns example-ecu + sovdd on port 18980, probed via 127.0.0.1 (NOT 18080 — the sumo bench's tower CA publishes that via docker; NOT `localhost` — ::1-only hosts get shadowed); flash tests need `setup_programming_and_security()` before `start_flash()` and `setup_extended_and_security()` before `commit_flash()`/`rollback_flash()`
 - After ECU reset (0x11), session reverts to default (0x01) and security re-locks — this is per ISO 14229 and tracked by `notify_ecu_reset()` in session manager
 - Example-ecu security uses XOR algorithm with default secret `0xFF`
