@@ -61,7 +61,10 @@ struct TestHarness {
 }
 
 impl TestHarness {
-    const SERVER_PORT: u16 = 18080; // Use non-standard port for tests
+    // 18980: NOT 18080 — the sumo bench's tower stack (sumo-towers CA) publishes
+    // host 18080 via docker on both address families, silently shadowing the
+    // probe and answering empty 404s to every path.
+    const SERVER_PORT: u16 = 18980;
     const INTERFACE: &'static str = "vcan0";
 
     async fn new() -> Result<Self, Box<dyn std::error::Error>> {
@@ -73,7 +76,10 @@ impl TestHarness {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
 
-        let base_url = format!("http://localhost:{}", Self::SERVER_PORT);
+        // 127.0.0.1, not `localhost`: hosts where localhost resolves ::1-only
+        // send the probe to the v6 side, where a docker-published port can
+        // shadow a v4-bound server under test.
+        let base_url = format!("http://127.0.0.1:{}", Self::SERVER_PORT);
 
         let mut harness = Self {
             example_ecu: None,
