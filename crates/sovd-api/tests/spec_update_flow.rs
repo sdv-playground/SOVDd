@@ -529,7 +529,7 @@ async fn orchestrated_banked_commit_round_trip() {
 
     let resp = put(
         &server,
-        &format!("/vehicle/v1/components/dev1/updates/{}/x-sumo-commit", id),
+        &format!("/vehicle/v1/components/dev1/updates/{}/x-ota-commit", id),
     )
     .await;
     assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
@@ -552,7 +552,7 @@ async fn orchestrated_banked_rollback_round_trip() {
 
     let resp = put(
         &server,
-        &format!("/vehicle/v1/components/dev1/updates/{}/x-sumo-rollback", id),
+        &format!("/vehicle/v1/components/dev1/updates/{}/x-ota-rollback", id),
     )
     .await;
     assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
@@ -583,14 +583,14 @@ async fn orchestrated_banked_watchdog_auto_rollback() {
 }
 
 #[tokio::test]
-async fn x_sumo_commit_rejected_when_not_awaiting_verdict() {
+async fn x_ota_commit_rejected_when_not_awaiting_verdict() {
     let (server, _backend) = spawn_with("banked").await;
     let id = open_update(&server).await;
     upload_part(&server, &id, "manifest", b"x").await;
     // No prepare/execute yet → entry is at prepare/pending.
     let resp = put(
         &server,
-        &format!("/vehicle/v1/components/dev1/updates/{}/x-sumo-commit", id),
+        &format!("/vehicle/v1/components/dev1/updates/{}/x-ota-commit", id),
     )
     .await;
     assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
@@ -640,8 +640,8 @@ async fn discovery_endpoint_lists_x_sumo_extensions() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|v| v.as_str().unwrap_or("").contains("x-sumo-commit")),
-        "x-sumo-commit verb should be advertised"
+            .any(|v| v.as_str().unwrap_or("").contains("x-ota-commit")),
+        "x-ota-commit verb should be advertised"
     );
 }
 
@@ -777,8 +777,8 @@ async fn executions_wire_is_gone() {
     // The F.D8b vendor /executions{action} wire was retired in
     // Phase E along with all FlashClient deprecated methods.  POST
     // to that path now 404s; callers must use the spec verbs
-    // (PUT /prepare, /execute, /x-sumo-commit, /x-sumo-rollback,
-    // /x-sumo-force-rollback).
+    // (PUT /prepare, /execute, /x-ota-commit, /x-ota-rollback,
+    // /x-ota-force-rollback).
     let (server, _backend) = spawn_with("singleshot").await;
     let id = open_update(&server).await;
     upload_part(&server, &id, "manifest", b"m").await;

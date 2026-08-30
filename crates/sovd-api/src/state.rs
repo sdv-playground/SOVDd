@@ -137,7 +137,7 @@ pub struct UpdatesEntry {
     /// is running; cleared when a task completes.
     pub task_handle: Option<tokio::task::AbortHandle>,
     /// Watch channel for the orchestrator's trial verdict.  Sender
-    /// is held here so `PUT /x-sumo-commit` / `/x-sumo-rollback` can
+    /// is held here so `PUT /x-ota-commit` / `/x-ota-rollback` can
     /// post to it.  `None` in standard mode (Phase A behaviour);
     /// `Some` when `PUT /execute?x-sumo-control=orchestrated` runs
     /// and the task pauses at `substate=awaiting-verdict`.
@@ -260,8 +260,8 @@ impl Status {
 /// to complete a multi-ECU health check.
 #[derive(Clone, Debug)]
 pub struct UpdatesConfig {
-    /// Time the execute task will wait for an `x-sumo-commit` or
-    /// `x-sumo-rollback` verdict before timing out.
+    /// Time the execute task will wait for an `x-ota-commit` or
+    /// `x-ota-rollback` verdict before timing out.
     pub orchestrated_watchdog: std::time::Duration,
 }
 

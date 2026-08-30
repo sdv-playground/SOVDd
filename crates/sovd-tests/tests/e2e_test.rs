@@ -601,7 +601,7 @@ security_level = 0
     }
 
     /// PUT with an empty body — used by the async spec verbs
-    /// (PUT /prepare, /execute, /x-sumo-*).
+    /// (PUT /prepare, /execute, /x-ota-*).
     async fn put_empty(&self, path: &str) -> Result<(u16, Value), Box<dyn std::error::Error>> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self.client.put(&url).send().await?;

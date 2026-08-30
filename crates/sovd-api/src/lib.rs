@@ -475,8 +475,8 @@ pub fn create_router(state: AppState) -> Router {
         // ISO 17978-3 §7.18 spec verbs — async 202 + Location :: /status.
         // The F.D8b vendor-extension `/executions{action}` wire (deprecated
         // through Phase A–D) was removed in Phase E.  Callers use
-        // PUT prepare / execute / x-sumo-commit / x-sumo-rollback /
-        // x-sumo-force-rollback as appropriate.
+        // PUT prepare / execute / x-ota-commit / x-ota-rollback /
+        // x-ota-force-rollback as appropriate.
         // and stays alive (Deprecation header) for the migration window.
         // tasks/spec-aligned-updates-wire.md UPDATE-WIRE-001.
         .route(
@@ -500,22 +500,22 @@ pub fn create_router(state: AppState) -> Router {
         // and are paused at `substate=awaiting-verdict`.  See
         // tasks/spec-aligned-updates-wire.md §2.2.
         .route(
-            "/vehicle/v1/components/{component_id}/updates/{update_id}/x-sumo-commit",
-            put(handlers::updates::put_x_sumo_commit),
+            "/vehicle/v1/components/{component_id}/updates/{update_id}/x-ota-commit",
+            put(handlers::updates::put_x_ota_commit),
         )
         .route(
-            "/vehicle/v1/components/{component_id}/updates/{update_id}/x-sumo-rollback",
-            put(handlers::updates::put_x_sumo_rollback),
+            "/vehicle/v1/components/{component_id}/updates/{update_id}/x-ota-rollback",
+            put(handlers::updates::put_x_ota_rollback),
         )
-        // Unconditional trial-state clear — separate from x-sumo-rollback
+        // Unconditional trial-state clear — separate from x-ota-rollback
         // (which is the orchestrator's verdict on an awaiting-verdict
         // entry).  Used to unstick a previous flash that left the
         // backend in trial without an active execute task.  Lives at
         // the component root because by definition no /updates entry
         // exists for the stuck trial.
         .route(
-            "/vehicle/v1/components/{component_id}/x-sumo-force-rollback",
-            put(handlers::updates::put_x_sumo_force_rollback),
+            "/vehicle/v1/components/{component_id}/x-ota-force-rollback",
+            put(handlers::updates::put_x_ota_force_rollback),
         )
         // Admin routes - DID definitions management.
         //

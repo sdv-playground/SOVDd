@@ -36,8 +36,8 @@ Diagnostics) server. It exposes a REST API under `/vehicle/v1/` and translates S
 ### One disclosed deviation from spec-purity (conformance item C-026)
 
 SOVDd aims for zero vendor routes, but **today it is not vendor-free**: the `/updates` collection
-carries three vendor orchestration verbs — `x-sumo-commit`, `x-sumo-rollback`, and the
-component-root `x-sumo-force-rollback` (`crates/sovd-api/src/lib.rs`, end of the `/updates` block) —
+carries three vendor orchestration verbs — `x-ota-commit`, `x-ota-rollback`, and the
+component-root `x-ota-force-rollback` (`crates/sovd-api/src/lib.rs`, end of the `/updates` block) —
 used to drive trial-mode commit/rollback for banked components. They are **explicitly disclosed** at
 `GET /.well-known/sovd-extensions` (`crates/sovd-api/src/handlers/meta.rs`) so conformance scanners
 enumerate them rather than flag them as unknown surface. Whether these verbs stay in SOVDd (with an
@@ -447,7 +447,7 @@ no trial: `… → Activated → commit_flash() → Complete`.
   package ids, Table 257/261 catalog shape; `describe_update_package` lets a backend enrich the
   detail view); `PUT prepare`/`execute` spawn tracked async tasks (`202` + `Location`); `GET status`;
   `DELETE` aborts via a stored `AbortHandle`. **Orchestrated mode** (`PUT execute?x-sumo-control=orchestrated`)
-  pauses at `substate=awaiting-verdict` on a `watch` channel until `x-sumo-commit`/`x-sumo-rollback`
+  pauses at `substate=awaiting-verdict` on a `watch` channel until `x-ota-commit`/`x-ota-rollback`
   (or a watchdog fires; default 600 s). See the C-026 note in §1 for the vendor-verb status.
 
 ---

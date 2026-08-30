@@ -457,13 +457,13 @@ impl FlashConfig {
     }
 
     /// Vendor extension verbs (Phase B — orchestrated mode).  Land at
-    /// `/x-sumo-commit` / `/x-sumo-rollback` on the update resource.
-    pub fn updates_x_sumo_commit_path(&self, update_id: &str) -> String {
-        format!("{}/updates/{}/x-sumo-commit", self.base_prefix(), update_id)
+    /// `/x-ota-commit` / `/x-ota-rollback` on the update resource.
+    pub fn updates_x_ota_commit_path(&self, update_id: &str) -> String {
+        format!("{}/updates/{}/x-ota-commit", self.base_prefix(), update_id)
     }
-    pub fn updates_x_sumo_rollback_path(&self, update_id: &str) -> String {
+    pub fn updates_x_ota_rollback_path(&self, update_id: &str) -> String {
         format!(
-            "{}/updates/{}/x-sumo-rollback",
+            "{}/updates/{}/x-ota-rollback",
             self.base_prefix(),
             update_id
         )
@@ -471,8 +471,8 @@ impl FlashConfig {
     /// Trial-recovery vendor verb — unconditional backend rollback.
     /// Lives at the component root (not under `/updates/{id}`) because
     /// by definition no in-flight update_id exists for a stuck trial.
-    pub fn x_sumo_force_rollback_path(&self) -> String {
-        format!("{}/x-sumo-force-rollback", self.base_prefix())
+    pub fn x_ota_force_rollback_path(&self) -> String {
+        format!("{}/x-ota-force-rollback", self.base_prefix())
     }
 }
 

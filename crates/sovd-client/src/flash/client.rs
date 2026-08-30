@@ -9,8 +9,8 @@
 //! prepare                                     (PUT  /updates/{id}/prepare)  — async 202+poll
 //! execute(orchestrated: bool)                 (PUT  /updates/{id}/execute)  — async 202+poll
 //! ecu_reset                                   (PUT  /components/{id}/status/restart)
-//! spec_commit | spec_rollback                 (PUT  /updates/{id}/x-sumo-{commit|rollback})
-//! force_rollback (trial-recovery)             (PUT  /components/{id}/x-sumo-force-rollback)
+//! spec_commit | spec_rollback                 (PUT  /updates/{id}/x-ota-{commit|rollback})
+//! force_rollback (trial-recovery)             (PUT  /components/{id}/x-ota-force-rollback)
 //! automated  (server-driven prepare+execute)  (PUT  /updates/{id}/automated)
 //! ```
 //!
@@ -449,7 +449,7 @@ impl FlashClient {
     ///
     /// **Deprecated:** use [`prepare`](Self::prepare) — the spec
     /// verb (ISO 17978-3 §7.18.5) is async (202+poll) and uses
-    /// `PUT /components/{id}/x-sumo-force-rollback` — trial-recovery
+    /// `PUT /components/{id}/x-ota-force-rollback` — trial-recovery
     /// vendor verb.  Unconditionally calls `backend.rollback_flash`,
     /// regardless of whether any execute task is paused or any
     /// `/updates` entry exists.  Used by orchestrators to unstick a
@@ -461,7 +461,7 @@ impl FlashClient {
     /// session).
     #[instrument(skip(self))]
     pub async fn force_rollback(&self) -> Result<()> {
-        let url = self.build_url(&self.config.x_sumo_force_rollback_path())?;
+        let url = self.build_url(&self.config.x_ota_force_rollback_path())?;
         let mut req = self.client.put(url);
         req = self.add_auth(req);
         let resp = req.send().await?;
@@ -630,18 +630,18 @@ impl FlashClient {
         self.poll_status_until("execute", budget).await
     }
 
-    /// `PUT /updates/{update_id}/x-sumo-commit` — Phase B vendor verb.
+    /// `PUT /updates/{update_id}/x-ota-commit` — Phase B vendor verb.
     /// Posts the `Commit` verdict, then polls until terminal.
     #[instrument(skip(self))]
     pub async fn spec_commit(&self) -> Result<UpdateStatusBody> {
-        self.post_verdict_and_wait("x-sumo-commit").await
+        self.post_verdict_and_wait("x-ota-commit").await
     }
 
-    /// `PUT /updates/{update_id}/x-sumo-rollback` — Phase B vendor verb.
+    /// `PUT /updates/{update_id}/x-ota-rollback` — Phase B vendor verb.
     /// Posts the `Rollback` verdict, then polls until terminal.
     #[instrument(skip(self))]
     pub async fn spec_rollback(&self) -> Result<UpdateStatusBody> {
-        self.post_verdict_and_wait("x-sumo-rollback").await
+        self.post_verdict_and_wait("x-ota-rollback").await
     }
 
     async fn post_verdict_and_wait(&self, verb: &str) -> Result<UpdateStatusBody> {
@@ -650,8 +650,8 @@ impl FlashClient {
             .await
             .ok_or(FlashError::NoSession)?;
         let path = match verb {
-            "x-sumo-commit" => self.config.updates_x_sumo_commit_path(&update_id),
-            "x-sumo-rollback" => self.config.updates_x_sumo_rollback_path(&update_id),
+            "x-ota-commit" => self.config.updates_x_ota_commit_path(&update_id),
+            "x-ota-rollback" => self.config.updates_x_ota_rollback_path(&update_id),
             _ => unreachable!("post_verdict_and_wait called with non-verdict verb"),
         };
         let url = self.build_url(&path)?;

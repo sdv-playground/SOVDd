@@ -165,7 +165,7 @@ pub struct PartUploadResponse {
 /// `x-sumo-control=orchestrated` opts the request into the Phase B
 /// orchestrated-extension flow: the execute task pauses post-activation
 /// at `substate=awaiting-verdict` and waits for the orchestrator to
-/// issue `PUT /x-sumo-commit` or `/x-sumo-rollback` before transitioning
+/// issue `PUT /x-ota-commit` or `/x-ota-rollback` before transitioning
 /// to a terminal status.  Absent or any other value → standard
 /// server-driven flow (Phase A behaviour).
 ///
@@ -833,7 +833,7 @@ pub async fn put_execute(
         // the legacy /executions wire (or the entity-restart endpoint).
         // In orchestrated mode (Phase B) we pause after activate at
         // substate=awaiting-verdict and wait for the orchestrator to
-        // post commit / rollback via the x-sumo verbs.
+        // post commit / rollback via the x-ota verbs.
         let _ = mutate_entry(&task_state, &task_update_id, |entry| {
             entry.step = Some("validating".into());
             entry.progress = Some(50);
@@ -1087,14 +1087,14 @@ pub async fn put_automated(
     Ok((status, headers).into_response())
 }
 
-/// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-sumo-commit`
+/// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-ota-commit`
 ///
-/// Vendor extension (`x-sumo-` prefix per spec §extension rules)
+/// Vendor extension (`x-ota-` prefix per spec §extension rules)
 /// used by orchestrators driving the execute phase under
 /// `?x-sumo-control=orchestrated`.  Sends a `Commit` verdict to the
 /// paused execute task; rejected with `409` if the entry isn't in
 /// `awaiting-verdict`.  Returns `202 + Location: .../status`.
-pub async fn put_x_sumo_commit(
+pub async fn put_x_ota_commit(
     State(state): State<AppState>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -1108,10 +1108,10 @@ pub async fn put_x_sumo_commit(
     Ok((status, headers))
 }
 
-/// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-sumo-rollback`
+/// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-ota-rollback`
 ///
-/// Symmetric to `x-sumo-commit`; sends a `Rollback` verdict.
-pub async fn put_x_sumo_rollback(
+/// Symmetric to `x-ota-commit`; sends a `Rollback` verdict.
+pub async fn put_x_ota_rollback(
     State(state): State<AppState>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -1125,7 +1125,7 @@ pub async fn put_x_sumo_rollback(
     Ok((status, headers))
 }
 
-/// `PUT /vehicle/v1/components/{component_id}/x-sumo-force-rollback`
+/// `PUT /vehicle/v1/components/{component_id}/x-ota-force-rollback`
 ///
 /// Vendor extension for the trial-recovery edge case: a previous flash
 /// session left the backend in trial state (post-finalize, uncommitted)
@@ -1134,12 +1134,12 @@ pub async fn put_x_sumo_rollback(
 /// unconditionally so the next `start_flash` won't 409 with "trial
 /// mode".  Idempotent.  Returns 204.
 ///
-/// Distinct from `x-sumo-rollback` which posts a verdict to an active
+/// Distinct from `x-ota-rollback` which posts a verdict to an active
 /// execute task — `force-rollback` doesn't care about any task and
 /// just clears whatever backend trial state is stuck on this
 /// component.  Lives at the component root (not under `/updates/{id}`)
 /// because by definition there may be no in-flight update_id.
-pub async fn put_x_sumo_force_rollback(
+pub async fn put_x_ota_force_rollback(
     State(state): State<AppState>,
     Path(component_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
@@ -1148,7 +1148,7 @@ pub async fn put_x_sumo_force_rollback(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Common verdict-posting path for the two x-sumo verbs.  Validates
+/// Common verdict-posting path for the two x-ota verbs.  Validates
 /// that the entry is paused at `substate=awaiting-verdict` and posts
 /// the new verdict via the entry's watch channel.
 fn post_verdict(
@@ -1165,7 +1165,7 @@ fn post_verdict(
         .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
     if entry.substate != Some("awaiting-verdict") {
         return Err(ApiError::Conflict(format!(
-            "x-sumo verdict requires execute/awaiting-verdict, got {}/{} substate={:?}",
+            "x-ota verdict requires execute/awaiting-verdict, got {}/{} substate={:?}",
             entry.phase.as_str(),
             entry.status.as_str(),
             entry.substate
@@ -1179,7 +1179,7 @@ fn post_verdict(
             Ok(())
         }
         None => Err(ApiError::Conflict(
-            "x-sumo verdict: no orchestrator channel on entry".into(),
+            "x-ota verdict: no orchestrator channel on entry".into(),
         )),
     }
 }
