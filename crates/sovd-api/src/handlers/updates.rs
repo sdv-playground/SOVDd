@@ -128,14 +128,14 @@ pub struct UpdateStatusBody {
     pub error: Option<crate::state::UpdateError>,
     /// Vendor extension; populated only when control mode is
     /// orchestrated (Phase B).
-    #[serde(rename = "x-sumo-substate", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-ota-substate", skip_serializing_if = "Option::is_none")]
     pub substate: Option<&'static str>,
     /// Vendor extension (ISO 17978-3 §5.4.5 permits `x-<ext>-` fields):
     /// the component's declared `ResetKind` from its `ActivationState`,
     /// captured once at register time. Lets the campaign orchestrator
     /// route RT/host-os components through a coalesced ECU reset instead
     /// of defaulting every component to `Local`.
-    #[serde(rename = "x-sumo-reset-kind", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-ota-reset-kind", skip_serializing_if = "Option::is_none")]
     pub reset_kind: Option<sovd_core::ResetKind>,
 }
 
@@ -162,7 +162,7 @@ pub struct PartUploadResponse {
 
 /// `PUT /updates/{id}/execute` query parameters.
 ///
-/// `x-sumo-control=orchestrated` opts the request into the Phase B
+/// `x-ota-control=orchestrated` opts the request into the Phase B
 /// orchestrated-extension flow: the execute task pauses post-activation
 /// at `substate=awaiting-verdict` and waits for the orchestrator to
 /// issue `PUT /x-ota-commit` or `/x-ota-rollback` before transitioning
@@ -172,7 +172,7 @@ pub struct PartUploadResponse {
 /// `tasks/spec-aligned-updates-wire.md` §2.2.
 #[derive(Debug, Deserialize, Default)]
 pub struct ExecuteQuery {
-    #[serde(rename = "x-sumo-control", default)]
+    #[serde(rename = "x-ota-control", default)]
     pub control: Option<String>,
 }
 
@@ -299,7 +299,7 @@ pub async fn register_update(
     // Capture the component's declared ResetKind once, while it's idle
     // (cheap here; `get_activation_state` can be slow mid-flash, so we
     // never re-read it per status-poll). Surfaced on the wire as
-    // `x-sumo-reset-kind` for the campaign orchestrator. Done before
+    // `x-ota-reset-kind` for the campaign orchestrator. Done before
     // taking the `state.updates` lock — never `.await` while holding it.
     let reset_kind = backend
         .get_activation_state()
@@ -708,7 +708,7 @@ pub async fn put_prepare(
 /// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/execute`
 /// — ISO 17978-3 §7.18.6.  Phase A: standard mode (server-driven
 /// finalize → auto-commit for singleshot, finalize → validate →
-/// activate for banked).  Phase B adds `?x-sumo-control=orchestrated`
+/// activate for banked).  Phase B adds `?x-ota-control=orchestrated`
 /// for orchestrator-driven trial verdict on banked components.
 pub async fn put_execute(
     State(state): State<AppState>,
@@ -965,7 +965,7 @@ pub async fn put_execute(
                     entry.substate = None;
                     entry.verdict_tx = None;
                     entry.error = Some(crate::state::UpdateError {
-                        error_code: "x-sumo-verdict-rollback".into(),
+                        error_code: "x-ota-verdict-rollback".into(),
                         message: match rb_result {
                             Ok(()) => "rolled back by orchestrator verdict".into(),
                             Err(e) => format!("rollback_flash failed: {e}"),
@@ -1091,7 +1091,7 @@ pub async fn put_automated(
 ///
 /// Vendor extension (`x-ota-` prefix per spec §extension rules)
 /// used by orchestrators driving the execute phase under
-/// `?x-sumo-control=orchestrated`.  Sends a `Commit` verdict to the
+/// `?x-ota-control=orchestrated`.  Sends a `Commit` verdict to the
 /// paused execute task; rejected with `409` if the entry isn't in
 /// `awaiting-verdict`.  Returns `202 + Location: .../status`.
 pub async fn put_x_ota_commit(

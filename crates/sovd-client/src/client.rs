@@ -256,7 +256,7 @@ impl SovdClient {
 
     /// Read an entity's runtime status (ISO 17978-3 §7.19.2):
     /// `GET /vehicle/v1/components/{id}/status` → `EntityStatusBody` —
-    /// `status: ready|notReady` + control links + vendor `x-sumo-*` runtime fields.
+    /// `status: ready|notReady` + control links + vendor `x-<vendor>-*` runtime fields.
     /// An orchestrator reads the vendor boot counter here to verify a reset took
     /// effect (baseline → restart → wait until incremented + `ready`).
     #[instrument(skip(self))]
@@ -693,7 +693,7 @@ impl SovdClient {
         self.handle_response(response).await
     }
 
-    /// List a component's log SOURCES (`GET /logs/sources`) — the x-sumo catalog
+    /// List a component's log SOURCES (`GET /logs/sources`) — the vendor catalog
     /// a client enumerates before reading one source at a time.
     #[instrument(skip(self))]
     pub async fn list_log_sources(&self, component_id: &str) -> Result<LogSourcesResponse> {
@@ -1973,16 +1973,16 @@ fn append_log_query(url: &mut Url, filter: &LogFilter, include_source: bool) {
             }
         }
         if let Some(ref em) = filter.emitter {
-            qp.append_pair("x-sumo-emitter", em);
+            qp.append_pair("x-log-emitter", em);
         }
         if let Some(ref ex) = filter.emitter_exclude {
-            qp.append_pair("x-sumo-emitter-exclude", ex);
+            qp.append_pair("x-log-emitter-exclude", ex);
         }
         if let Some(n) = filter.limit {
             qp.append_pair("limit", &n.to_string());
         }
         if let Some(ref c) = filter.after {
-            qp.append_pair("x-sumo-after", c);
+            qp.append_pair("x-log-after", c);
         }
         if let Some(ref s) = filter.since {
             qp.append_pair("since", s);
@@ -1991,7 +1991,7 @@ fn append_log_query(url: &mut Url, filter: &LogFilter, include_source: bool) {
             qp.append_pair("until", u);
         }
         if let Some(ref r) = filter.runtime {
-            qp.append_pair("x-sumo-runtime", r);
+            qp.append_pair("x-log-runtime", r);
         }
     }
     if url.query() == Some("") {

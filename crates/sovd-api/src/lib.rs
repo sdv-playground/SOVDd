@@ -149,7 +149,7 @@ pub fn create_router(state: AppState) -> Router {
                 .put(handlers::logs_ext::put_log_config)
                 .delete(handlers::logs_ext::reset_log_config),
         )
-        // Per-source model (x-sumo): the source CATALOG + one source's entries.
+        // Per-source model (vendor extension): the source CATALOG + one source's entries.
         // Static two-segment `/logs/sources` + three-segment `/logs/sources/{name}`
         // — matchit gives statics priority over the `/logs/{log_id}` catch-all,
         // and the 3-segment form can't collide with the 2-segment {log_id} anyway.
@@ -416,7 +416,7 @@ pub fn create_router(state: AppState) -> Router {
         // that reads `completed` (reset is fire-and-forget, the ECU is
         // rebooting by the time we'd report progress).
         // §7.19.2 — read an entity's runtime status (EntityStatus ready/notReady
-        // + control links + vendor x-sumo-* runtime fields). Orchestrators read
+        // + control links + vendor x-<vendor>-* runtime fields). Orchestrators read
         // this to verify a reset actually took effect (boot counter incremented).
         .route(
             "/vehicle/v1/components/{component_id}/status",
@@ -496,7 +496,7 @@ pub fn create_router(state: AppState) -> Router {
             get(handlers::updates::get_status),
         )
         // Phase B — orchestrated-mode vendor verbs.  Only meaningful
-        // for entries that ran `PUT /execute?x-sumo-control=orchestrated`
+        // for entries that ran `PUT /execute?x-ota-control=orchestrated`
         // and are paused at `substate=awaiting-verdict`.  See
         // tasks/spec-aligned-updates-wire.md §2.2.
         .route(

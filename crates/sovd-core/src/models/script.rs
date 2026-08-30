@@ -55,7 +55,7 @@ pub enum ScriptVerdict {
 /// framework-agnostic result envelope the guest test-agent produces (see
 /// `test-agent::RunResult`), plus the SOVD log-cursor BRACKET (`log_from` /
 /// `log_to`) the host snapshots around the run so a tester can page exactly the
-/// window a run produced (`GET /logs?x-sumo-after=<log_from>`). See
+/// window a run produced (`GET /logs?x-log-after=<log_from>`). See
 /// `tasks/sovd-tests-as-operations-design.md`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScriptExecution {
@@ -89,9 +89,9 @@ pub struct ScriptExecution {
     /// When the run finished (RFC 3339) — present once `Done`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ended: Option<String>,
-    /// x-sumo log-cursor BRACKET: the component's log tip snapshotted just
+    /// Vendor log-cursor BRACKET: the component's log tip snapshotted just
     /// BEFORE the run (`log_from`) and just AFTER (`log_to`). A tester pages
-    /// `GET /logs?x-sumo-after=<log_from>` to capture exactly this run's window.
+    /// `GET /logs?x-log-after=<log_from>` to capture exactly this run's window.
     /// `None` means the tip was unavailable for this component's log source
     /// (e.g. a guest journald cursor the agent didn't report) — the bracket is
     /// best-effort, not a hard requirement.

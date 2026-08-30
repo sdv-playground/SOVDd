@@ -310,9 +310,9 @@ There are **two** ways to read a component's logs, by design:
    `capabilities.bulk_data`). This is how you pull an ENTIRE log.
 2. **Inline `GET /{id}/logs` with an opaque cursor (vendor extension, the quick
    interactive view).** The SOVD log spec has NO cursor, so the paging surface is
-   a vendor extension under the §6.2.7 `x-<ext>-` rule: request `x-sumo-after=`,
-   response carries `x-sumo-next-cursor` (feed back to page oldest→newest, `null`
-   at head), `x-sumo-oldest-cursor` (gap detection), and `x-sumo-tip-cursor`
+   a vendor extension under the §6.2.7 `x-<ext>-` rule: request `x-log-after=`,
+   response carries `x-log-next-cursor` (feed back to page oldest→newest, `null`
+   at head), `x-log-oldest-cursor` (gap detection), and `x-log-tip-cursor`
    ("now" — poll `after=<tip>` to FOLLOW only new entries). `since`/`until` accept
    RFC 3339 **or** the position sentinels `BEGIN` / `END` / `END-<N>{s,m,h,d}`
    (resolved server-side; e.g. `since=END-10m` = the last 10 min of this boot).
@@ -446,7 +446,7 @@ no trial: `… → Activated → commit_flash() → Complete`.
 - **Wire (`/updates`, handlers/updates.rs):** `POST /updates` registers (client-declared stable
   package ids, Table 257/261 catalog shape; `describe_update_package` lets a backend enrich the
   detail view); `PUT prepare`/`execute` spawn tracked async tasks (`202` + `Location`); `GET status`;
-  `DELETE` aborts via a stored `AbortHandle`. **Orchestrated mode** (`PUT execute?x-sumo-control=orchestrated`)
+  `DELETE` aborts via a stored `AbortHandle`. **Orchestrated mode** (`PUT execute?x-ota-control=orchestrated`)
   pauses at `substate=awaiting-verdict` on a `watch` channel until `x-ota-commit`/`x-ota-rollback`
   (or a watchdog fires; default 600 s). See the C-026 note in §1 for the vendor-verb status.
 

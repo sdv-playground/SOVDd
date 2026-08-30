@@ -491,7 +491,7 @@ async fn prepare_and_orchestrated_execute(server: &TestServer, id: &str) {
     let resp = put(
         server,
         &format!(
-            "/vehicle/v1/components/dev1/updates/{}/execute?x-sumo-control=orchestrated",
+            "/vehicle/v1/components/dev1/updates/{}/execute?x-ota-control=orchestrated",
             id
         ),
     )
@@ -503,7 +503,7 @@ async fn wait_for_substate(server: &TestServer, id: &str, want: &str) -> Value {
     for _ in 0..200 {
         let body = get_status(server, id).await;
         if body
-            .get("x-sumo-substate")
+            .get("x-ota-substate")
             .and_then(Value::as_str)
             .map(|s| s == want)
             .unwrap_or(false)
@@ -560,7 +560,7 @@ async fn orchestrated_banked_rollback_round_trip() {
     let final_body = poll_terminal(&server, &id).await;
     assert_eq!(final_body["status"], "failed");
     assert_eq!(
-        final_body["error"]["error_code"], "x-sumo-verdict-rollback",
+        final_body["error"]["error_code"], "x-ota-verdict-rollback",
         "rollback should attribute the failure to the orchestrator's verdict"
     );
     assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
@@ -578,7 +578,7 @@ async fn orchestrated_banked_watchdog_auto_rollback() {
     // Don't post a verdict — watchdog should fire and roll back.
     let final_body = poll_terminal(&server, &id).await;
     assert_eq!(final_body["status"], "failed");
-    assert_eq!(final_body["error"]["error_code"], "x-sumo-verdict-rollback");
+    assert_eq!(final_body["error"]["error_code"], "x-ota-verdict-rollback");
     assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
 }
 
@@ -613,7 +613,7 @@ async fn orchestrated_on_singleshot_falls_through_to_standard() {
     let resp = put(
         &server,
         &format!(
-            "/vehicle/v1/components/dev1/updates/{}/execute?x-sumo-control=orchestrated",
+            "/vehicle/v1/components/dev1/updates/{}/execute?x-ota-control=orchestrated",
             id
         ),
     )
@@ -621,20 +621,20 @@ async fn orchestrated_on_singleshot_falls_through_to_standard() {
     assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
     let final_body = poll_terminal(&server, &id).await;
     assert_eq!(final_body["status"], "completed");
-    assert!(final_body.get("x-sumo-substate").is_none());
+    assert!(final_body.get("x-ota-substate").is_none());
 }
 
 #[tokio::test]
-async fn discovery_endpoint_lists_x_sumo_extensions() {
+async fn discovery_endpoint_lists_vendor_extensions() {
     let (server, _backend) = spawn_with("singleshot").await;
     let url = format!("{}/.well-known/sovd-extensions", server.base_url());
     let resp = http().get(url).send().await.expect("discovery");
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: Value = resp.json().await.unwrap();
     let exts = &body["extensions"];
-    assert!(exts.get("x-sumo-control").is_some());
-    assert!(exts.get("x-sumo-bulk-data").is_some());
-    let verbs = &exts["x-sumo-control"]["verbs"];
+    assert!(exts.get("x-ota-control").is_some());
+    assert!(exts.get("x-ota-bulk-data").is_some());
+    let verbs = &exts["x-ota-control"]["verbs"];
     assert!(
         verbs
             .as_array()
@@ -725,7 +725,7 @@ async fn flash_client_drives_banked_orchestrated_then_spec_rollback() {
     assert_eq!(rolled_back.status, "failed");
     assert_eq!(
         rolled_back.error.as_ref().unwrap().error_code,
-        "x-sumo-verdict-rollback"
+        "x-ota-verdict-rollback"
     );
     assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
 }

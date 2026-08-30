@@ -202,16 +202,16 @@ pub fn route_capability(method: &Method, path: &str) -> Capability {
         Capability::Admin
     } else if path.contains("/x-ota-commit") || path.contains("/x-ota-rollback") {
         Capability::UpdateVerdict
-    } else if path.contains("/operations/x-sumo-commit-trials")
-        || path.contains("/operations/x-sumo-rollback-trials")
+    } else if path.contains("/operations/x-ota-commit-trials")
+        || path.contains("/operations/x-ota-rollback-trials")
     {
-        // The integrator's vendor routes — sumo-machine-manager's node-verdict
-        // operations — ride this middleware in the merged router, so their
-        // capability is decided here even though SOVDd serves no such route.
-        // While the verbs above were still named `x-sumo-*` this mapping fell
-        // out of the shared prefix by accident; the rename to `x-ota-*` made it
-        // deliberate.  This is the one accepted vendor-name residual in
-        // sovd-api, kept explicit so it cannot silently change again.
+        // The INTEGRATOR's `x-ota-{commit,rollback}-trials` operations (the
+        // embedder's node-verdict routes) ride this middleware in the merged
+        // router, so their capability is decided here even though SOVDd serves
+        // no such route.  Now that they share the `x-ota-` family, the arm
+        // above already catches them on the shared prefix; this arm is kept
+        // explicit so the integrator contract is stated, not inferred — and so
+        // narrowing that prefix later can't silently downgrade these routes.
         Capability::UpdateVerdict
     } else if path.contains("/operations/factory-reset") {
         Capability::FactoryReset
@@ -745,21 +745,21 @@ mod tests {
     #[test]
     fn destructive_trial_verdicts_map_to_update_verdict() {
         // Security-load-bearing: an embedder (supernova) enforces the entity-root
-        // x-sumo-{commit,rollback}-trials routes by applying require_auth, which
+        // x-ota-{commit,rollback}-trials routes by applying require_auth, which
         // gates on this capability. They must resolve to UpdateVerdict — NOT Read
         // (the `/operations` GET case) and NOT ResetExecute (no `/reset` substring).
         let post = Method::POST;
         assert_eq!(
             route_capability(
                 &post,
-                "/vehicle/v1/operations/x-sumo-commit-trials/executions"
+                "/vehicle/v1/operations/x-ota-commit-trials/executions"
             ),
             Capability::UpdateVerdict
         );
         assert_eq!(
             route_capability(
                 &post,
-                "/vehicle/v1/operations/x-sumo-rollback-trials/executions"
+                "/vehicle/v1/operations/x-ota-rollback-trials/executions"
             ),
             Capability::UpdateVerdict
         );
@@ -767,7 +767,7 @@ mod tests {
         assert_eq!(
             route_capability(
                 &Method::GET,
-                "/vehicle/v1/operations/x-sumo-commit-trials/executions"
+                "/vehicle/v1/operations/x-ota-commit-trials/executions"
             ),
             Capability::UpdateVerdict
         );
@@ -775,8 +775,8 @@ mod tests {
 
     #[test]
     fn orchestrated_verdict_verbs_map_to_update_verdict() {
-        // The `/updates` orchestration verbs, renamed `x-sumo-` → `x-ota-`
-        // for C-026, must carry the capabilities they had under the old names.
+        // The `/updates` orchestration verbs (`x-ota-` family, C-026) must
+        // resolve to UpdateVerdict, not the generic `/updates` capabilities.
         let put = Method::PUT;
         assert_eq!(
             route_capability(&put, "/vehicle/v1/components/dev1/updates/u1/x-ota-commit"),

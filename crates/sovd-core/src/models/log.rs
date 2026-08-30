@@ -45,9 +45,9 @@ pub struct LogEntry {
     /// producer's boot (CLOCK_MONOTONIC on the host slog2 path,
     /// `__MONOTONIC_TIMESTAMP` on guest journald). Unlike `timestamp` (wall clock,
     /// unreliable on the CVC — boots at epoch, jumps when NTP sets it), this is
-    /// jump-proof and is the axis the `x-sumo-runtime` window filters on. `None`
+    /// jump-proof and is the axis the `x-log-runtime` window filters on. `None`
     /// when the source doesn't carry a monotonic clock.
-    #[serde(skip_serializing_if = "Option::is_none", rename = "x-sumo-uptime-secs")]
+    #[serde(skip_serializing_if = "Option::is_none", rename = "x-log-uptime-secs")]
     pub uptime_secs: Option<u64>,
 }
 
@@ -87,7 +87,7 @@ pub enum LogSourceKind {
 /// advance. Distinct sources are NEVER merged/time-sorted with each other (their
 /// clocks are independent — a live journal at real time vs. a boot file stamped
 /// 1970), so each is read on its own via `GET /logs/sources/{name}` (journals) or
-/// its bulk-data `href` (files/dumps). Vendor extension (`x-sumo`).
+/// its bulk-data `href` (files/dumps). Vendor extension — not in the log spec.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogSourceInfo {
     /// The source name — the `{name}` path segment. For slog2 this is the fixed
@@ -97,13 +97,13 @@ pub struct LogSourceInfo {
     /// How to retrieve this source (see [`LogSourceKind`]).
     pub kind: LogSourceKind,
     /// Whether this source supports reboot-safe cursor paging on
-    /// `GET /logs/sources/{name}` (`x-sumo-after` + response cursors). `false`
+    /// `GET /logs/sources/{name}` (`x-log-after` + response cursors). `false`
     /// ⇒ a single terminal page (e.g. the slog2 ring, until its segment cursor
     /// lands) — a client must NOT loop expecting a cursor.
     pub cursor: bool,
     /// For a `Journal` source that multiplexes sub-sources (the slog2 ring's
     /// per-buffer emitters: `snova`/`vhsm`/`devb_sdmmc_mx8x`/…), the known emitter
-    /// names — narrowable via `x-sumo-emitter[-exclude]`. Empty when the source
+    /// names — narrowable via `x-log-emitter[-exclude]`. Empty when the source
     /// has no sub-dimension OR when enumeration is deferred (a client can still
     /// discover emitters from each entry's `fields.emitter`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -164,7 +164,7 @@ pub struct LogFilter {
     /// emitters `snova`/`vhsm`/`devb_sdmmc_mx8x`/…), this narrows to the named
     /// ones — INCLUDE semantics, comma-separated, prefix-matched (so `devb`
     /// selects `devb_sdmmc_mx8x`). A backend whose source has no emitter
-    /// dimension ignores it. Vendor extension (wire name `x-sumo-emitter`).
+    /// dimension ignores it. Vendor extension (wire name `x-log-emitter`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emitter: Option<String>,
     /// EXCLUDE emitters: the inverse of `emitter`, applied after it. The device
@@ -172,7 +172,7 @@ pub struct LogFilter {
     /// (comma-separated, prefix-matched). The intended use is muting a
     /// high-volume sub-source — e.g. `emitter_exclude="devb_,CAM"` drops the
     /// eMMC/CAM driver firehose so real records aren't crowded out of a tail.
-    /// Vendor extension (wire name `x-sumo-emitter-exclude`).
+    /// Vendor extension (wire name `x-log-emitter-exclude`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emitter_exclude: Option<String>,
     /// Logs since this time
@@ -212,7 +212,7 @@ pub struct LogFilter {
     /// the CVC's unreliable clock makes useless — especially offboard, where the
     /// server clock is the workstation's), this is jump-proof and resolved by the
     /// BACKEND against each source's tip uptime (the only party that knows it), not
-    /// by wall-clock in the API layer. Wire name `x-sumo-runtime` (a duration like
+    /// by wall-clock in the API layer. Wire name `x-log-runtime` (a duration like
     /// `3h`/`90s`, parsed to seconds). Backends without a monotonic axis ignore it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_secs: Option<u64>,

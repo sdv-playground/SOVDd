@@ -76,8 +76,8 @@ pub enum EntityStatus {
 
 /// Response body of `GET /{entity}/status` — ISO 17978-3 §7.19.2, Table 280: the
 /// standard `status` (+ control-resource links), plus a vendor-extension
-/// passthrough (§5.4.5; e.g. `x-sumo-runtime { boot_count, uptime_s }`) the
-/// backend supplies. SOVDd core stays spec-pure — it never authors `x-sumo-*`
+/// passthrough (§5.4.5; e.g. `x-<vendor>-runtime { boot_count, uptime_s }`) the
+/// backend supplies. SOVDd core stays spec-pure — it never authors vendor
 /// fields, only flattens whatever the backend returns.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EntityStatusBody {
@@ -101,7 +101,7 @@ pub struct EntityStatusBody {
         default
     )]
     pub force_shutdown: Vec<String>,
-    /// Vendor extensions (e.g. `x-sumo-runtime`) supplied verbatim by the backend.
+    /// Vendor extensions (e.g. `x-<vendor>-runtime`) supplied verbatim by the backend.
     #[serde(flatten)]
     pub extensions: serde_json::Map<String, serde_json::Value>,
 }
@@ -444,7 +444,7 @@ pub trait DiagnosticBackend: Send + Sync {
     }
 
     /// Read the entity's runtime status — ISO 17978-3 §7.19.2 (`GET .../status`).
-    /// Backends that can report readiness (and optionally vendor `x-sumo-*`
+    /// Backends that can report readiness (and optionally vendor `x-<vendor>-*`
     /// runtime fields like a monotonic boot/restart counter) override this; the
     /// default assumes a reachable entity is `Ready` with no vendor extras.
     async fn read_entity_status(&self) -> BackendResult<EntityStatusBody> {
@@ -526,7 +526,7 @@ pub trait DiagnosticBackend: Send + Sync {
     ///
     /// Default: empty — a backend that hasn't modelled sources exposes none, and
     /// the (spec-native) `/logs`, `/logs/entries`, `/bulk-data` paths are
-    /// unaffected. Vendor extension (`x-sumo`).
+    /// unaffected. Vendor extension — the SOVD log spec has no source model.
     async fn list_log_sources(&self) -> BackendResult<Vec<LogSourceInfo>> {
         Ok(vec![])
     }

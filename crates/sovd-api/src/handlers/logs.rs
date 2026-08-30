@@ -21,24 +21,24 @@ use crate::state::AppState;
 pub struct LogsResponse {
     pub items: Vec<LogEntryResponse>,
     pub total_count: usize,
-    /// Opaque cursor for the NEXT page; feed back as `?x-sumo-after=`. `null`
+    /// Opaque cursor for the NEXT page; feed back as `?x-log-after=`. `null`
     /// once the caller has reached the head — a paging loop stops here. Absent
     /// when the backend doesn't paginate. Vendor extension (§6.2.7 `x-<ext>-`;
     /// the SOVD log spec has no cursor).
-    #[serde(rename = "x-sumo-next-cursor", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-log-next-cursor", skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
-    /// Oldest position still available; if a caller's `x-sumo-after` predates it,
+    /// Oldest position still available; if a caller's `x-log-after` predates it,
     /// history in between rotated away (gap detection). Absent when unknown.
     #[serde(
-        rename = "x-sumo-oldest-cursor",
+        rename = "x-log-oldest-cursor",
         skip_serializing_if = "Option::is_none"
     )]
     pub oldest_cursor: Option<String>,
-    /// The cursor at the current HEAD ("now"): poll `x-sumo-after=<this>` to
+    /// The cursor at the current HEAD ("now"): poll `x-log-after=<this>` to
     /// follow only new entries. Present even when `next_cursor` is null (head
     /// reached), so a follower has a resume point. Absent when the backend can't
     /// name its tip. Vendor extension.
-    #[serde(rename = "x-sumo-tip-cursor", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-log-tip-cursor", skip_serializing_if = "Option::is_none")]
     pub tip_cursor: Option<String>,
 }
 
@@ -68,9 +68,9 @@ pub struct LogEntryResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
     /// Monotonic runtime (seconds since the producer's boot) at which this entry
-    /// was logged — the jump-proof axis the `x-sumo-runtime` window filters on.
-    /// Carried through from `LogEntry.uptime_secs`. Wire name `x-sumo-uptime-secs`.
-    #[serde(skip_serializing_if = "Option::is_none", rename = "x-sumo-uptime-secs")]
+    /// was logged — the jump-proof axis the `x-log-runtime` window filters on.
+    /// Carried through from `LogEntry.uptime_secs`. Wire name `x-log-uptime-secs`.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "x-log-uptime-secs")]
     pub uptime_secs: Option<u64>,
 }
 
@@ -80,14 +80,14 @@ pub struct LogFilterQuery {
     pub source: Option<String>,
     /// Vendor extension: filter by EMITTER (sub-source) — comma-separated,
     /// prefix-matched. Where one `source` multiplexes emitters (the slog2 ring),
-    /// this narrows to the named ones. Wire name `x-sumo-emitter`.
-    #[serde(rename = "x-sumo-emitter")]
+    /// this narrows to the named ones. Wire name `x-log-emitter`.
+    #[serde(rename = "x-log-emitter")]
     pub emitter: Option<String>,
     /// Vendor extension: EXCLUDE emitters (comma-separated, prefix-matched),
     /// applied after the include. Mutes a high-volume sub-source (e.g. the
     /// `devb_` eMMC driver firehose) without the device hiding it. Wire name
-    /// `x-sumo-emitter-exclude`.
-    #[serde(rename = "x-sumo-emitter-exclude")]
+    /// `x-log-emitter-exclude`.
+    #[serde(rename = "x-log-emitter-exclude")]
     pub emitter_exclude: Option<String>,
     /// RFC 3339, or a position sentinel: `BEGIN` (oldest, no lower bound),
     /// `END` (device now), `END-<N>{s,m,h}` (now minus a duration — the last N of
@@ -106,16 +106,16 @@ pub struct LogFilterQuery {
     pub status: Option<String>,
     /// Opaque pagination cursor — return entries strictly after this position.
     /// Omit to start at the oldest available. Never parsed by the client. Vendor
-    /// extension (§6.2.7): the wire name is `x-sumo-after`.
-    #[serde(rename = "x-sumo-after")]
+    /// extension (§6.2.7): the wire name is `x-log-after`.
+    #[serde(rename = "x-log-after")]
     pub after: Option<String>,
     /// Vendor extension: RUNTIME window — keep only entries within the last
     /// `<N>{s,m,h,d}` of the producer's MONOTONIC runtime, measured back from the
     /// newest record. The jump-proof alternative to `since`/`until` (which use the
     /// CVC's unreliable wall clock). Resolved in the backend against the source's
-    /// tip uptime, NOT here against wall-clock. Wire name `x-sumo-runtime`
-    /// (e.g. `x-sumo-runtime=3h`).
-    #[serde(rename = "x-sumo-runtime")]
+    /// tip uptime, NOT here against wall-clock. Wire name `x-log-runtime`
+    /// (e.g. `x-log-runtime=3h`).
+    #[serde(rename = "x-log-runtime")]
     pub runtime: Option<String>,
 }
 
@@ -259,7 +259,7 @@ impl LogFilterQuery {
                 None => None,
                 Some(s) => Some(parse_duration_secs(s).ok_or_else(|| {
                     ApiError::BadRequest(format!(
-                        "bad x-sumo-runtime {s:?}: expected <N>{{s,m,h,d}} (e.g. 3h)"
+                        "bad x-log-runtime {s:?}: expected <N>{{s,m,h,d}} (e.g. 3h)"
                     ))
                 })?),
             },

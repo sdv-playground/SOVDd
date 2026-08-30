@@ -138,13 +138,13 @@ pub struct UpdateStatusBody {
     /// Vendor extension (Phase B): present when execute is running
     /// in orchestrated mode.  Values: `awaiting-verdict`, `committing`,
     /// `rolling-back`.
-    #[serde(default, rename = "x-sumo-substate")]
+    #[serde(default, rename = "x-ota-substate")]
     pub substate: Option<String>,
     /// Vendor extension: the component's declared `ResetKind`, captured
     /// server-side at register time. Lets the campaign orchestrator
     /// coalesce RT/host-os ECU resets instead of defaulting to `Local`.
     /// Absent on servers that haven't migrated → `None`.
-    #[serde(default, rename = "x-sumo-reset-kind")]
+    #[serde(default, rename = "x-ota-reset-kind")]
     pub reset_kind: Option<sovd_core::ResetKind>,
 }
 
@@ -525,7 +525,7 @@ impl FlashClient {
 impl FlashClient {
     /// `GET /vehicle/v1/components/{id}/updates/{update_id}/status` — returns
     /// the ISO 17978-3 §7.18.7 Table 270 `UpdateStatusBody`
-    /// (`{phase, status, progress?, step?, error?, x-sumo-substate?}`).
+    /// (`{phase, status, progress?, step?, error?, x-ota-substate?}`).
     /// This is the lifecycle-state source of truth; `GET /updates/{id}`
     /// (Table 261) is the package *catalog* descriptor, not state.
     #[instrument(skip(self))]
@@ -571,7 +571,7 @@ impl FlashClient {
     /// `PUT /vehicle/v1/components/{id}/updates/{update_id}/execute`.
     ///
     /// When `orchestrated == true`, sends
-    /// `?x-sumo-control=orchestrated` and returns once the entry hits
+    /// `?x-ota-control=orchestrated` and returns once the entry hits
     /// `substate=awaiting-verdict` — the caller is expected to follow
     /// up with [`commit`](Self::commit) or [`rollback`](Self::rollback)
     /// (Phase B).  When `false`, polls until the standard terminal
@@ -585,7 +585,7 @@ impl FlashClient {
         let mut url = self.build_url(&self.config.updates_execute_path(&update_id))?;
         if orchestrated {
             url.query_pairs_mut()
-                .append_pair("x-sumo-control", "orchestrated");
+                .append_pair("x-ota-control", "orchestrated");
         }
         let mut req = self.client.put(url);
         req = self.add_auth(req);

@@ -1,4 +1,4 @@
-//! Per-source log resource model (x-sumo) — in-process router tests.
+//! Per-source log resource model (vendor extension) — in-process router tests.
 //!
 //! Covers:
 //!   * `GET /logs/sources` enumerates the source catalog (name/kind/cursor/href).

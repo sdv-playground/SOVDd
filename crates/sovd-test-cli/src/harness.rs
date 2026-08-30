@@ -7,7 +7,7 @@
 //!      test-agent run is synchronous, so the returned execution is already
 //!      terminal (verdict + output tails + the log-cursor bracket),
 //!   3. CAPTURES exactly that run's log window by paging `logs` from the
-//!      execution's `x-sumo-log-from` bracket (reboot-safe — the cursor crosses
+//!      execution's `x-log-from` bracket (reboot-safe — the cursor crosses
 //!      a reboot the test may have triggered),
 //!   4. JUDGES both the framework's own verdict AND the captured logs (a
 //!      conservative crash/severe-priority anomaly scan),
@@ -240,7 +240,7 @@ async fn run_one(
 }
 
 /// Page the log window `after = log_from` to the current tip (drains
-/// `next_cursor` until exhausted — the design's `GET /logs?x-sumo-after=`).
+/// `next_cursor` until exhausted — the design's `GET /logs?x-log-after=`).
 /// Returns (entries seen, anomalous lines). Bounded against a runaway cursor.
 async fn capture_window(
     client: &SovdClient,

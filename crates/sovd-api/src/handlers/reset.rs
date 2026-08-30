@@ -139,7 +139,7 @@ pub async fn status_restart_execution(
 
 /// GET {entity}/status — read an entity's runtime status (ISO 17978-3 §7.19.2).
 /// Returns the standard `EntityStatus` (`ready`/`notReady`) plus whatever vendor
-/// `x-sumo-*` runtime fields the backend supplies (e.g. a monotonic boot/restart
+/// `x-<vendor>-*` runtime fields the backend supplies (e.g. a monotonic boot/restart
 /// counter + uptime, which an orchestrator uses to verify a reset took effect).
 /// The `restart` control link is filled in here since the route always exists.
 pub async fn status_read(

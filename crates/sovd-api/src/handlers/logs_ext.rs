@@ -122,7 +122,7 @@ pub async fn list_log_entries(
 
 /// GET /vehicle/v1/components/:component_id/logs/sources
 ///
-/// The source CATALOG (x-sumo): every log source this component exposes, so a
+/// The source CATALOG (vendor extension): every log source this component exposes, so a
 /// client can DISCOVER sources and then read one at a time via
 /// `GET /logs/sources/{name}` — never a cross-source merge. Empty (not an error)
 /// when the backend models no sources.

@@ -160,7 +160,7 @@ struct PathEntry {
 ///
 /// NOTE (C-024): the `/data/{param_id}` template is shared by *every* DID, so
 /// a single precise per-DID category isn't expressible on one templated path
-/// item. We emit the placeholder token `"x-sumo-multiple"` to signal "this
+/// item. We emit the placeholder token `"x-multiple"` to signal "this
 /// resource is category-tagged; the concrete category varies per DID — read
 /// `ValueMetaData.category` from `GET /data`". A per-DID-accurate
 /// `x-sovd-data-category` would require the doc emitter to introspect the
@@ -172,8 +172,8 @@ fn x_sovd_data_category_for(path: &str) -> Option<&'static str> {
         // Custom-extension category token (Table 70 `x-<ext>-…` form) meaning
         // "varies per DID"; not one of the four standard values on purpose.
         // The `x-sovd-` prefix is RESERVED for spec-defined names (§5.4.5,
-        // C-026) — a custom token must carry the vendor prefix instead.
-        Some("x-sumo-multiple")
+        // C-026) — a custom token must carry the plain `x-` prefix instead.
+        Some("x-multiple")
     } else {
         None
     }
@@ -789,7 +789,7 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "vendor": "sumo",
         "extensions": {
-            "x-sumo-control": {
+            "x-ota-control": {
                 "kind":   "query-param + lifecycle verbs",
                 "where":  "PUT /vehicle/v1/components/{id}/updates/{update_id}/execute",
                 "values": ["orchestrated"],
@@ -798,7 +798,7 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
                     "PUT /vehicle/v1/components/{id}/updates/{update_id}/x-ota-rollback",
                     "PUT /vehicle/v1/components/{id}/x-ota-force-rollback"
                 ],
-                "fields": ["x-sumo-substate"],
+                "fields": ["x-ota-substate"],
                 "spec":   "tasks/spec-aligned-updates-wire.md sec 2.2",
                 "summary": "Opt-in fine-grained execute-phase control \
                             for orchestrators that want to drive the \
@@ -807,7 +807,7 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
                             stuck backend trial state when no in-flight \
                             update_id exists."
             },
-            "x-sumo-bulk-data": {
+            "x-ota-bulk-data": {
                 "kind":      "sub-resource",
                 "endpoints": [
                     "PUT /vehicle/v1/components/{id}/updates/{update_id}/bulk-data/{part_id}",
@@ -819,7 +819,7 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
                             backend; bulk-data is the reverse channel \
                             for workstation / workshop deployments."
             },
-            "x-sumo-multiple": {
+            "x-multiple": {
                 "kind":  "value token",
                 "where": "x-sovd-data-category on the templated \
                           /data/{param_id} path item in the capability \

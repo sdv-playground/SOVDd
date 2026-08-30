@@ -476,7 +476,7 @@ impl std::fmt::Display for ScriptVerdict {
 
 /// One execution of a script (test) — §7.15 execution resource (mirror of the
 /// server `ScriptExecutionResponse` / `sovd_core::ScriptExecution`). Carries the
-/// framework's native output tails plus the x-sumo log-cursor BRACKET.
+/// framework's native output tails plus the vendor log-cursor BRACKET.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScriptExecution {
     pub exec_id: String,
@@ -497,13 +497,13 @@ pub struct ScriptExecution {
     pub started: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended: Option<String>,
-    /// x-sumo log-cursor BRACKET: the log tip just BEFORE the run (`log_from`)
+    /// Vendor log-cursor BRACKET: the log tip just BEFORE the run (`log_from`)
     /// and just AFTER (`log_to`). Page `logs after = log_from` to capture
     /// exactly this run's window. Best-effort — `None` when the source can't
     /// name a tip.
-    #[serde(default, rename = "x-sumo-log-from")]
+    #[serde(default, rename = "x-log-from")]
     pub log_from: Option<String>,
-    #[serde(default, rename = "x-sumo-log-to")]
+    #[serde(default, rename = "x-log-to")]
     pub log_to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub href: Option<String>,
@@ -593,8 +593,8 @@ pub struct LogEntry {
     pub metadata: Option<serde_json::Value>,
     /// Monotonic runtime (seconds since the producer's boot) at which this entry
     /// was logged — jump-proof, unlike `timestamp` (wall clock). The axis the
-    /// `x-sumo-runtime` window filters on. Wire name `x-sumo-uptime-secs`.
-    #[serde(default, rename = "x-sumo-uptime-secs")]
+    /// `x-log-runtime` window filters on. Wire name `x-log-uptime-secs`.
+    #[serde(default, rename = "x-log-uptime-secs")]
     pub uptime_secs: Option<u64>,
 }
 
@@ -609,15 +609,15 @@ pub struct LogsResponse {
     pub total_count: Option<usize>,
     /// Opaque cursor for the next page; feed back as `LogFilter::after`. `None`
     /// once the head is reached — a paging loop stops here. Absent when the
-    /// backend doesn't paginate. Wire name `x-sumo-next-cursor` (vendor ext).
-    #[serde(default, rename = "x-sumo-next-cursor")]
+    /// backend doesn't paginate. Wire name `x-log-next-cursor` (vendor ext).
+    #[serde(default, rename = "x-log-next-cursor")]
     pub next_cursor: Option<String>,
     /// Oldest position still available (gap detection). Absent when unknown.
-    #[serde(default, rename = "x-sumo-oldest-cursor")]
+    #[serde(default, rename = "x-log-oldest-cursor")]
     pub oldest_cursor: Option<String>,
     /// Cursor at the current head ("now") — poll `after = tip_cursor` to follow
     /// only new entries. Present even when `next_cursor` is None.
-    #[serde(default, rename = "x-sumo-tip-cursor")]
+    #[serde(default, rename = "x-log-tip-cursor")]
     pub tip_cursor: Option<String>,
 }
 
@@ -633,7 +633,7 @@ pub enum LogSourceKind {
     Dump,
 }
 
-/// One entry in the `GET /logs/sources` catalog (x-sumo).
+/// One entry in the `GET /logs/sources` catalog (vendor extension).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogSourceInfo {
     pub name: String,
@@ -671,11 +671,11 @@ pub struct LogFilter {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// Filter by EMITTER (sub-source) — comma-separated, prefix-matched. Narrows
-    /// within a multi-emitter source (the slog2 ring). Sent as `x-sumo-emitter`.
+    /// within a multi-emitter source (the slog2 ring). Sent as `x-log-emitter`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emitter: Option<String>,
     /// EXCLUDE emitters (comma-separated, prefix-matched) — mute a high-volume
-    /// sub-source (e.g. `devb_`). Sent as `x-sumo-emitter-exclude`.
+    /// sub-source (e.g. `devb_`). Sent as `x-log-emitter-exclude`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emitter_exclude: Option<String>,
     /// Maximum number of entries to return
@@ -696,7 +696,7 @@ pub struct LogFilter {
     /// RUNTIME window — the last N of the producer's MONOTONIC runtime, as a
     /// duration string (`3h`/`90s`) or bare seconds. Jump-proof: the right axis on
     /// the CVC whose wall clock is unreliable (and, offboard, is the workstation's,
-    /// not the device's). Sent as `x-sumo-runtime`; resolved by the backend against
+    /// not the device's). Sent as `x-log-runtime`; resolved by the backend against
     /// each source's tip uptime. Prefer this over since/until for "last N".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
@@ -1167,17 +1167,17 @@ pub struct DataDefinitionResponse {
 mod cursor_wire_tests {
     use super::*;
 
-    /// The server emits the cursor fields as `x-sumo-*` (vendor-extension names,
+    /// The server emits the cursor fields as `x-log-*` (vendor-extension names,
     /// §6.2.7). A rename typo here would silently break paging — pin the wire
     /// contract: a server body with those exact keys must populate the struct.
     #[test]
-    fn logs_response_deserializes_x_sumo_cursors() {
+    fn logs_response_deserializes_x_log_cursors() {
         let body = r#"{
             "items": [],
             "total_count": 0,
-            "x-sumo-next-cursor": "NEXT",
-            "x-sumo-oldest-cursor": "OLD",
-            "x-sumo-tip-cursor": "TIP"
+            "x-log-next-cursor": "NEXT",
+            "x-log-oldest-cursor": "OLD",
+            "x-log-tip-cursor": "TIP"
         }"#;
         let r: LogsResponse = serde_json::from_str(body).expect("parse");
         assert_eq!(r.next_cursor.as_deref(), Some("NEXT"));
@@ -1189,7 +1189,7 @@ mod cursor_wire_tests {
     }
 
     /// `after` is the cursor a client feeds back; the field must be set-able and
-    /// serialize (the client sends it as the `x-sumo-after` query param, built in
+    /// serialize (the client sends it as the `x-log-after` query param, built in
     /// client.rs). LogFilter is Serialize-only, so just assert serialization.
     #[test]
     fn log_filter_after_serializes() {

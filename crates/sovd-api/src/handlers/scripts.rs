@@ -120,10 +120,10 @@ pub struct ScriptExecutionResponse {
     pub started: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ended: Option<String>,
-    /// x-sumo log-cursor bracket — see [`ScriptExecution`].
-    #[serde(rename = "x-sumo-log-from", skip_serializing_if = "Option::is_none")]
+    /// Vendor log-cursor bracket — see [`ScriptExecution`].
+    #[serde(rename = "x-log-from", skip_serializing_if = "Option::is_none")]
     pub log_from: Option<String>,
-    #[serde(rename = "x-sumo-log-to", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "x-log-to", skip_serializing_if = "Option::is_none")]
     pub log_to: Option<String>,
     pub href: String,
 }

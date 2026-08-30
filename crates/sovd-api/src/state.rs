@@ -126,7 +126,7 @@ pub struct UpdatesEntry {
     /// Component's declared `ResetKind`, captured from
     /// `get_activation_state()` once at register time (the component is
     /// idle then, so the call is cheap — never re-read per status-poll).
-    /// Surfaced on the wire as `x-sumo-reset-kind` so the campaign
+    /// Surfaced on the wire as `x-ota-reset-kind` so the campaign
     /// orchestrator can coalesce RT/host-os ECU resets. `None` when the
     /// backend doesn't report activation state at register.
     pub reset_kind: Option<sovd_core::ResetKind>,
@@ -139,7 +139,7 @@ pub struct UpdatesEntry {
     /// Watch channel for the orchestrator's trial verdict.  Sender
     /// is held here so `PUT /x-ota-commit` / `/x-ota-rollback` can
     /// post to it.  `None` in standard mode (Phase A behaviour);
-    /// `Some` when `PUT /execute?x-sumo-control=orchestrated` runs
+    /// `Some` when `PUT /execute?x-ota-control=orchestrated` runs
     /// and the task pauses at `substate=awaiting-verdict`.
     pub verdict_tx: Option<tokio::sync::watch::Sender<Verdict>>,
 }
@@ -228,7 +228,7 @@ pub enum Status {
 }
 
 /// Orchestrator's trial-verdict signal.  Used only when the execute
-/// phase runs in `x-sumo-control=orchestrated` mode (Phase B).  Sent
+/// phase runs in `x-ota-control=orchestrated` mode (Phase B).  Sent
 /// over the per-entry watch channel; the paused execute task wakes
 /// when the verdict transitions from `Pending`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
