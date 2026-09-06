@@ -8,7 +8,8 @@ use sovd_client::SovdClient;
 use sovd_core::models::{FaultSeverity, LogPriority, OperationStatus};
 use sovd_core::routing;
 use sovd_core::{
-    ActivationState, BackendError, BackendResult, Capabilities, ClearFaultsResult, DataCategory,
+    ActivationState, BackendError, BackendResult, BulkConfiguration, Capabilities,
+    ClearFaultsResult, ConfigurationMetaData, ConfigurationValue, ConfigurationWrite, DataCategory,
     DataValue, DiagnosticBackend, EntityInfo, Fault, FaultFilter, FaultsResult, FlashStatus,
     IoControlAction, IoControlResult, LogEntry, LogFilter, OperationExecution, OperationInfo,
     OutputDetail, OutputInfo, PackageInfo, PackageStream, ParameterInfo, SecurityMode,
@@ -33,6 +34,7 @@ fn to_capabilities(rc: sovd_client::ComponentCapabilities) -> Capabilities {
         subscriptions: rc.subscriptions,
         bulk_data: rc.bulk_data,
         diagnostics: rc.diagnostics,
+        configurations: rc.configurations,
     }
 }
 
@@ -43,6 +45,13 @@ fn to_capabilities(rc: sovd_client::ComponentCapabilities) -> Capabilities {
 #[derive(Deserialize)]
 struct UploadFileResp {
     file_id: String,
+}
+
+/// `GET {entity}/configurations` — §7.12.2 Table 143 (the `schema` member is
+/// re-derived locally, so it isn't parsed here).
+#[derive(Deserialize)]
+struct ListConfigurationsResp {
+    items: Vec<ConfigurationMetaData>,
 }
 
 #[derive(Deserialize)]
@@ -337,12 +346,18 @@ impl SovdProxyBackend {
 
     /// Build a full URL string for a flash/file endpoint on the upstream server.
     fn flash_url(&self, suffix: &str) -> Result<String, BackendError> {
-        let base = self.client.base_url().as_str().trim_end_matches('/');
-        Ok(format!("{}{}{}", base, self.flash_path_prefix(), suffix))
+        Ok(self.entity_url(suffix))
     }
 
-    /// Map an HTTP error response to BackendError.
-    async fn map_response_error(response: reqwest::Response) -> BackendError {
+    /// Build a full URL for any entity sub-resource on the upstream server,
+    /// honouring the §6.5 sub-entity prefix.
+    fn entity_url(&self, suffix: &str) -> String {
+        let base = self.client.base_url().as_str().trim_end_matches('/');
+        format!("{}{}{}", base, self.flash_path_prefix(), suffix)
+    }
+
+    /// Read an upstream error response's status and human-readable message.
+    async fn upstream_error(response: reqwest::Response) -> (u16, String) {
         let status = response.status().as_u16();
         let message = match response.json::<UpstreamErrorResp>().await {
             Ok(err) => {
@@ -356,6 +371,28 @@ impl SovdProxyBackend {
             }
             Err(_) => format!("HTTP {}", status),
         };
+        (status, message)
+    }
+
+    /// Map an upstream §7.12 error response.  The configuration wire
+    /// distinguishes 400/404/406/409 (Tables 147/149/151/153/154/156), so each
+    /// is carried through as the `BackendError` the API layer re-emits with
+    /// the same status.
+    async fn map_configuration_error(response: reqwest::Response) -> BackendError {
+        let (status, message) = Self::upstream_error(response).await;
+        match status {
+            400 => BackendError::InvalidRequest(message),
+            404 => BackendError::ConfigurationNotFound(message),
+            406 => BackendError::NotAcceptable(message),
+            409 => BackendError::PreconditionFailed(message),
+            501 => BackendError::NotSupported(message),
+            _ => BackendError::Protocol(format!("HTTP {}: {}", status, message)),
+        }
+    }
+
+    /// Map an HTTP error response to BackendError.
+    async fn map_response_error(response: reqwest::Response) -> BackendError {
+        let (status, message) = Self::upstream_error(response).await;
         match status {
             404 => BackendError::EntityNotFound(message),
             403 => BackendError::SecurityRequired(1),
@@ -963,6 +1000,175 @@ impl DiagnosticBackend for SovdProxyBackend {
             .delete_log(&self.component_id, log_id)
             .await
             .map_err(Self::map_err)
+    }
+
+    // =========================================================================
+    // Configurations (SOVD §7.12) — forwarded verbatim to the upstream
+    // entity, so a gateway/proxy federates its children's configurations.
+    // =========================================================================
+
+    async fn list_configurations(&self) -> BackendResult<Vec<ConfigurationMetaData>> {
+        let url = self.entity_url("/configurations");
+        let response = self
+            .client
+            .http_client()
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(Self::map_configuration_error(response).await);
+        }
+
+        let resp: ListConfigurationsResp = response.json().await.map_err(|e| {
+            BackendError::Protocol(format!("Failed to parse configurations response: {}", e))
+        })?;
+
+        Ok(resp.items)
+    }
+
+    async fn read_configuration(
+        &self,
+        configuration_id: &str,
+    ) -> BackendResult<ConfigurationValue> {
+        // Ask upstream for the schema too — the local handler decides whether
+        // to keep it, based on this request's `include-schema`.
+        let url = self.entity_url(&format!(
+            "/configurations/{}?include-schema=true",
+            configuration_id
+        ));
+        let response = self
+            .client
+            .http_client()
+            .get(&url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(Self::map_configuration_error(response).await);
+        }
+
+        response.json().await.map_err(|e| {
+            BackendError::Protocol(format!("Failed to parse configuration value: {}", e))
+        })
+    }
+
+    async fn write_configuration(
+        &self,
+        configuration_id: &str,
+        write: &ConfigurationWrite,
+    ) -> BackendResult<()> {
+        let url = self.entity_url(&format!("/configurations/{}", configuration_id));
+        let response = self
+            .client
+            .http_client()
+            .put(&url)
+            .json(write)
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(Self::map_configuration_error(response).await);
+        }
+
+        Ok(())
+    }
+
+    async fn read_bulk_configuration(
+        &self,
+        configuration_id: &str,
+        accept: Option<&str>,
+    ) -> BackendResult<BulkConfiguration> {
+        let url = self.entity_url(&format!("/configurations/{}", configuration_id));
+        let mut request = self.client.http_client().get(&url);
+        if let Some(accept) = accept {
+            request = request.header(reqwest::header::ACCEPT, accept);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(Self::map_configuration_error(response).await);
+        }
+
+        // The upstream Content-Type is authoritative for the payload we relay.
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?
+            .to_vec();
+
+        Ok(BulkConfiguration { content_type, body })
+    }
+
+    async fn write_bulk_configuration(
+        &self,
+        configuration_id: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> BackendResult<()> {
+        let url = self.entity_url(&format!("/configurations/{}", configuration_id));
+        let response = self
+            .client
+            .http_client()
+            .put(&url)
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body.to_vec())
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(Self::map_configuration_error(response).await);
+        }
+
+        Ok(())
+    }
+
+    async fn reset_configuration(&self, configuration_id: &str) -> BackendResult<()> {
+        let url = self.entity_url(&format!("/configurations/{}", configuration_id));
+        let response = self
+            .client
+            .http_client()
+            .delete(&url)
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(Self::map_configuration_error(response).await);
+        }
+
+        Ok(())
+    }
+
+    async fn reset_all_configurations(&self) -> BackendResult<()> {
+        let url = self.entity_url("/configurations");
+        let response = self
+            .client
+            .http_client()
+            .delete(&url)
+            .send()
+            .await
+            .map_err(|e| BackendError::Transport(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(Self::map_configuration_error(response).await);
+        }
+
+        Ok(())
     }
 
     // =========================================================================

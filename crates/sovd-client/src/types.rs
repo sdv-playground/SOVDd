@@ -72,6 +72,9 @@ pub struct ComponentCapabilities {
     /// §7.9 diagnostics collection (read-only system probes).
     #[serde(default)]
     pub diagnostics: bool,
+    /// §7.12 configurations collection (read/write/reset configurations).
+    #[serde(default)]
+    pub configurations: bool,
 }
 
 /// List of components response
