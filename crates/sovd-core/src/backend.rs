@@ -12,8 +12,9 @@ use tokio::sync::broadcast;
 
 use crate::error::BackendResult;
 use crate::models::{
-    BulkCategory, BulkDataDownload, BulkDataFilter, BulkDataItem, Capabilities, ClearFaultsResult,
-    CommControlMode, DataPoint, DataValue, DiagnosticInfo, DiagnosticResult, DtcSettingMode,
+    BulkCategory, BulkConfiguration, BulkDataDownload, BulkDataFilter, BulkDataItem, Capabilities,
+    ClearFaultsResult, CommControlMode, ConfigurationMetaData, ConfigurationValue,
+    ConfigurationWrite, DataPoint, DataValue, DiagnosticInfo, DiagnosticResult, DtcSettingMode,
     EntityInfo, Fault, FaultFilter, FaultsResult, IoControlAction, IoControlResult,
     LinkControlResult, LinkMode, LogEntry, LogFilter, LogPage, LogSourceInfo, OperationExecution,
     OperationInfo, OutputDetail, OutputInfo, ParameterInfo, ScriptExecution, ScriptInfo,
@@ -600,6 +601,103 @@ pub trait DiagnosticBackend: Send + Sync {
         let _ = (category, id);
         Err(crate::error::BackendError::NotSupported(
             "get_bulk_data".to_string(),
+        ))
+    }
+
+    // =========================================================================
+    // Configurations (SOVD §7.12). A configuration resource is always read and
+    // written as a WHOLE (§7.12.3.1 / §7.12.4.1) — there is no per-parameter
+    // access. All default to `NotSupported` so existing backends are
+    // unaffected; a backend that implements them sets `capabilities().
+    // configurations`.
+    // =========================================================================
+
+    /// List the configurations this entity provides
+    /// (`GET /{entity}/configurations`, §7.12.2 Tables 143/144).
+    async fn list_configurations(&self) -> BackendResult<Vec<ConfigurationMetaData>> {
+        Err(crate::error::BackendError::NotSupported(
+            "list_configurations".to_string(),
+        ))
+    }
+
+    /// Read a `parameter`-type configuration as a JSON object
+    /// (`GET /{entity}/configurations/{id}`, §7.12.3.3 Table 149).
+    async fn read_configuration(
+        &self,
+        configuration_id: &str,
+    ) -> BackendResult<ConfigurationValue> {
+        let _ = configuration_id;
+        Err(crate::error::BackendError::NotSupported(
+            "read_configuration".to_string(),
+        ))
+    }
+
+    /// Write a `parameter`-type configuration (§7.12.4.3 Tables 152/153).
+    /// Missing required values or a wrong signature are an
+    /// [`BackendError::InvalidRequest`](crate::error::BackendError::InvalidRequest)
+    /// (400); an unsatisfied precondition is a
+    /// [`BackendError::PreconditionFailed`](crate::error::BackendError::PreconditionFailed)
+    /// (409).
+    async fn write_configuration(
+        &self,
+        configuration_id: &str,
+        write: &ConfigurationWrite,
+    ) -> BackendResult<()> {
+        let _ = (configuration_id, write);
+        Err(crate::error::BackendError::NotSupported(
+            "write_configuration".to_string(),
+        ))
+    }
+
+    /// Read a `bulk`-type configuration (§7.12.3.2 Table 147). `accept` is the
+    /// client's `Accept` header so the backend can pick a more specific
+    /// representation than `application/octet-stream`; if none can be produced
+    /// it returns
+    /// [`BackendError::NotAcceptable`](crate::error::BackendError::NotAcceptable)
+    /// (406).
+    async fn read_bulk_configuration(
+        &self,
+        configuration_id: &str,
+        accept: Option<&str>,
+    ) -> BackendResult<BulkConfiguration> {
+        let _ = (configuration_id, accept);
+        Err(crate::error::BackendError::NotSupported(
+            "read_bulk_configuration".to_string(),
+        ))
+    }
+
+    /// Write a `bulk`-type configuration (§7.12.4.2 Table 151). `content_type`
+    /// is the request's `Content-Type` — the payload shape is ExVe
+    /// manufacturer specific.
+    async fn write_bulk_configuration(
+        &self,
+        configuration_id: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> BackendResult<()> {
+        let _ = (configuration_id, content_type, body);
+        Err(crate::error::BackendError::NotSupported(
+            "write_bulk_configuration".to_string(),
+        ))
+    }
+
+    /// Restore one configuration to its initial/default value
+    /// (`DELETE /{entity}/configurations/{id}`, §7.12.5.3 Table 156). A
+    /// non-resettable configuration (§7.12.5.1 NOTE 3) is reported as
+    /// [`BackendError::PreconditionFailed`](crate::error::BackendError::PreconditionFailed)
+    /// (409) — the spec defines no other code for it.
+    async fn reset_configuration(&self, configuration_id: &str) -> BackendResult<()> {
+        let _ = configuration_id;
+        Err(crate::error::BackendError::NotSupported(
+            "reset_configuration".to_string(),
+        ))
+    }
+
+    /// Restore every configuration of this entity to its initial/default value
+    /// (`DELETE /{entity}/configurations`, §7.12.5.2 Table 154).
+    async fn reset_all_configurations(&self) -> BackendResult<()> {
+        Err(crate::error::BackendError::NotSupported(
+            "reset_all_configurations".to_string(),
         ))
     }
 
