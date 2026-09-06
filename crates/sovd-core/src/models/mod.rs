@@ -1,6 +1,7 @@
 //! Shared data models for SOVD backends
 
 mod bulk_data;
+mod configuration;
 mod data;
 mod diagnostic;
 mod entity;
@@ -13,6 +14,7 @@ mod output;
 mod script;
 
 pub use bulk_data::*;
+pub use configuration::*;
 pub use data::*;
 pub use diagnostic::*;
 pub use entity::*;

@@ -60,6 +60,12 @@ pub struct Capabilities {
     /// capability docs (deserializes as `false`).
     #[serde(default)]
     pub diagnostics: bool,
+    /// Supports the §7.12 `configurations` collection (read/write/reset of an
+    /// entity's configuration resources). Gates the `/configurations` routes.
+    /// `#[serde(default)]` for back-compat with older capability docs
+    /// (deserializes as `false`).
+    #[serde(default)]
+    pub configurations: bool,
 }
 
 impl Capabilities {
@@ -80,6 +86,7 @@ impl Capabilities {
             subscriptions: true,
             bulk_data: false,
             diagnostics: false,
+            configurations: false,
         }
     }
 
@@ -102,6 +109,7 @@ impl Capabilities {
             // logs also exposes the bulk-data collection.
             bulk_data: true,
             diagnostics: false,
+            configurations: false,
         }
     }
 
@@ -122,6 +130,7 @@ impl Capabilities {
             subscriptions: true,
             bulk_data: true,
             diagnostics: false,
+            configurations: false,
         }
     }
 
@@ -142,6 +151,7 @@ impl Capabilities {
             subscriptions: false,
             bulk_data: false,
             diagnostics: false,
+            configurations: false,
         }
     }
 }

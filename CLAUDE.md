@@ -81,6 +81,7 @@ Defined in `crates/sovd-core/src/backend.rs`. ~45 async methods grouped by domai
 - **Data:** `list_parameters`, `read_data`, `write_data`, `read_raw_did`, `write_raw_did`, `define_data_identifier`, `clear_data_identifier`, `subscribe_data`, `ecu_reset`
 - **Faults:** `get_faults`, `get_fault_detail`, `clear_faults`
 - **Logs:** `get_logs`, `get_log`, `get_log_content`, `delete_log`, `stream_logs`
+- **Configurations (§7.12):** `list_configurations`, `read_configuration`, `write_configuration`, `read_bulk_configuration`, `write_bulk_configuration`, `reset_configuration`, `reset_all_configurations`
 - **Operations:** `list_operations`, `start_operation`, `get_operation_status`, `stop_operation`
 - **I/O Control:** `list_outputs`, `get_output`, `control_output`
 - **Software/packages:** `get_software_info`, `receive_package`, `receive_package_stream`, `list_packages`, `get_package`, `verify_package`, `verify_part`, `delete_package`

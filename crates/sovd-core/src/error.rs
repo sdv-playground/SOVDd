@@ -24,6 +24,10 @@ pub enum BackendError {
     #[error("Output not found: {0}")]
     OutputNotFound(String),
 
+    /// Configuration not found (ISO 17978-3 §7.12)
+    #[error("Configuration not found: {0}")]
+    ConfigurationNotFound(String),
+
     /// Security access required
     #[error("Security access required: level {0}")]
     SecurityRequired(u8),
@@ -78,6 +82,21 @@ pub enum BackendError {
     #[error("Update in progress: {0}")]
     UpdateInProgress(String),
 
+    /// A precondition for the request is not satisfied — e.g. ISO 17978-3
+    /// §7.12's "vehicle not in motion", or a non-resettable configuration
+    /// (§7.12.5.1 NOTE 3).  Distinct from `Busy` (a transient in-flight
+    /// operation): the caller must change the *entity's* state first.  Maps to
+    /// HTTP 409 with the `precondition-not-fulfilled` error code (Table 18).
+    #[error("Precondition not fulfilled: {0}")]
+    PreconditionFailed(String),
+
+    /// The resource cannot be represented in any MIME type the client's
+    /// `Accept` header admits.  Maps to HTTP 406 Not Acceptable (ISO 17978-3
+    /// §7.12.3 Tables 147/149).  Not to be confused with `UnsupportedMediaType`
+    /// (415), which is about the *request* payload.
+    #[error("Not acceptable: {0}")]
+    NotAcceptable(String),
+
     /// Payload type doesn't match the addressed component.  Maps to HTTP
     /// 415 Unsupported Media Type.  Used by the F.D3 dispatcher when a
     /// manifest's target doesn't match the component_id on the path —
@@ -105,6 +124,7 @@ impl BackendError {
             BackendError::ParameterNotFound(_) => 404,
             BackendError::OperationNotFound(_) => 404,
             BackendError::OutputNotFound(_) => 404,
+            BackendError::ConfigurationNotFound(_) => 404,
             BackendError::SecurityRequired(_) => 403,
             BackendError::SessionRequired(_) => 409,
             BackendError::NotSupported(_) => 501,
@@ -116,6 +136,8 @@ impl BackendError {
             BackendError::Timeout => 504,
             BackendError::Busy(_) => 409,
             BackendError::UpdateInProgress(_) => 409,
+            BackendError::PreconditionFailed(_) => 409,
+            BackendError::NotAcceptable(_) => 406,
             BackendError::UnsupportedMediaType(_) => 415,
             BackendError::Internal(_) => 500,
         }

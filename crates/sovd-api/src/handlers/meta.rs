@@ -406,6 +406,32 @@ const PATHS: &[PathEntry] = &[
         path: "/vehicle/v1/components/{component_id}/scripts/{script_id}/executions/{exec_id}",
         summary: "Poll a test run: status, verdict, log-cursor bracket.",
     },
+    // configurations (§7.12)
+    PathEntry {
+        method: "GET",
+        path: "/vehicle/v1/components/{component_id}/configurations",
+        summary: "List configurations (§7.12.2); q: include-schema.",
+    },
+    PathEntry {
+        method: "DELETE",
+        path: "/vehicle/v1/components/{component_id}/configurations",
+        summary: "Reset all configurations to default — 204.",
+    },
+    PathEntry {
+        method: "GET",
+        path: "/vehicle/v1/components/{component_id}/configurations/{configuration_id}",
+        summary: "Read a configuration — JSON parameters or bulk (406 on Accept mismatch).",
+    },
+    PathEntry {
+        method: "PUT",
+        path: "/vehicle/v1/components/{component_id}/configurations/{configuration_id}",
+        summary: "Write a configuration as a whole — 204.",
+    },
+    PathEntry {
+        method: "DELETE",
+        path: "/vehicle/v1/components/{component_id}/configurations/{configuration_id}",
+        summary: "Reset one configuration to default — 204.",
+    },
     // clear-data (§7.13)
     PathEntry {
         method: "GET",

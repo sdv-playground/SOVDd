@@ -179,22 +179,22 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/bulk-data/{category}/{bulk_data_id}",
             get(handlers::bulk_data::download),
         )
-        // -----------------------------------------------------------------
-        // F.5 stub collections (spec presence, backend wiring TODO).
-        // -----------------------------------------------------------------
-        // §7.12 configurations
+        // §7.12 configurations — read/write/reset an entity's configuration
+        // resources. No POST: the spec defines no way to *create* one.
         .route(
             "/vehicle/v1/components/{component_id}/configurations",
-            get(handlers::stubs::list_configurations)
-                .post(handlers::stubs::create_configuration)
-                .delete(handlers::stubs::reset_configurations),
+            get(handlers::configurations::list_configurations)
+                .delete(handlers::configurations::reset_configurations),
         )
         .route(
             "/vehicle/v1/components/{component_id}/configurations/{configuration_id}",
-            get(handlers::stubs::read_configuration)
-                .put(handlers::stubs::write_configuration)
-                .delete(handlers::stubs::delete_configuration_one),
+            get(handlers::configurations::read_configuration)
+                .put(handlers::configurations::write_configuration)
+                .delete(handlers::configurations::reset_configuration),
         )
+        // -----------------------------------------------------------------
+        // F.5 stub collections (spec presence, backend wiring TODO).
+        // -----------------------------------------------------------------
         // §7.17 locks
         .route(
             "/vehicle/v1/components/{component_id}/locks",
@@ -365,6 +365,19 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/apps/{app_id}/data/{param_id}",
             get(handlers::sub_entity::read_sub_entity_parameter)
                 .put(handlers::sub_entity::write_sub_entity_parameter),
+        )
+        // Sub-entity configuration routes — §7.12 under §6.5, same shape as
+        // the entity-root form.
+        .route(
+            "/vehicle/v1/components/{component_id}/apps/{app_id}/configurations",
+            get(handlers::configurations::list_sub_entity_configurations)
+                .delete(handlers::configurations::reset_sub_entity_configurations),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/apps/{app_id}/configurations/{configuration_id}",
+            get(handlers::configurations::read_sub_entity_configuration)
+                .put(handlers::configurations::write_sub_entity_configuration)
+                .delete(handlers::configurations::reset_sub_entity_configuration),
         )
         // Sub-entity fault routes
         .route(
