@@ -133,6 +133,7 @@ Method groups (see `backend.rs` for the full list):
 | Data | `list_parameters`, `read_data`, `write_data`, `read_raw_did`, `write_raw_did`, `define_data_identifier`, `clear_data_identifier`, `subscribe_data` (→ `broadcast::Receiver<DataPoint>`), `ecu_reset` |
 | Faults | `get_faults`, `get_fault_detail`, `clear_faults` |
 | Logs | `get_logs`, `get_log`, `get_log_content`, `delete_log`, `stream_logs` |
+| Configurations | `list_configurations`, `read_configuration`, `write_configuration`, `read_bulk_configuration`, `write_bulk_configuration`, `reset_configuration`, `reset_all_configurations` (§7.12 — a configuration is always read/written as a whole) |
 | Operations | `list_operations`, `start_operation`, `get_operation_status`, `stop_operation` |
 | I/O control | `list_outputs`, `get_output`, `control_output` |
 | Sub-entities | `list_sub_entities`, `get_sub_entity` (→ `Arc<dyn DiagnosticBackend>`) |
@@ -273,9 +274,10 @@ The reference SOVD **app-entity** (ISO §6.5): it exposes synthetic params and o
 health · meta (`/version-info`, `/vehicle/v1/docs`, `/.well-known/sovd-extensions`) · components · data
 (+ `?raw=true` for raw DID, + `?categories=` filter) · faults (+ `?active_only=true`, `delete_fault`) ·
 data-lists (define-data operation + read/clear) · logs (+ `entries`, `config`, cursor paging — §6.3.1) ·
-bulk-data (real §7.20 collection: categories/list/download 200·307·202 — §6.3.1) · **spec-presence stub
-collections** (configurations, locks, triggers, communication-logs, scripts, data-groups — present for
-spec coverage, backend wiring TODO, honest 501s) · data-categories (real, DID-derived) ·
+bulk-data (real §7.20 collection: categories/list/download 200·307·202 — §6.3.1) · configurations
+(real §7.12 collection: list/read/write/reset-one/reset-all — no POST, the spec has no create verb) ·
+**spec-presence stub collections** (locks, triggers, communication-logs, scripts, data-groups —
+present for spec coverage, backend wiring TODO, honest 501s) · data-categories (real, DID-derived) ·
 modes/comm-ctrl + modes/dtcsetting (UDS 0x28/0x85, Table-343 names) · clear-data · operations (+ async
 `executions`, covering UDS 0x31 **and** 0x2F per C-133) · apps (sub-entity tree, §7) ·
 cyclic-subscriptions (SSE content-negotiated on the subscription resource, §9) · status
@@ -292,7 +294,7 @@ and `modes/link` (LinkControl 0x87 has no standardized mode name, C-130).
 ### 6.3 Handler organization
 
 One module per domain in `crates/sovd-api/src/handlers/`: `components`, `data`, `data_lists`,
-`clear_data`, `faults`, `logs` + `logs_ext`, `bulk_data`, `operations`, `modes`, `reset`,
+`clear_data`, `faults`, `logs` + `logs_ext`, `bulk_data`, `configurations`, `operations`, `modes`, `reset`,
 `subscriptions`, `sub_entity` (the entire `/apps/{app_id}/...` tree), `updates` (the full `/updates`
 wire + the vendor verbs), `stubs` (the spec-presence stub collections), `definitions` (`/admin`),
 `apps`, `software`, and `meta` (version-info, docs, `.well-known`, the 404/405 fallbacks).
