@@ -42,7 +42,7 @@ use sovd_core::{FaultFilter, FaultSeverity, OperationStatus, SecurityState};
 /// (e.g. `"uds_gw/transmission_ecu"` when the ECU sits behind a nested
 /// gateway).  We walk each segment via `get_sub_entity()` so that the
 /// resolution mirrors `resolve_target` in `modes.rs`.
-async fn resolve(
+pub(super) async fn resolve(
     state: &AppState,
     component_id: &str,
     app_id: &str,

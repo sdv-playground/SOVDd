@@ -11,9 +11,9 @@
 //!   * `PUT /…/{id}` → 204 (idempotent accept — no state to store)
 //!   * `DELETE /…/{id}` → 204
 //!
-//! Spec sections covered: §7.11 triggers, §7.12 configurations,
-//! §7.15 scripts, §7.17 locks, §7.22 communication-logs, plus the
-//! Table 9 `data-categories` / `data-groups` enumeration collections.
+//! Spec sections covered: §7.11 triggers, §7.15 scripts, §7.17 locks,
+//! §7.22 communication-logs, plus the Table 9 `data-categories` /
+//! `data-groups` enumeration collections.
 //! Sub-paths inside `modes/` and `faults/` are added to those existing
 //! handlers rather than here.
 
@@ -39,76 +39,6 @@ impl<T: Serialize> Default for EmptyListResponse<T> {
 
 fn require_component(state: &AppState, component_id: &str) -> Result<(), ApiError> {
     state.get_backend(component_id).map(|_| ())
-}
-
-// =============================================================================
-// configurations — §7.12
-// =============================================================================
-
-#[derive(Debug, Serialize)]
-pub struct ConfigurationSummary {
-    pub id: String,
-    pub href: String,
-}
-
-pub async fn list_configurations(
-    State(state): State<AppState>,
-    Path(component_id): Path<String>,
-) -> Result<Json<EmptyListResponse<ConfigurationSummary>>, ApiError> {
-    require_component(&state, &component_id)?;
-    Ok(Json(EmptyListResponse::default()))
-}
-
-pub async fn read_configuration(
-    State(_state): State<AppState>,
-    Path((_component_id, configuration_id)): Path<(String, String)>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    Err(ApiError::NotFound(format!(
-        "Configuration not found: {}",
-        configuration_id
-    )))
-}
-
-pub async fn create_configuration(
-    State(state): State<AppState>,
-    Path(component_id): Path<String>,
-    Json(_body): Json<serde_json::Value>,
-) -> Result<StatusCode, ApiError> {
-    require_component(&state, &component_id)?;
-    Err(ApiError::NotImplemented(
-        "configurations.create not yet wired to a backend".into(),
-    ))
-}
-
-pub async fn write_configuration(
-    State(state): State<AppState>,
-    Path((component_id, _configuration_id)): Path<(String, String)>,
-    Json(_body): Json<serde_json::Value>,
-) -> Result<StatusCode, ApiError> {
-    require_component(&state, &component_id)?;
-    Err(ApiError::NotImplemented(
-        "configurations.update not yet wired to a backend".into(),
-    ))
-}
-
-pub async fn delete_configuration_one(
-    State(state): State<AppState>,
-    Path((component_id, _configuration_id)): Path<(String, String)>,
-) -> Result<StatusCode, ApiError> {
-    require_component(&state, &component_id)?;
-    Err(ApiError::NotImplemented(
-        "configurations.reset-one not yet wired to a backend".into(),
-    ))
-}
-
-pub async fn reset_configurations(
-    State(state): State<AppState>,
-    Path(component_id): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    require_component(&state, &component_id)?;
-    Err(ApiError::NotImplemented(
-        "configurations.reset not yet wired to a backend".into(),
-    ))
 }
 
 // =============================================================================

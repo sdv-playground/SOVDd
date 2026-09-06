@@ -55,6 +55,11 @@ pub enum ApiError {
     /// gate failed).  Same status as Conflict; kept distinct for
     /// telemetry/log clarity.
     PreconditionFailed(String),
+    /// 406 Not Acceptable — the resource cannot be represented in any
+    /// MIME type the client's `Accept` header admits (ISO 17978-3
+    /// §7.12.3, Tables 147/149).  Carries NO body: the spec lists the
+    /// 406 response body as `—`.
+    NotAcceptable(String),
     /// 503 Service Unavailable — rate-limited or backpressured.
     /// Spec §5.8 503 may include a `Retry-After` header.
     Throttled(String),
@@ -81,6 +86,12 @@ pub enum ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, body) = match self {
+            // The one arm with no body: ISO 17978-3 Tables 147/149 spell
+            // the 406 response body `—`.
+            ApiError::NotAcceptable(msg) => {
+                tracing::debug!(%msg, "not acceptable");
+                return StatusCode::NOT_ACCEPTABLE.into_response();
+            }
             ApiError::EcuErrorResponse { message, nrc, sid } => {
                 // NRC→HTTP per the single-source table (ISO 17978-3 §8.4,
                 // C-131): the ECU answered but rejected — map the NRC to the
@@ -185,6 +196,7 @@ impl From<BackendError> for ApiError {
             BackendError::ParameterNotFound(msg) => ApiError::NotFound(msg),
             BackendError::OperationNotFound(msg) => ApiError::NotFound(msg),
             BackendError::OutputNotFound(msg) => ApiError::NotFound(msg),
+            BackendError::ConfigurationNotFound(msg) => ApiError::NotFound(msg),
             BackendError::SecurityRequired(level) => {
                 ApiError::Unauthorized(format!("Security access level {} required", level))
             }
@@ -204,6 +216,8 @@ impl From<BackendError> for ApiError {
             BackendError::Timeout => ApiError::GatewayTimeout("Operation timed out".to_string()),
             BackendError::Busy(msg) => ApiError::Conflict(msg),
             BackendError::UpdateInProgress(msg) => ApiError::UpdateInProgress(msg),
+            BackendError::PreconditionFailed(msg) => ApiError::PreconditionFailed(msg),
+            BackendError::NotAcceptable(msg) => ApiError::NotAcceptable(msg),
             BackendError::UnsupportedMediaType(msg) => ApiError::UnsupportedMediaType(msg),
             BackendError::Internal(msg) => ApiError::Internal(msg),
         }

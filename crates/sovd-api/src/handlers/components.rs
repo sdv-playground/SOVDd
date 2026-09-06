@@ -62,6 +62,8 @@ pub struct CapabilitiesResponse {
     pub bulk_data: bool,
     /// §7.9 diagnostics collection (read-only system probes — mem/df/du/…).
     pub diagnostics: bool,
+    /// §7.12 configurations collection (read/write/reset configuration resources).
+    pub configurations: bool,
 }
 
 impl From<&Capabilities> for CapabilitiesResponse {
@@ -81,6 +83,7 @@ impl From<&Capabilities> for CapabilitiesResponse {
             subscriptions: caps.subscriptions,
             bulk_data: caps.bulk_data,
             diagnostics: caps.diagnostics,
+            configurations: caps.configurations,
         }
     }
 }
