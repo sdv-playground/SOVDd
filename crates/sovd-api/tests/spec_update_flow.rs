@@ -8,12 +8,17 @@
 //! tasks/spec-aligned-updates-wire.md UPDATE-WIRE-001 — Phase A.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde_json::Value;
-use sovd_api::{create_router, state::UpdatesConfig, AppState};
+use sovd_api::{
+    create_router,
+    state::{Status as UpdateStatus, UpdateKey, UpdateState, UpdatesConfig},
+    AppState,
+};
 use sovd_client::testing::TestServer;
 use sovd_core::{
     BackendError, BackendResult, Capabilities, DataValue, DiagnosticBackend, EntityInfo,
@@ -29,6 +34,22 @@ struct MockShape {
     shape: &'static str,
 }
 
+#[derive(Default)]
+struct AsyncGate {
+    enabled: AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl AsyncGate {
+    async fn wait_if_enabled(&self) {
+        if self.enabled.load(Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+}
+
 struct MockBackend {
     info: EntityInfo,
     capabilities: Capabilities,
@@ -41,6 +62,16 @@ struct MockBackend {
     flash_state: Mutex<CoreFlashState>,
     /// Toggle to make verify_part fail (for the failure-path test)
     fail_verify: Mutex<bool>,
+    activation_query_error: AtomicBool,
+    start_flash_calls: AtomicU64,
+    fail_start_flash_call: AtomicU64,
+    start_flash_gate: AsyncGate,
+    receive_package_gate: AsyncGate,
+    verify_part_gate: AsyncGate,
+    flash_status_gate: AsyncGate,
+    activation_query_gate: AsyncGate,
+    rollback_flash_gate: AsyncGate,
+    abort_flash_gate: AsyncGate,
     /// Optional gateway-style child sub-entity (drives the C-073
     /// gateway-child subscription-resource path).
     child: Option<Arc<MockBackend>>,
@@ -74,6 +105,16 @@ impl MockBackend {
             transfer_id: Mutex::new(None),
             flash_state: Mutex::new(CoreFlashState::Transferring),
             fail_verify: Mutex::new(false),
+            activation_query_error: AtomicBool::new(false),
+            start_flash_calls: AtomicU64::new(0),
+            fail_start_flash_call: AtomicU64::new(0),
+            start_flash_gate: AsyncGate::default(),
+            receive_package_gate: AsyncGate::default(),
+            verify_part_gate: AsyncGate::default(),
+            flash_status_gate: AsyncGate::default(),
+            activation_query_gate: AsyncGate::default(),
+            rollback_flash_gate: AsyncGate::default(),
+            abort_flash_gate: AsyncGate::default(),
             child,
             data_tx: tokio::sync::broadcast::channel(16).0,
         }
@@ -163,6 +204,7 @@ impl DiagnosticBackend for MockBackend {
             let bytes = chunk.map_err(|e| BackendError::Internal(format!("stream: {e}")))?;
             buf.extend_from_slice(&bytes);
         }
+        self.receive_package_gate.wait_if_enabled().await;
         let mut counter = self.next_id.lock();
         *counter += 1;
         let id = format!("pkg-{}", *counter);
@@ -172,6 +214,7 @@ impl DiagnosticBackend for MockBackend {
     }
 
     async fn verify_part(&self, file_id: &str, expected_sha256: &str) -> BackendResult<()> {
+        self.verify_part_gate.wait_if_enabled().await;
         if *self.fail_verify.lock() {
             return Err(BackendError::InvalidRequest(format!(
                 "verify_part forced failure for file_id {file_id} expected {expected_sha256}"
@@ -181,6 +224,13 @@ impl DiagnosticBackend for MockBackend {
     }
 
     async fn start_flash(&self) -> BackendResult<String> {
+        let call = self.start_flash_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        self.start_flash_gate.wait_if_enabled().await;
+        if self.fail_start_flash_call.load(Ordering::SeqCst) == call {
+            return Err(BackendError::Internal(format!(
+                "forced start_flash failure on call {call}"
+            )));
+        }
         let mut counter = self.next_id.lock();
         *counter += 1;
         let tid = format!("xfer-{}", *counter);
@@ -190,6 +240,7 @@ impl DiagnosticBackend for MockBackend {
     }
 
     async fn get_flash_status(&self, transfer_id: &str) -> BackendResult<FlashStatus> {
+        self.flash_status_gate.wait_if_enabled().await;
         Ok(FlashStatus {
             transfer_id: transfer_id.to_string(),
             package_id: "pkg".into(),
@@ -202,6 +253,22 @@ impl DiagnosticBackend for MockBackend {
                 percent: 100.0,
             }),
             error: None,
+        })
+    }
+
+    async fn get_activation_state(&self) -> BackendResult<sovd_core::ActivationState> {
+        self.activation_query_gate.wait_if_enabled().await;
+        if self.activation_query_error.load(Ordering::SeqCst) {
+            return Err(BackendError::Internal(
+                "forced activation-state query failure".into(),
+            ));
+        }
+        Ok(sovd_core::ActivationState {
+            supports_rollback: self.shape.shape == "banked",
+            state: *self.flash_state.lock(),
+            active_version: None,
+            previous_version: None,
+            reset_kind: sovd_core::ResetKind::Local,
         })
     }
 
@@ -256,7 +323,13 @@ impl DiagnosticBackend for MockBackend {
     }
 
     async fn rollback_flash(&self) -> BackendResult<()> {
+        self.rollback_flash_gate.wait_if_enabled().await;
         *self.flash_state.lock() = CoreFlashState::RolledBack;
+        Ok(())
+    }
+
+    async fn abort_flash(&self, _transfer_id: &str) -> BackendResult<()> {
+        self.abort_flash_gate.wait_if_enabled().await;
         Ok(())
     }
 }
@@ -273,6 +346,14 @@ async fn spawn_with_watchdog(
     shape: &'static str,
     watchdog: Duration,
 ) -> (TestServer, Arc<MockBackend>) {
+    let (server, backend, _) = spawn_with_watchdog_and_state(shape, watchdog).await;
+    (server, backend)
+}
+
+async fn spawn_with_watchdog_and_state(
+    shape: &'static str,
+    watchdog: Duration,
+) -> (TestServer, Arc<MockBackend>, AppState) {
     let backend = Arc::new(MockBackend::new("dev1", shape));
     let mut backends = HashMap::new();
     backends.insert(
@@ -282,9 +363,38 @@ async fn spawn_with_watchdog(
     let state = AppState::new(backends).with_updates_config(UpdatesConfig {
         orchestrated_watchdog: watchdog,
     });
-    let router = create_router(state);
+    let router = create_router(state.clone());
     let server = TestServer::start(router).await.expect("test server");
-    (server, backend)
+    (server, backend, state)
+}
+
+async fn spawn_with_state(shape: &'static str) -> (TestServer, Arc<MockBackend>, AppState) {
+    let backend = Arc::new(MockBackend::new("dev1", shape));
+    let mut backends = HashMap::new();
+    backends.insert(
+        "dev1".to_string(),
+        backend.clone() as Arc<dyn DiagnosticBackend>,
+    );
+    let state = AppState::new(backends);
+    let server = TestServer::start(create_router(state.clone()))
+        .await
+        .expect("test server");
+    (server, backend, state)
+}
+
+async fn spawn_two_components() -> (TestServer, Arc<MockBackend>) {
+    let mut backends = HashMap::new();
+    let dev1 = Arc::new(MockBackend::new("dev1", "banked"));
+    let dev2 = Arc::new(MockBackend::new("dev2", "banked"));
+    backends.insert(
+        "dev1".to_string(),
+        dev1.clone() as Arc<dyn DiagnosticBackend>,
+    );
+    backends.insert("dev2".to_string(), dev2 as Arc<dyn DiagnosticBackend>);
+    let server = TestServer::start(create_router(AppState::new(backends)))
+        .await
+        .expect("test server");
+    (server, dev1)
 }
 
 /// Spawn a server whose `dev1` backend has a gateway-style child
@@ -516,7 +626,7 @@ async fn wait_for_substate(server: &TestServer, id: &str, want: &str) -> Value {
 }
 
 #[tokio::test]
-async fn orchestrated_banked_commit_round_trip() {
+async fn orchestrated_banked_commit_requires_post_reboot_activation() {
     let (server, backend) = spawn_with("banked").await;
     let id = open_update(&server).await;
     upload_part(&server, &id, "manifest", b"banked").await;
@@ -527,6 +637,18 @@ async fn orchestrated_banked_commit_round_trip() {
     assert_eq!(body["phase"], "execute");
     assert_eq!(body["status"], "inProgress");
 
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{}/x-ota-commit", id),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::AwaitingReboot);
+    let body = get_status(&server, &id).await;
+    assert_eq!(body["status"], "inProgress");
+    assert_eq!(body["x-ota-substate"], "awaiting-verdict");
+
+    *backend.flash_state.lock() = CoreFlashState::Activated;
     let resp = put(
         &server,
         &format!("/vehicle/v1/components/dev1/updates/{}/x-ota-commit", id),
@@ -549,6 +671,7 @@ async fn orchestrated_banked_rollback_round_trip() {
     upload_part(&server, &id, "#kernel", b"\xCAfake").await;
     prepare_and_orchestrated_execute(&server, &id).await;
     wait_for_substate(&server, &id, "awaiting-verdict").await;
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::AwaitingReboot);
 
     let resp = put(
         &server,
@@ -567,6 +690,120 @@ async fn orchestrated_banked_rollback_round_trip() {
 }
 
 #[tokio::test]
+async fn orchestrated_banked_commit_rejects_verifying_without_consuming_verdict() {
+    let (server, backend) = spawn_with("banked").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"banked").await;
+    prepare_and_orchestrated_execute(&server, &id).await;
+    wait_for_substate(&server, &id, "awaiting-verdict").await;
+
+    *backend.flash_state.lock() = CoreFlashState::Verifying;
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/x-ota-commit"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::Verifying);
+    let body = get_status(&server, &id).await;
+    assert_eq!(body["x-ota-substate"], "awaiting-verdict");
+
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/x-ota-rollback"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(poll_terminal(&server, &id).await["status"], "failed");
+}
+
+#[tokio::test]
+async fn orchestrated_banked_commit_propagates_activation_query_error() {
+    let (server, backend) = spawn_with("banked").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"banked").await;
+    prepare_and_orchestrated_execute(&server, &id).await;
+    wait_for_substate(&server, &id, "awaiting-verdict").await;
+
+    backend.activation_query_error.store(true, Ordering::SeqCst);
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/x-ota-commit"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    let body = get_status(&server, &id).await;
+    assert_eq!(body["status"], "inProgress");
+    assert_eq!(body["x-ota-substate"], "awaiting-verdict");
+
+    backend
+        .activation_query_error
+        .store(false, Ordering::SeqCst);
+    *backend.flash_state.lock() = CoreFlashState::Activated;
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/x-ota-commit"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(poll_terminal(&server, &id).await["status"], "completed");
+}
+
+#[tokio::test]
+async fn unknown_commit_id_returns_404_before_activation_query_error() {
+    let (server, backend) = spawn_with("banked").await;
+    backend.activation_query_error.store(true, Ordering::SeqCst);
+
+    let resp = put(
+        &server,
+        "/vehicle/v1/components/dev1/updates/unknown/x-ota-commit",
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn opposing_verdicts_cannot_both_be_accepted() {
+    let (server, backend) = spawn_with("banked").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"banked").await;
+    prepare_and_orchestrated_execute(&server, &id).await;
+    wait_for_substate(&server, &id, "awaiting-verdict").await;
+    *backend.flash_state.lock() = CoreFlashState::Activated;
+    backend
+        .activation_query_gate
+        .enabled
+        .store(true, Ordering::SeqCst);
+
+    let commit = tokio::spawn({
+        let url = format!(
+            "{}/vehicle/v1/components/dev1/updates/{id}/x-ota-commit",
+            server.base_url()
+        );
+        async move { http().put(url).send().await.expect("commit verdict") }
+    });
+    backend.activation_query_gate.entered.notified().await;
+
+    let rollback = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/x-ota-rollback"),
+    )
+    .await;
+    assert_eq!(rollback.status(), reqwest::StatusCode::ACCEPTED);
+
+    backend
+        .activation_query_gate
+        .enabled
+        .store(false, Ordering::SeqCst);
+    backend.activation_query_gate.release.notify_one();
+    assert_eq!(
+        commit.await.expect("commit task").status(),
+        reqwest::StatusCode::CONFLICT
+    );
+    assert_eq!(poll_terminal(&server, &id).await["status"], "failed");
+}
+
+#[tokio::test]
 async fn orchestrated_banked_watchdog_auto_rollback() {
     // Short watchdog so the test doesn't wait the default 10 minutes.
     let (server, backend) = spawn_with_watchdog("banked", Duration::from_millis(250)).await;
@@ -579,6 +816,46 @@ async fn orchestrated_banked_watchdog_auto_rollback() {
     let final_body = poll_terminal(&server, &id).await;
     assert_eq!(final_body["status"], "failed");
     assert_eq!(final_body["error"]["error_code"], "x-ota-verdict-rollback");
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
+}
+
+#[tokio::test]
+async fn watchdog_claims_verdict_before_backend_rollback() {
+    let (server, backend, state) =
+        spawn_with_watchdog_and_state("banked", Duration::from_millis(50)).await;
+    backend
+        .rollback_flash_gate
+        .enabled
+        .store(true, Ordering::SeqCst);
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"banked").await;
+    prepare_and_orchestrated_execute(&server, &id).await;
+
+    backend.rollback_flash_gate.entered.notified().await;
+    {
+        let store = state.updates.0.lock();
+        let entry = store
+            .get(&UpdateKey::new("dev1", &id))
+            .expect("update entry");
+        assert_eq!(entry.substate, Some("rolling-back"));
+        assert!(entry.verdict_tx.is_none());
+    }
+
+    for verdict in ["commit", "rollback"] {
+        let resp = put(
+            &server,
+            &format!("/vehicle/v1/components/dev1/updates/{id}/x-ota-{verdict}"),
+        )
+        .await;
+        assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+    }
+
+    backend
+        .rollback_flash_gate
+        .enabled
+        .store(false, Ordering::SeqCst);
+    backend.rollback_flash_gate.release.notify_one();
+    assert_eq!(poll_terminal(&server, &id).await["status"], "failed");
     assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
 }
 
@@ -696,6 +973,7 @@ async fn flash_client_drives_banked_orchestrated_then_spec_commit() {
     assert_eq!(paused.status, "inProgress");
     assert_eq!(paused.substate.as_deref(), Some("awaiting-verdict"));
 
+    *backend.flash_state.lock() = CoreFlashState::Activated;
     let committed = client.spec_commit().await.expect("spec_commit");
     assert_eq!(committed.status, "completed");
     assert_eq!(*backend.flash_state.lock(), CoreFlashState::Committed);
@@ -1429,6 +1707,442 @@ async fn repost_untouched_id_replaces() {
             .status(),
         reqwest::StatusCode::CREATED
     );
+}
+
+#[tokio::test]
+async fn concurrent_same_key_registration_has_one_winner() {
+    let (server, backend) = spawn_with("singleshot").await;
+    backend
+        .start_flash_gate
+        .enabled
+        .store(true, Ordering::SeqCst);
+    let url = format!("{}/vehicle/v1/components/dev1/updates", server.base_url());
+
+    let first = tokio::spawn({
+        let url = url.clone();
+        async move {
+            http()
+                .post(url)
+                .json(&serde_json::json!({ "id": "concurrent-id" }))
+                .send()
+                .await
+                .expect("first registration")
+        }
+    });
+    backend.start_flash_gate.entered.notified().await;
+
+    let second = http()
+        .post(url)
+        .json(&serde_json::json!({ "id": "concurrent-id" }))
+        .send()
+        .await
+        .expect("second registration");
+    assert_eq!(second.status(), reqwest::StatusCode::CONFLICT);
+
+    backend
+        .start_flash_gate
+        .enabled
+        .store(false, Ordering::SeqCst);
+    backend.start_flash_gate.release.notify_one();
+    assert_eq!(
+        first.await.expect("first task").status(),
+        reqwest::StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+async fn failed_registration_cleans_only_its_own_reservation() {
+    let (server, backend) = spawn_with("singleshot").await;
+    let id = "reservation-owner";
+    backend
+        .start_flash_gate
+        .enabled
+        .store(true, Ordering::SeqCst);
+    backend.fail_start_flash_call.store(1, Ordering::SeqCst);
+
+    let first = tokio::spawn({
+        let url = format!("{}/vehicle/v1/components/dev1/updates", server.base_url());
+        async move {
+            http()
+                .post(url)
+                .json(&serde_json::json!({ "id": id }))
+                .send()
+                .await
+                .expect("first registration")
+        }
+    });
+    backend.start_flash_gate.entered.notified().await;
+
+    let resp = http()
+        .delete(format!(
+            "{}/vehicle/v1/components/dev1/updates/{id}",
+            server.base_url()
+        ))
+        .send()
+        .await
+        .expect("delete first reservation");
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+    backend
+        .start_flash_gate
+        .enabled
+        .store(false, Ordering::SeqCst);
+    assert_eq!(
+        register(&server, serde_json::json!({ "id": id }))
+            .await
+            .status(),
+        reqwest::StatusCode::CREATED
+    );
+
+    backend.start_flash_gate.release.notify_one();
+    assert_eq!(
+        first.await.expect("first task").status(),
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    let (status, body) = get_json(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}"),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(body["id"], id);
+}
+
+#[tokio::test]
+async fn stale_upload_does_not_mutate_reregistered_entry() {
+    let (server, backend) = spawn_with("singleshot").await;
+    let id = "reused-during-upload";
+    assert_eq!(
+        register(&server, serde_json::json!({ "id": id }))
+            .await
+            .status(),
+        reqwest::StatusCode::CREATED
+    );
+
+    backend
+        .receive_package_gate
+        .enabled
+        .store(true, Ordering::SeqCst);
+    let upload = tokio::spawn({
+        let url = format!(
+            "{}/vehicle/v1/components/dev1/updates/{id}/bulk-data/manifest",
+            server.base_url()
+        );
+        async move {
+            http()
+                .put(url)
+                .header("content-type", "application/octet-stream")
+                .body("stale manifest")
+                .send()
+                .await
+                .expect("stale upload")
+        }
+    });
+    backend.receive_package_gate.entered.notified().await;
+
+    let resp = http()
+        .delete(format!(
+            "{}/vehicle/v1/components/dev1/updates/{id}",
+            server.base_url()
+        ))
+        .send()
+        .await
+        .expect("delete old entry");
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+    assert_eq!(
+        register(&server, serde_json::json!({ "id": id }))
+            .await
+            .status(),
+        reqwest::StatusCode::CREATED
+    );
+
+    backend
+        .receive_package_gate
+        .enabled
+        .store(false, Ordering::SeqCst);
+    backend.receive_package_gate.release.notify_one();
+    assert_eq!(
+        upload.await.expect("upload task").status(),
+        reqwest::StatusCode::CONFLICT
+    );
+
+    let (status, body) = get_json(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/bulk-data"),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert!(body["items"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn prepare_cannot_race_an_in_flight_upload() {
+    let (server, backend) = spawn_with("singleshot").await;
+    let id = open_update(&server).await;
+    backend
+        .receive_package_gate
+        .enabled
+        .store(true, Ordering::SeqCst);
+
+    let upload = tokio::spawn({
+        let url = format!(
+            "{}/vehicle/v1/components/dev1/updates/{id}/bulk-data/manifest",
+            server.base_url()
+        );
+        async move {
+            http()
+                .put(url)
+                .header("content-type", "application/octet-stream")
+                .body("manifest")
+                .send()
+                .await
+                .expect("upload")
+        }
+    });
+    backend.receive_package_gate.entered.notified().await;
+
+    let prepare = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/prepare"),
+    )
+    .await;
+    assert_eq!(prepare.status(), reqwest::StatusCode::CONFLICT);
+
+    backend
+        .receive_package_gate
+        .enabled
+        .store(false, Ordering::SeqCst);
+    backend.receive_package_gate.release.notify_one();
+    assert_eq!(
+        upload.await.expect("upload task").status(),
+        reqwest::StatusCode::CREATED
+    );
+
+    let prepare = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/prepare"),
+    )
+    .await;
+    assert_eq!(prepare.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(poll_terminal(&server, &id).await["status"], "completed");
+}
+
+#[tokio::test]
+async fn delete_does_not_remove_a_reregistered_incarnation() {
+    let (server, backend) = spawn_with("singleshot").await;
+    let id = "delete-reregister";
+    assert_eq!(
+        register(&server, serde_json::json!({ "id": id }))
+            .await
+            .status(),
+        reqwest::StatusCode::CREATED
+    );
+    backend
+        .abort_flash_gate
+        .enabled
+        .store(true, Ordering::SeqCst);
+
+    let delete = tokio::spawn({
+        let url = format!(
+            "{}/vehicle/v1/components/dev1/updates/{id}",
+            server.base_url()
+        );
+        async move { http().delete(url).send().await.expect("delete") }
+    });
+    backend.abort_flash_gate.entered.notified().await;
+
+    backend
+        .abort_flash_gate
+        .enabled
+        .store(false, Ordering::SeqCst);
+    assert_eq!(
+        register(&server, serde_json::json!({ "id": id }))
+            .await
+            .status(),
+        reqwest::StatusCode::CREATED
+    );
+
+    backend.abort_flash_gate.release.notify_one();
+    assert_eq!(
+        delete.await.expect("delete task").status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+    let (status, body) = get_json(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}"),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(body["id"], id);
+}
+
+#[tokio::test]
+async fn old_prepare_task_cannot_mutate_a_replacement() {
+    let (server, backend, state) = spawn_with_state("singleshot").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"manifest").await;
+    backend
+        .verify_part_gate
+        .enabled
+        .store(true, Ordering::SeqCst);
+
+    let prepare = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/prepare"),
+    )
+    .await;
+    assert_eq!(prepare.status(), reqwest::StatusCode::ACCEPTED);
+    backend.verify_part_gate.entered.notified().await;
+
+    let replacement_token = uuid::Uuid::new_v4();
+    {
+        let mut store = state.updates.0.lock();
+        let entry = store
+            .get_mut(&UpdateKey::new("dev1", &id))
+            .expect("update entry");
+        entry.registration_token = replacement_token;
+        entry.state = UpdateState::Registered;
+        entry.phase = sovd_api::state::Phase::Prepare;
+        entry.status = UpdateStatus::Pending;
+        entry.progress = None;
+        entry.step = Some("replacement".into());
+        entry.task_handle = None;
+    }
+    backend
+        .flash_status_gate
+        .enabled
+        .store(true, Ordering::SeqCst);
+    backend
+        .verify_part_gate
+        .enabled
+        .store(false, Ordering::SeqCst);
+    backend.verify_part_gate.release.notify_one();
+    backend.flash_status_gate.entered.notified().await;
+
+    let store = state.updates.0.lock();
+    let entry = store
+        .get(&UpdateKey::new("dev1", &id))
+        .expect("replacement entry");
+    assert_eq!(entry.registration_token, replacement_token);
+    assert_eq!(entry.status, UpdateStatus::Pending);
+    assert_eq!(entry.step.as_deref(), Some("replacement"));
+}
+
+#[tokio::test]
+async fn equal_update_ids_are_independent_across_components() {
+    let (server, dev1_backend) = spawn_two_components().await;
+    let id = "shared-package-id";
+
+    for component in ["dev1", "dev2"] {
+        let resp = http()
+            .post(format!(
+                "{}/vehicle/v1/components/{component}/updates",
+                server.base_url()
+            ))
+            .json(&serde_json::json!({ "id": id }))
+            .send()
+            .await
+            .expect("register");
+        assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+
+        let resp = http()
+            .put(format!(
+                "{}/vehicle/v1/components/{component}/updates/{id}/bulk-data/manifest",
+                server.base_url()
+            ))
+            .header("content-type", "application/octet-stream")
+            .body(format!("manifest-for-{component}"))
+            .send()
+            .await
+            .expect("upload");
+        assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+    }
+
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/prepare"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let dev1 = poll_terminal(&server, id).await;
+    assert_eq!(dev1["status"], "completed");
+
+    let (_, dev2) = get_json(
+        &server,
+        &format!("/vehicle/v1/components/dev2/updates/{id}/status"),
+    )
+    .await;
+    assert_eq!(dev2["phase"], "prepare");
+    assert_eq!(dev2["status"], "pending");
+
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/execute?x-ota-control=orchestrated"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let dev1 = wait_for_substate(&server, id, "awaiting-verdict").await;
+    assert_eq!(dev1["status"], "inProgress");
+
+    *dev1_backend.flash_state.lock() = CoreFlashState::Activated;
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/x-ota-commit"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let dev1 = poll_terminal(&server, id).await;
+    assert_eq!(dev1["status"], "completed");
+
+    let (_, dev2) = get_json(
+        &server,
+        &format!("/vehicle/v1/components/dev2/updates/{id}/status"),
+    )
+    .await;
+    assert_eq!(dev2["phase"], "prepare");
+    assert_eq!(dev2["status"], "pending");
+
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev2/updates/{id}/prepare"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    for _ in 0..200 {
+        let (_, body) = get_json(
+            &server,
+            &format!("/vehicle/v1/components/dev2/updates/{id}/status"),
+        )
+        .await;
+        if body["status"] == "completed" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let (_, dev2) = get_json(
+        &server,
+        &format!("/vehicle/v1/components/dev2/updates/{id}/status"),
+    )
+    .await;
+    assert_eq!(dev2["status"], "completed");
+
+    let resp = http()
+        .delete(format!(
+            "{}/vehicle/v1/components/dev1/updates/{id}",
+            server.base_url()
+        ))
+        .send()
+        .await
+        .expect("delete dev1 update");
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let (status, dev2) = get_json(
+        &server,
+        &format!("/vehicle/v1/components/dev2/updates/{id}/status"),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(dev2["status"], "completed");
 }
 
 /// A package id carrying reserved chars (`#`) round-trips: the Location/href is

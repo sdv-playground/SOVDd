@@ -35,7 +35,7 @@ use sovd_core::{PackageStream, UpdatePackageContext, UpdatePackageDescriptor, Up
 use uuid::Uuid;
 
 use crate::error::ApiError;
-use crate::state::{AppState, Phase, Status, UpdatePart, UpdateState, UpdatesEntry};
+use crate::state::{AppState, Phase, Status, UpdateKey, UpdatePart, UpdateState, UpdatesEntry};
 
 /// Reserved update-package id (§7.18.1.5). On servers that self-select,
 /// `GET /updates/autonomous` resolves to a concrete installable id; SOVDd
@@ -225,40 +225,60 @@ pub async fn register_update(
         _ => Uuid::new_v4().to_string(),
     };
     let manifest = req.manifest;
+    let key = UpdateKey::new(&component_id, &update_id);
+    let registration_token = Uuid::new_v4();
 
     // Collision handling on a (now possibly client-stable) id, scoped to the
     // component. A still-active package → 409 update-process-in-progress
     // (C-111). A terminal or untouched-Registered entry → tear down any
-    // residue and replace (idempotent re-flash).
+    // residue and replace (idempotent re-flash). Insert the replacement while
+    // holding the same lock so a concurrent registration sees the reservation.
     let prior = {
-        let store = state.updates.0.lock();
-        store
-            .get(&update_id)
-            .filter(|e| e.component_id == component_id)
-            .map(|e| {
-                (
-                    e.status,
-                    e.state,
-                    e.substate,
-                    e.transfer_id.clone(),
-                    e.task_handle.clone(),
-                )
-            })
+        let mut store = state.updates.0.lock();
+        let prior = if let Some(entry) = store.get(&key) {
+            let terminal = matches!(
+                entry.state,
+                UpdateState::Committed | UpdateState::RolledBack | UpdateState::Aborted
+            ) || entry.status == Status::Failed;
+            let untouched = entry.state == UpdateState::Registered
+                && entry.status == Status::Pending
+                && entry.uploads_in_progress == 0
+                && entry.substate.is_none();
+            if !(terminal || untouched) {
+                return Err(ApiError::UpdateInProgress(format!(
+                    "update package {update_id:?} on {component_id:?} is in progress; \
+                     finish, abort, or roll it back before re-registering"
+                )));
+            }
+            Some((entry.transfer_id.clone(), entry.task_handle.clone()))
+        } else {
+            None
+        };
+        store.insert(
+            key.clone(),
+            UpdatesEntry {
+                component_id: component_id.clone(),
+                registration_token,
+                uploads_in_progress: 0,
+                parts: Vec::new(),
+                manifest,
+                state: UpdateState::Registered,
+                phase: Phase::default(),
+                status: Status::InProgress,
+                progress: None,
+                step: Some("registering".into()),
+                error: None,
+                substate: None,
+                reset_kind: None,
+                transfer_id: None,
+                task_handle: None,
+                verdict_tx: None,
+            },
+        );
+        prior
     };
-    if let Some((status, ustate, substate, prior_tid, prior_task)) = prior {
-        let terminal = matches!(
-            ustate,
-            UpdateState::Committed | UpdateState::RolledBack | UpdateState::Aborted
-        ) || status == Status::Failed;
-        let untouched =
-            ustate == UpdateState::Registered && status == Status::Pending && substate.is_none();
-        if !(terminal || untouched) {
-            return Err(ApiError::UpdateInProgress(format!(
-                "update package {update_id:?} on {component_id:?} is in progress; \
-                 finish, abort, or roll it back before re-registering"
-            )));
-        }
-        // Replaceable: tear down any residue before re-inserting fresh.
+    if let Some((prior_tid, prior_task)) = prior {
+        // Replaceable: tear down any residue after reserving the key.
         if let Some(handle) = prior_task {
             handle.abort();
         }
@@ -293,7 +313,10 @@ pub async fn register_update(
         // the bank set is in trial mode and must be committed/rolled back first;
         // falling through here would let the later bulk-data PUT hit the
         // unguarded legacy path and wipe the rollback bank.
-        Err(e) => return Err(e.into()),
+        Err(e) => {
+            remove_registration(&state, &key, registration_token);
+            return Err(e.into());
+        }
     };
 
     // Capture the component's declared ResetKind once, while it's idle
@@ -307,27 +330,26 @@ pub async fn register_update(
         .ok()
         .map(|a| a.reset_kind);
 
-    {
+    let finalized = {
         let mut store = state.updates.0.lock();
-        store.insert(
-            update_id.clone(),
-            UpdatesEntry {
-                component_id: component_id.clone(),
-                parts: Vec::new(),
-                manifest,
-                state: UpdateState::Registered,
-                phase: Phase::default(),
-                status: Status::default(),
-                progress: None,
-                step: None,
-                error: None,
-                substate: None,
-                reset_kind,
-                transfer_id,
-                task_handle: None,
-                verdict_tx: None,
-            },
-        );
+        match store.get_mut(&key) {
+            Some(entry) if entry.registration_token == registration_token => {
+                entry.status = Status::Pending;
+                entry.step = None;
+                entry.reset_kind = reset_kind;
+                entry.transfer_id = transfer_id.clone();
+                true
+            }
+            _ => false,
+        }
+    };
+    if !finalized {
+        if let Some(tid) = transfer_id {
+            let _ = backend.abort_flash(&tid).await;
+        }
+        return Err(ApiError::Conflict(format!(
+            "update registration {update_id:?} was deleted or replaced during backend setup"
+        )));
     }
 
     let base = format!(
@@ -412,8 +434,8 @@ pub async fn list_updates(
     let store = state.updates.0.lock();
     let mut items: Vec<String> = store
         .iter()
-        .filter(|(_, e)| e.component_id == component_id)
-        .map(|(id, _)| id.clone())
+        .filter(|(key, _)| key.component_id() == component_id)
+        .map(|(key, _)| key.update_id().to_string())
         .collect();
     items.sort(); // deterministic (HashMap iteration order is not)
     Ok(Json(UpdatesListResponse { items }))
@@ -443,8 +465,7 @@ pub async fn get_update(
     let (register_body, parts): (Option<serde_json::Value>, Vec<UpdatePart>) = {
         let store = state.updates.0.lock();
         let entry = store
-            .get(&update_id)
-            .filter(|e| e.component_id == component_id)
+            .get(&UpdateKey::new(&component_id, &update_id))
             .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
         (entry.manifest.clone(), entry.parts.clone())
     };
@@ -474,13 +495,17 @@ pub async fn delete_update(
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     let backend = state.get_backend(&component_id)?;
-    let (transfer_id, abort_handle) = {
+    let key = UpdateKey::new(&component_id, &update_id);
+    let (registration_token, transfer_id, abort_handle) = {
         let store = state.updates.0.lock();
         let entry = store
-            .get(&update_id)
-            .filter(|e| e.component_id == component_id)
+            .get(&key)
             .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
-        (entry.transfer_id.clone(), entry.task_handle.clone())
+        (
+            entry.registration_token,
+            entry.transfer_id.clone(),
+            entry.task_handle.clone(),
+        )
     };
     if let Some(handle) = abort_handle {
         handle.abort();
@@ -488,7 +513,7 @@ pub async fn delete_update(
     if let Some(tid) = transfer_id {
         let _ = backend.abort_flash(&tid).await;
     }
-    state.updates.0.lock().remove(&update_id);
+    remove_registration(&state, &key, registration_token);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -520,17 +545,22 @@ fn accepted_with_status_location(
 /// Update the entry's wire-state, holding the lock for as short as
 /// possible.  Returns Err if the entry has been deleted out from under
 /// us (which the spawned task should treat as a cancellation).
-fn mutate_entry<F>(state: &AppState, update_id: &str, f: F) -> Result<(), &'static str>
+fn mutate_entry<F>(
+    state: &AppState,
+    key: &UpdateKey,
+    registration_token: Uuid,
+    f: F,
+) -> Result<(), &'static str>
 where
     F: FnOnce(&mut UpdatesEntry),
 {
     let mut store = state.updates.0.lock();
-    match store.get_mut(update_id) {
-        Some(entry) => {
+    match store.get_mut(key) {
+        Some(entry) if entry.registration_token == registration_token => {
             f(entry);
             Ok(())
         }
-        None => Err("update entry vanished mid-task"),
+        _ => Err("update entry vanished or was replaced mid-task"),
     }
 }
 
@@ -543,22 +573,42 @@ pub async fn put_prepare(
     State(state): State<AppState>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
+    put_prepare_inner(state, component_id, update_id, None).await
+}
+
+async fn put_prepare_inner(
+    state: AppState,
+    component_id: String,
+    update_id: String,
+    expected_token: Option<Uuid>,
+) -> Result<(StatusCode, HeaderMap), ApiError> {
     // Validate component exists up-front; the actual backend handle
     // is re-acquired inside the spawned task.
     let _ = state.get_backend(&component_id)?;
+    let key = UpdateKey::new(&component_id, &update_id);
 
     // Snapshot the parts list + transfer_id under the lock; bail if
     // the entry isn't in a startable phase/status.
-    let (parts, transfer_id) = {
+    let (parts, transfer_id, registration_token) = {
         let mut store = state.updates.0.lock();
         let entry = store
-            .get_mut(&update_id)
-            .filter(|e| e.component_id == component_id)
+            .get_mut(&key)
             .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+        if expected_token.is_some_and(|token| token != entry.registration_token) {
+            return Err(ApiError::Conflict(format!(
+                "update {update_id} was replaced before prepare started"
+            )));
+        }
         if matches!(entry.status, Status::InProgress) {
             return Err(ApiError::UpdatePreparationInProgress(format!(
                 "update {update_id} is already in {} phase, status inProgress",
                 entry.phase.as_str()
+            )));
+        }
+        if entry.uploads_in_progress != 0 {
+            return Err(ApiError::UpdatePreparationInProgress(format!(
+                "update {update_id} has {} bulk-data upload(s) in progress",
+                entry.uploads_in_progress
             )));
         }
         if entry.parts.is_empty() {
@@ -576,18 +626,18 @@ pub async fn put_prepare(
             .iter()
             .map(|p| (p.part_id.clone(), p.file_id.clone(), p.sha256.clone()))
             .collect::<Vec<_>>();
-        (parts, entry.transfer_id.clone())
+        (parts, entry.transfer_id.clone(), entry.registration_token)
     };
 
     // Spawn the prepare task. Use AbortHandle so DELETE can cancel.
     let task_state = state.clone();
-    let task_update_id = update_id.clone();
     let task_component_id = component_id.clone();
+    let task_key = key.clone();
     let join = tokio::spawn(async move {
         let backend = match task_state.get_backend(&task_component_id) {
             Ok(b) => b,
             Err(e) => {
-                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                     entry.status = Status::Failed;
                     entry.step = Some("backend missing".into());
                     entry.error = Some(crate::state::UpdateError {
@@ -603,7 +653,7 @@ pub async fn put_prepare(
 
         let total = parts.len() as u64;
         for (idx, (part_id, file_id, sha256)) in parts.iter().enumerate() {
-            let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+            let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                 entry.step = Some(format!("verifying part {part_id}"));
                 entry.progress = Some(((idx as u64 * 100) / total) as u8);
             });
@@ -619,7 +669,7 @@ pub async fn put_prepare(
                 Err(e) => Err(e),
             };
             if let Err(e) = verify {
-                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                     entry.status = Status::Failed;
                     entry.step = Some(format!("part {part_id} verify failed"));
                     entry.error = Some(crate::state::UpdateError {
@@ -642,14 +692,14 @@ pub async fn put_prepare(
             None => match backend.start_flash().await {
                 Ok(tid) => {
                     let tid_clone = tid.clone();
-                    let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                    let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                         entry.transfer_id = Some(tid_clone);
                     });
                     Some(tid)
                 }
                 Err(sovd_core::BackendError::NotSupported(_)) => None,
                 Err(e) => {
-                    let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                    let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                         entry.status = Status::Failed;
                         entry.step = Some("start_flash failed".into());
                         entry.error = Some(crate::state::UpdateError {
@@ -665,12 +715,12 @@ pub async fn put_prepare(
         };
 
         if let Some(tid) = active_transfer.as_deref() {
-            let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+            let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                 entry.step = Some("waiting for staging pipeline".into());
                 entry.progress = Some(80);
             });
             if let Err(e) = await_flash_settled(backend.as_ref(), tid).await {
-                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                     entry.status = Status::Failed;
                     entry.step = Some("staging pipeline failed".into());
                     entry.error = Some(crate::state::UpdateError {
@@ -684,7 +734,7 @@ pub async fn put_prepare(
             }
         }
 
-        let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+        let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
             entry.status = Status::Completed;
             entry.progress = Some(100);
             entry.step = Some("prepared".into());
@@ -696,7 +746,10 @@ pub async fn put_prepare(
     let abort = join.abort_handle();
     {
         let mut store = state.updates.0.lock();
-        if let Some(entry) = store.get_mut(&update_id) {
+        if let Some(entry) = store
+            .get_mut(&key)
+            .filter(|entry| entry.registration_token == registration_token)
+        {
             entry.task_handle = Some(abort);
         }
     }
@@ -715,6 +768,16 @@ pub async fn put_execute(
     Path((component_id, update_id)): Path<(String, String)>,
     Query(query): Query<ExecuteQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
+    put_execute_inner(state, component_id, update_id, query, None).await
+}
+
+async fn put_execute_inner(
+    state: AppState,
+    component_id: String,
+    update_id: String,
+    query: ExecuteQuery,
+    expected_token: Option<Uuid>,
+) -> Result<(StatusCode, HeaderMap), ApiError> {
     let backend = state.get_backend(&component_id)?;
     let is_singleshot = backend.update_shape() == "singleshot";
     // Orchestrated control mode is only meaningful for banked
@@ -722,13 +785,18 @@ pub async fn put_execute(
     // accept the query param on singleshot but silently treat it as
     // standard mode so callers can use one verb across both shapes.
     let orchestrated = query.is_orchestrated() && !is_singleshot;
+    let key = UpdateKey::new(&component_id, &update_id);
 
-    let prior_phase = {
+    let registration_token = {
         let mut store = state.updates.0.lock();
         let entry = store
-            .get_mut(&update_id)
-            .filter(|e| e.component_id == component_id)
+            .get_mut(&key)
             .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+        if expected_token.is_some_and(|token| token != entry.registration_token) {
+            return Err(ApiError::Conflict(format!(
+                "update {update_id} was replaced before execute started"
+            )));
+        }
         if matches!(entry.status, Status::InProgress) {
             return Err(ApiError::UpdateExecutionInProgress(format!(
                 "update {update_id} is already in {} phase, status inProgress",
@@ -745,24 +813,23 @@ pub async fn put_execute(
                 entry.status.as_str()
             )));
         }
-        let prior = entry.phase;
         entry.phase = Phase::Execute;
         entry.status = Status::InProgress;
         entry.progress = Some(0);
         entry.step = Some("starting execute".into());
         entry.error = None;
-        prior
+        entry.registration_token
     };
-    let _ = prior_phase;
 
     let task_state = state.clone();
     let task_update_id = update_id.clone();
     let task_component_id = component_id.clone();
+    let task_key = key.clone();
     let join = tokio::spawn(async move {
         let backend = match task_state.get_backend(&task_component_id) {
             Ok(b) => b,
             Err(e) => {
-                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                     entry.status = Status::Failed;
                     entry.error = Some(crate::state::UpdateError {
                         error_code: "internal-server-error".into(),
@@ -776,12 +843,12 @@ pub async fn put_execute(
         };
 
         // finalize_flash: writes live for singleshot, stages bank pointer for banked.
-        let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+        let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
             entry.step = Some("finalizing".into());
             entry.progress = Some(20);
         });
         if let Err(e) = backend.finalize_flash().await {
-            let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+            let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                 entry.status = Status::Failed;
                 entry.step = Some("finalize_flash failed".into());
                 entry.error = Some(crate::state::UpdateError {
@@ -799,12 +866,12 @@ pub async fn put_execute(
             // transitioned the backend to Activated. commit_flash
             // raises the security floor; failure here is bookkeeping
             // and should not auto-rollback the install.
-            let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+            let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                 entry.step = Some("committing".into());
                 entry.progress = Some(90);
             });
             if let Err(e) = backend.commit_flash().await {
-                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                     entry.status = Status::Failed;
                     entry.step = Some("commit_flash failed".into());
                     entry.error = Some(crate::state::UpdateError {
@@ -816,7 +883,7 @@ pub async fn put_execute(
                 });
                 return;
             }
-            let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+            let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                 entry.status = Status::Completed;
                 entry.progress = Some(100);
                 entry.step = Some("completed".into());
@@ -834,7 +901,7 @@ pub async fn put_execute(
         // In orchestrated mode (Phase B) we pause after activate at
         // substate=awaiting-verdict and wait for the orchestrator to
         // post commit / rollback via the x-ota verbs.
-        let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+        let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
             entry.step = Some("validating".into());
             entry.progress = Some(50);
         });
@@ -842,7 +909,7 @@ pub async fn put_execute(
             Ok(()) => {}
             Err(sovd_core::BackendError::NotSupported(_)) => {}
             Err(e) => {
-                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                     entry.status = Status::Failed;
                     entry.step = Some("validate failed".into());
                     entry.error = Some(crate::state::UpdateError {
@@ -855,7 +922,7 @@ pub async fn put_execute(
                 return;
             }
         }
-        let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+        let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
             entry.step = Some("activating".into());
             entry.progress = Some(80);
         });
@@ -863,7 +930,7 @@ pub async fn put_execute(
             Ok(()) => {}
             Err(sovd_core::BackendError::NotSupported(_)) => {}
             Err(e) => {
-                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                     entry.status = Status::Failed;
                     entry.step = Some("activate failed".into());
                     entry.error = Some(crate::state::UpdateError {
@@ -877,7 +944,7 @@ pub async fn put_execute(
             }
         }
         if !orchestrated {
-            let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+            let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                 entry.status = Status::Completed;
                 entry.progress = Some(100);
                 entry.step = Some("staged for reset".into());
@@ -894,7 +961,7 @@ pub async fn put_execute(
         // re-read .borrow() to discriminate.
         let (verdict_tx, mut verdict_rx) =
             tokio::sync::watch::channel(crate::state::Verdict::Pending);
-        let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+        let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
             entry.step = Some("trial boot active, awaiting orchestrator verdict".into());
             entry.progress = Some(85);
             entry.substate = Some("awaiting-verdict");
@@ -915,22 +982,46 @@ pub async fn put_execute(
                 }
             }
             _ = tokio::time::sleep(watchdog) => {
-                tracing::warn!(
-                    update_id = %task_update_id,
-                    "orchestrator verdict watchdog fired — auto-rollback"
-                );
-                crate::state::Verdict::Rollback
+                let claimed = {
+                    let mut store = task_state.updates.0.lock();
+                    match store
+                        .get_mut(&task_key)
+                        .filter(|entry| entry.registration_token == registration_token)
+                    {
+                        Some(entry) if entry.substate == Some("awaiting-verdict") => {
+                            if entry.verdict_tx.take().is_some() {
+                                entry.step = Some("rolling back".into());
+                                entry.substate = Some("rolling-back");
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        _ => return,
+                    }
+                };
+                if claimed {
+                    tracing::warn!(
+                        update_id = %task_update_id,
+                        "orchestrator verdict watchdog fired — auto-rollback"
+                    );
+                    crate::state::Verdict::Rollback
+                } else {
+                    // A posted verdict claimed the sender concurrently with
+                    // expiry. Preserve that verdict instead of overriding it.
+                    *verdict_rx.borrow()
+                }
             }
         };
 
         match verdict {
             crate::state::Verdict::Commit => {
-                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                     entry.step = Some("committing".into());
                     entry.substate = Some("committing");
                 });
                 if let Err(e) = backend.commit_flash().await {
-                    let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                    let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                         entry.status = Status::Failed;
                         entry.step = Some("commit_flash failed".into());
                         entry.substate = None;
@@ -944,7 +1035,7 @@ pub async fn put_execute(
                     });
                     return;
                 }
-                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                     entry.status = Status::Completed;
                     entry.progress = Some(100);
                     entry.step = Some("completed".into());
@@ -955,12 +1046,12 @@ pub async fn put_execute(
                 });
             }
             crate::state::Verdict::Rollback => {
-                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                     entry.step = Some("rolling back".into());
                     entry.substate = Some("rolling-back");
                 });
                 let rb_result = backend.rollback_flash().await;
-                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                     entry.status = Status::Failed;
                     entry.substate = None;
                     entry.verdict_tx = None;
@@ -979,7 +1070,7 @@ pub async fn put_execute(
             crate::state::Verdict::Pending => {
                 // Should never happen — changed() only returns when
                 // the value transitions away from the initial state.
-                let _ = mutate_entry(&task_state, &task_update_id, |entry| {
+                let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
                     entry.status = Status::Failed;
                     entry.substate = None;
                     entry.verdict_tx = None;
@@ -996,7 +1087,10 @@ pub async fn put_execute(
 
     {
         let mut store = state.updates.0.lock();
-        if let Some(entry) = store.get_mut(&update_id) {
+        if let Some(entry) = store
+            .get_mut(&key)
+            .filter(|entry| entry.registration_token == registration_token)
+        {
             entry.task_handle = Some(join.abort_handle());
         }
     }
@@ -1014,21 +1108,24 @@ pub async fn put_automated(
     State(state): State<AppState>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let key = UpdateKey::new(&component_id, &update_id);
     // Phase A: only block if the package declared automated=false in
     // its registration manifest.  Default true unless explicitly
     // disabled, to match Table 261's default.
-    let allowed = {
+    let (allowed, registration_token) = {
         let store = state.updates.0.lock();
         let entry = store
-            .get(&update_id)
-            .filter(|e| e.component_id == component_id)
+            .get(&key)
             .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
-        entry
-            .manifest
-            .as_ref()
-            .and_then(|m| m.get("automated"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true)
+        (
+            entry
+                .manifest
+                .as_ref()
+                .and_then(|m| m.get("automated"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            entry.registration_token,
+        )
     };
     if !allowed {
         return Err(ApiError::UpdateAutomatedNotSupported(
@@ -1038,9 +1135,11 @@ pub async fn put_automated(
 
     // Run prepare; if it succeeds, chain into execute.  Reuses the
     // same task machinery so both phases drive the same wire fields.
-    let prepare_resp = put_prepare(
-        State(state.clone()),
-        Path((component_id.clone(), update_id.clone())),
+    let prepare_resp = put_prepare_inner(
+        state.clone(),
+        component_id.clone(),
+        update_id.clone(),
+        Some(registration_token),
     )
     .await?
     .into_response();
@@ -1052,12 +1151,16 @@ pub async fn put_automated(
     let task_state = state.clone();
     let task_update_id = update_id.clone();
     let task_component_id = component_id.clone();
+    let task_key = key;
     tokio::spawn(async move {
         // Poll our own store for prepare/completed before invoking execute.
         loop {
             let ready = {
                 let store = task_state.updates.0.lock();
-                match store.get(&task_update_id) {
+                match store
+                    .get(&task_key)
+                    .filter(|entry| entry.registration_token == registration_token)
+                {
                     Some(e) => match (e.phase, e.status) {
                         (Phase::Prepare, Status::Completed) => Some(true),
                         (Phase::Prepare, Status::Failed) => Some(false),
@@ -1075,10 +1178,12 @@ pub async fn put_automated(
         // Kick off execute via the standard handler.  /automated is
         // server-driven by definition, so always use standard mode
         // (empty query → not orchestrated).
-        let _ = put_execute(
-            State(task_state),
-            Path((task_component_id, task_update_id)),
-            Query(ExecuteQuery::default()),
+        let _ = put_execute_inner(
+            task_state,
+            task_component_id,
+            task_update_id,
+            ExecuteQuery::default(),
+            Some(registration_token),
         )
         .await;
     });
@@ -1098,10 +1203,21 @@ pub async fn put_x_ota_commit(
     State(state): State<AppState>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    post_verdict(
+    let registration_token = validate_verdict(&state, &component_id, &update_id)?;
+    let backend = state.get_backend(&component_id)?;
+    let activation = backend.get_activation_state().await?;
+    if activation.state != sovd_core::FlashState::Activated {
+        return Err(ApiError::Conflict(format!(
+            "x-ota commit requires activation state Activated, got {:?}",
+            activation.state
+        )));
+    }
+
+    claim_verdict(
         &state,
         &component_id,
         &update_id,
+        registration_token,
         crate::state::Verdict::Commit,
     )?;
     let (status, headers) = accepted_with_status_location(&component_id, &update_id)?;
@@ -1115,10 +1231,12 @@ pub async fn put_x_ota_rollback(
     State(state): State<AppState>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    post_verdict(
+    let registration_token = validate_verdict(&state, &component_id, &update_id)?;
+    claim_verdict(
         &state,
         &component_id,
         &update_id,
+        registration_token,
         crate::state::Verdict::Rollback,
     )?;
     let (status, headers) = accepted_with_status_location(&component_id, &update_id)?;
@@ -1148,20 +1266,18 @@ pub async fn put_x_ota_force_rollback(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Common verdict-posting path for the two x-ota verbs.  Validates
-/// that the entry is paused at `substate=awaiting-verdict` and posts
-/// the new verdict via the entry's watch channel.
-fn post_verdict(
+/// Validate without claiming so commit can query activation state while
+/// preserving 404 / lifecycle-error precedence and leaving query failures
+/// retryable.
+fn validate_verdict(
     state: &AppState,
     component_id: &str,
     update_id: &str,
-    verdict: crate::state::Verdict,
-) -> Result<(), ApiError> {
+) -> Result<Uuid, ApiError> {
     let _ = state.get_backend(component_id)?;
     let store = state.updates.0.lock();
     let entry = store
-        .get(update_id)
-        .filter(|e| e.component_id == component_id)
+        .get(&UpdateKey::new(component_id, update_id))
         .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
     if entry.substate != Some("awaiting-verdict") {
         return Err(ApiError::Conflict(format!(
@@ -1171,17 +1287,46 @@ fn post_verdict(
             entry.substate
         )));
     }
-    match entry.verdict_tx.as_ref() {
-        Some(tx) => {
-            // send_replace overwrites the current value and wakes any
-            // waiter.  Returns the previous value; we don't care.
-            let _ = tx.send_replace(verdict);
-            Ok(())
-        }
-        None => Err(ApiError::Conflict(
+    if entry.verdict_tx.is_none() {
+        return Err(ApiError::Conflict(
             "x-ota verdict: no orchestrator channel on entry".into(),
-        )),
+        ));
     }
+    Ok(entry.registration_token)
+}
+
+/// Revalidate the same incarnation and atomically take its sender before
+/// posting. Taking the sender is the verdict claim: an opposing request can
+/// no longer also return 202.
+fn claim_verdict(
+    state: &AppState,
+    component_id: &str,
+    update_id: &str,
+    registration_token: Uuid,
+    verdict: crate::state::Verdict,
+) -> Result<(), ApiError> {
+    let mut store = state.updates.0.lock();
+    let entry = store
+        .get_mut(&UpdateKey::new(component_id, update_id))
+        .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+    if entry.registration_token != registration_token {
+        return Err(ApiError::Conflict(format!(
+            "update {update_id} was replaced while validating the verdict"
+        )));
+    }
+    if entry.substate != Some("awaiting-verdict") {
+        return Err(ApiError::Conflict(format!(
+            "x-ota verdict requires execute/awaiting-verdict, got {}/{} substate={:?}",
+            entry.phase.as_str(),
+            entry.status.as_str(),
+            entry.substate
+        )));
+    }
+    let tx = entry.verdict_tx.take().ok_or_else(|| {
+        ApiError::Conflict("x-ota verdict has already been claimed for this update".into())
+    })?;
+    let _ = tx.send_replace(verdict);
+    Ok(())
 }
 
 /// `GET /vehicle/v1/components/{component_id}/updates/{update_id}/status`
@@ -1193,8 +1338,7 @@ pub async fn get_status(
     let _ = state.get_backend(&component_id)?;
     let store = state.updates.0.lock();
     let entry = store
-        .get(&update_id)
-        .filter(|e| e.component_id == component_id)
+        .get(&UpdateKey::new(&component_id, &update_id))
         .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
     Ok(Json(UpdateStatusBody {
         phase: entry.phase.as_str(),
@@ -1218,8 +1362,7 @@ pub async fn list_bulk_data(
 ) -> Result<Json<BulkDataListResponse>, ApiError> {
     let store = state.updates.0.lock();
     let entry = store
-        .get(&update_id)
-        .filter(|e| e.component_id == component_id)
+        .get(&UpdateKey::new(&component_id, &update_id))
         .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
     let items: Vec<PartStatusEntry> = entry
         .parts
@@ -1237,12 +1380,17 @@ pub async fn put_bulk_data_part(
     body: Body,
 ) -> Result<impl IntoResponse, ApiError> {
     let backend = state.get_backend(&component_id)?;
-    {
-        let store = state.updates.0.lock();
+    let key = UpdateKey::new(&component_id, &update_id);
+    let registration_token = {
+        let mut store = state.updates.0.lock();
         let entry = store
-            .get(&update_id)
-            .filter(|e| e.component_id == component_id)
+            .get_mut(&key)
             .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+        if entry.state == UpdateState::Registered && entry.status == Status::InProgress {
+            return Err(ApiError::UpdateInProgress(format!(
+                "update {update_id} is still being registered"
+            )));
+        }
         if !matches!(
             entry.state,
             UpdateState::Registered | UpdateState::Uploading
@@ -1253,7 +1401,9 @@ pub async fn put_bulk_data_part(
                 entry.state.as_str()
             )));
         }
-    }
+        entry.uploads_in_progress += 1;
+        entry.registration_token
+    };
 
     let content_length = headers
         .get(header::CONTENT_LENGTH)
@@ -1274,9 +1424,18 @@ pub async fn put_bulk_data_part(
         Ok(chunk)
     });
     let pkg_stream: PackageStream = Box::pin(data_stream);
-    let file_id = backend
+    let file_id = match backend
         .receive_package_stream(pkg_stream, content_length)
-        .await?;
+        .await
+    {
+        Ok(file_id) => file_id,
+        Err(error) => {
+            let _ = mutate_entry(&state, &key, registration_token, |entry| {
+                entry.uploads_in_progress = entry.uploads_in_progress.saturating_sub(1);
+            });
+            return Err(error.into());
+        }
+    };
 
     let final_size = size_counter.load(Ordering::Relaxed);
     let digest = hasher
@@ -1286,18 +1445,38 @@ pub async fn put_bulk_data_part(
         .finalize();
     let sha256 = hex::encode(digest);
 
-    {
+    let stored = {
         let mut store = state.updates.0.lock();
-        if let Some(entry) = store.get_mut(&update_id) {
-            entry.parts.retain(|p| p.part_id != part_id);
-            entry.parts.push(UpdatePart {
-                part_id: part_id.clone(),
-                size: final_size,
-                sha256: sha256.clone(),
-                file_id,
-            });
-            entry.state = UpdateState::Uploading;
+        match store.get_mut(&key) {
+            Some(entry) if entry.registration_token == registration_token => {
+                entry.uploads_in_progress = entry.uploads_in_progress.saturating_sub(1);
+                if entry.phase != Phase::Prepare
+                    || entry.status != Status::Pending
+                    || !matches!(
+                        entry.state,
+                        UpdateState::Registered | UpdateState::Uploading
+                    )
+                {
+                    false
+                } else {
+                    entry.parts.retain(|p| p.part_id != part_id);
+                    entry.parts.push(UpdatePart {
+                        part_id: part_id.clone(),
+                        size: final_size,
+                        sha256: sha256.clone(),
+                        file_id,
+                    });
+                    entry.state = UpdateState::Uploading;
+                    true
+                }
+            }
+            _ => false,
         }
+    };
+    if !stored {
+        return Err(ApiError::Conflict(format!(
+            "update {update_id} was deleted or replaced while part {part_id:?} was uploading"
+        )));
     }
 
     let href = format!(
@@ -1324,6 +1503,16 @@ pub async fn put_bulk_data_part(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn remove_registration(state: &AppState, key: &UpdateKey, registration_token: Uuid) {
+    let mut store = state.updates.0.lock();
+    if store
+        .get(key)
+        .is_some_and(|entry| entry.registration_token == registration_token)
+    {
+        store.remove(key);
+    }
+}
 
 fn part_status_entry(component_id: &str, update_id: &str, p: &UpdatePart) -> PartStatusEntry {
     PartStatusEntry {

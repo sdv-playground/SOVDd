@@ -78,6 +78,30 @@ pub struct LogConfigStore(pub Arc<Mutex<HashMap<String, serde_json::Value>>>);
 #[derive(Clone, Debug, Default)]
 pub struct ClearDataStatusStore(pub Arc<Mutex<HashMap<String, String>>>);
 
+/// Identity for an update, scoped to its component.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct UpdateKey {
+    component_id: String,
+    update_id: String,
+}
+
+impl UpdateKey {
+    pub fn new(component_id: &str, update_id: &str) -> Self {
+        Self {
+            component_id: component_id.to_string(),
+            update_id: update_id.to_string(),
+        }
+    }
+
+    pub fn component_id(&self) -> &str {
+        &self.component_id
+    }
+
+    pub fn update_id(&self) -> &str {
+        &self.update_id
+    }
+}
+
 /// Per-update tracking for the spec-compliant `/updates` collection.
 ///
 /// F.D2 adds a thin wire alias over the existing flash backend; the
@@ -94,11 +118,16 @@ pub struct ClearDataStatusStore(pub Arc<Mutex<HashMap<String, String>>>);
 /// Held in memory only — survives no restart.  Entries roll off when
 /// the update reaches a terminal state.
 #[derive(Clone, Debug, Default)]
-pub struct UpdatesStore(pub Arc<Mutex<HashMap<String, UpdatesEntry>>>);
+pub struct UpdatesStore(pub Arc<Mutex<HashMap<UpdateKey, UpdatesEntry>>>);
 
 #[derive(Clone, Debug, Default)]
 pub struct UpdatesEntry {
     pub component_id: String,
+    /// Identifies this incarnation of a component/update entry across
+    /// asynchronous registration and upload work.
+    pub registration_token: uuid::Uuid,
+    /// Number of bulk-data uploads currently awaiting backend completion.
+    pub uploads_in_progress: usize,
     pub parts: Vec<UpdatePart>,
     pub manifest: Option<serde_json::Value>,
     /// Legacy `state` field for the /executions wire (kept for the
