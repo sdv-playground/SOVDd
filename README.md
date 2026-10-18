@@ -145,4 +145,4 @@ cargo test -p sovd-tests -- --test-threads=1
 
 ## License
 
-Apache-2.0
+Apache-2.0. See [LICENSE](LICENSE).

@@ -3,7 +3,7 @@ name = "sovd-conv"
 version = "0.1.0"
 edition = "2021"
 description = "DID conversion library for automotive diagnostics"
-license = "MIT"
+license.workspace = true
 
 [dependencies]
 # sovd-core (foundation) for the shared §7.9 DataCategory type. sovd-core has

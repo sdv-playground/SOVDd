@@ -2,6 +2,7 @@
 name = "sovd-test-cli"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "External test runner over SOVD §7.15 scripts (verdict + log-window capture)"
 
 [[bin]]
