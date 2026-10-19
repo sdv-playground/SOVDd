@@ -451,6 +451,16 @@ no trial: `… → Activated → commit_flash() → Complete`.
   `DELETE` aborts via a stored `AbortHandle`. **Orchestrated mode** (`PUT execute?x-ota-control=orchestrated`)
   pauses at `substate=awaiting-verdict` on a `watch` channel until `x-ota-commit`/`x-ota-rollback`
   (or a watchdog fires; default 600 s). See the C-026 note in §1 for the vendor-verb status.
+- **x-update extension pack** (traton-one-os `sovd-schema-x-update-api`), served beside x-ota and
+  interchangeable with it: a registration with `x-update: {two_phase: true}` pauses a banked execute
+  like `?x-ota-control=orchestrated`; the status body adds `x-update: {state, progress}` next to the
+  x-ota fields; `x-update-commit`/`-rollback` (also on a staged one-phase update or an adopted
+  `pending-trial-<component>`), `-finish` and `-invalidate` work on any update; a node-level
+  `/vehicle/v1/updates` collection resolves the component from the id; the update detail echoes
+  `x-update: {target, two_phase}` and `GET …/bulk-data/manifest` reads the uploaded L2 back. An
+  x-update registration's manifest follows the x-update upload contract (octet-stream, ≤ 1 MiB,
+  identical retry, else 409) and its id is unique across the node; x-ota registrations keep their
+  per-component ids and lenient uploads.
 
 ---
 

@@ -200,7 +200,11 @@ pub fn route_capability(method: &Method, path: &str) -> Capability {
     let is_get = method == Method::GET;
     if path.starts_with("/admin/") {
         Capability::Admin
-    } else if path.contains("/x-ota-commit") || path.contains("/x-ota-rollback") {
+    } else if path.contains("/x-ota-commit")
+        || path.contains("/x-ota-rollback")
+        || path.contains("/x-update-commit")
+        || path.contains("/x-update-rollback")
+    {
         Capability::UpdateVerdict
     } else if path.contains("/operations/x-ota-commit-trials")
         || path.contains("/operations/x-ota-rollback-trials")

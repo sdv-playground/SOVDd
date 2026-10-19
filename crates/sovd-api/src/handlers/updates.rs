@@ -97,6 +97,20 @@ pub struct RegisterUpdateRequest {
     /// `preconditions` from it; a format-aware backend may parse more.
     #[serde(default)]
     pub manifest: Option<serde_json::Value>,
+    /// x-update registration options (`RegistrationOptions` in
+    /// traton-one-os `sovd-x-update.schema.json`). Present marks an x-update
+    /// registration; absent leaves the x-ota behaviour unchanged.
+    #[serde(rename = "x-update", default)]
+    pub x_update: Option<XUpdateRegistration>,
+}
+
+/// `x-update` member of the registration body.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct XUpdateRegistration {
+    /// Keep an activated update uncommitted until an explicit
+    /// `x-update-commit` / `x-update-rollback` (or the x-ota verbs).
+    pub two_phase: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,6 +151,18 @@ pub struct UpdateStatusBody {
     /// of defaulting every component to `Local`.
     #[serde(rename = "x-ota-reset-kind", skip_serializing_if = "Option::is_none")]
     pub reset_kind: Option<sovd_core::ResetKind>,
+    /// x-update status member (`Status` in `sovd-x-update.schema.json`): the
+    /// update's state in the x-update `State` vocabulary.
+    #[serde(rename = "x-update")]
+    pub x_update: XUpdateStatus,
+}
+
+/// `x-update` member of the status body.
+#[derive(Debug, Serialize)]
+pub struct XUpdateStatus {
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<u8>,
 }
 
 #[derive(Debug, Serialize)]
@@ -192,10 +218,33 @@ pub async fn register_update(
     Path(component_id): Path<String>,
     body: Option<Json<RegisterUpdateRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    register_inner(state, component_id, req, false).await
+}
+
+/// POST /vehicle/v1/updates — the x-update node-level registration: the
+/// body's `target` names the component, and the id is unique across the node.
+pub async fn register_node_update(
+    State(state): State<AppState>,
+    body: Option<Json<RegisterUpdateRequest>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let component_id = req
+        .target
+        .clone()
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| ApiError::BadRequest("POST /updates requires a target".into()))?;
+    register_inner(state, component_id, req, true).await
+}
+
+async fn register_inner(
+    state: AppState,
+    component_id: String,
+    req: RegisterUpdateRequest,
+    node_level: bool,
+) -> Result<(StatusCode, HeaderMap, Json<RegisterUpdateResponse>), ApiError> {
     // Verify the component exists before allocating an id.
     let backend = state.get_backend(&component_id)?;
-
-    let req = body.map(|Json(b)| b).unwrap_or_default();
 
     // F.D3 dispatcher target validation.  If the manifest carries an
     // explicit `target`, it MUST match the addressed component.  We
@@ -221,9 +270,17 @@ pub async fn register_update(
                     .into(),
             ));
         }
+        Some(id) if id.starts_with(PENDING_TRIAL_PREFIX) => {
+            return Err(ApiError::BadRequest(format!(
+                "{PENDING_TRIAL_PREFIX}* update ids are reserved for trials left by an \
+                 earlier session"
+            )));
+        }
         Some(id) if !id.is_empty() => id.to_string(),
         _ => Uuid::new_v4().to_string(),
     };
+    let x_update = req.x_update.is_some() || node_level;
+    let two_phase = req.x_update.as_ref().is_some_and(|x| x.two_phase);
     let manifest = req.manifest;
     let key = UpdateKey::new(&component_id, &update_id);
     let registration_token = Uuid::new_v4();
@@ -235,6 +292,18 @@ pub async fn register_update(
     // holding the same lock so a concurrent registration sees the reservation.
     let prior = {
         let mut store = state.updates.0.lock();
+        // x-update addresses updates node-wide (`/vehicle/v1/updates/{id}`), so
+        // an x-update id must not also name an update on another component.
+        if let Some((other, _)) = store.iter().find(|(k, e)| {
+            k.update_id() == update_id
+                && k.component_id() != component_id
+                && (x_update || e.x_update)
+        }) {
+            return Err(ApiError::Conflict(format!(
+                "update id {update_id:?} is already registered on component {:?}",
+                other.component_id()
+            )));
+        }
         let prior = if let Some(entry) = store.get(&key) {
             let terminal = matches!(
                 entry.state,
@@ -269,6 +338,11 @@ pub async fn register_update(
                 step: Some("registering".into()),
                 error: None,
                 substate: None,
+                x_update,
+                two_phase,
+                adopted: false,
+                finished: false,
+                manifest_bytes: None,
                 reset_kind: None,
                 transfer_id: None,
                 task_handle: None,
@@ -430,6 +504,7 @@ pub async fn list_updates(
     if !origin_lists_catalog(query.origin.as_deref())? {
         return Ok(Json(UpdatesListResponse { items: Vec::new() }));
     }
+    adopt_pending_trial(&state, &component_id).await?;
 
     let store = state.updates.0.lock();
     let mut items: Vec<String> = store
@@ -442,12 +517,15 @@ pub async fn list_updates(
 }
 
 /// GET /vehicle/v1/components/{component_id}/updates/{update_id} — §7.18.3
-/// Table 261 detail body, resolved via the backend's package describer.
+/// Table 261 detail body, resolved via the backend's package describer, plus
+/// the registration under `x-update: {target, two_phase}` so a reconnecting
+/// x-update orchestrator can verify it addresses the session it registered.
 pub async fn get_update(
     State(state): State<AppState>,
     Path((component_id, update_id)): Path<(String, String)>,
-) -> Result<Json<UpdatePackageDescriptor>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let backend = state.get_backend(&component_id)?;
+    ensure_adopted(&state, &component_id, &update_id).await?;
 
     // §7.18.1.5: `autonomous` is a read-only indirection to a concrete id on
     // servers that self-select. SOVDd performs no self-governed selection, so
@@ -462,12 +540,12 @@ pub async fn get_update(
     // Snapshot what the describer needs, then DROP the lock before the
     // (async, possibly I/O-bound) describe call — never hold a parking_lot
     // guard across `.await`.
-    let (register_body, parts): (Option<serde_json::Value>, Vec<UpdatePart>) = {
+    let (register_body, parts, two_phase): (Option<serde_json::Value>, Vec<UpdatePart>, bool) = {
         let store = state.updates.0.lock();
         let entry = store
             .get(&UpdateKey::new(&component_id, &update_id))
             .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
-        (entry.manifest.clone(), entry.parts.clone())
+        (entry.manifest.clone(), entry.parts.clone(), entry.two_phase)
     };
 
     let part_refs: Vec<UpdatePartRef<'_>> = parts
@@ -485,8 +563,16 @@ pub async fn get_update(
         register_body: register_body.as_ref(),
         parts: &part_refs,
     };
-    let descriptor = backend.describe_update_package(&ctx).await?;
-    Ok(Json(descriptor))
+    let descriptor: UpdatePackageDescriptor = backend.describe_update_package(&ctx).await?;
+    let mut detail = serde_json::to_value(descriptor)
+        .map_err(|e| ApiError::Internal(format!("update descriptor: {e}")))?;
+    if let Some(object) = detail.as_object_mut() {
+        object.insert(
+            "x-update".into(),
+            serde_json::json!({ "target": component_id, "two_phase": two_phase }),
+        );
+    }
+    Ok(Json(detail))
 }
 
 /// DELETE /vehicle/v1/components/{component_id}/updates/{update_id}
@@ -783,11 +869,12 @@ async fn put_execute_inner(
     // Orchestrated control mode is only meaningful for banked
     // components — singleshot has no trial phase to pause at.  We
     // accept the query param on singleshot but silently treat it as
-    // standard mode so callers can use one verb across both shapes.
-    let orchestrated = query.is_orchestrated() && !is_singleshot;
+    // standard mode so callers can use one verb across both shapes.  An
+    // x-update two-phase registration asks for the same pause.
+    let asked_orchestrated = query.is_orchestrated();
     let key = UpdateKey::new(&component_id, &update_id);
 
-    let registration_token = {
+    let (registration_token, orchestrated) = {
         let mut store = state.updates.0.lock();
         let entry = store
             .get_mut(&key)
@@ -818,7 +905,10 @@ async fn put_execute_inner(
         entry.progress = Some(0);
         entry.step = Some("starting execute".into());
         entry.error = None;
-        entry.registration_token
+        (
+            entry.registration_token,
+            (asked_orchestrated || entry.two_phase) && !is_singleshot,
+        )
     };
 
     let task_state = state.clone();
@@ -1263,6 +1353,12 @@ pub async fn put_x_ota_force_rollback(
 ) -> Result<StatusCode, ApiError> {
     let backend = state.get_backend(&component_id)?;
     backend.rollback_flash().await?;
+    // The trial is gone, so is the update that stood for it.
+    state
+        .updates
+        .0
+        .lock()
+        .retain(|key, entry| !(entry.adopted && key.component_id() == component_id));
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1329,30 +1425,399 @@ fn claim_verdict(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// x-update extension pack (traton-one-os `sovd-schema-x-update-api`).  Its
+// verbs work on any update, alongside the x-ota ones.
+// ---------------------------------------------------------------------------
+
+/// How an x-update verdict verb reaches the update: by waking the execute task
+/// paused at `awaiting-verdict`, or directly on the backend when no task is
+/// paused (a one-phase banked update staged for its reset, or a trial an
+/// earlier session left behind).
+enum XUpdateVerdict {
+    Paused(Uuid),
+    Direct(Uuid),
+}
+
+fn x_update_verdict_route(
+    state: &AppState,
+    component_id: &str,
+    update_id: &str,
+) -> Result<XUpdateVerdict, ApiError> {
+    let _ = state.get_backend(component_id)?;
+    let store = state.updates.0.lock();
+    let entry = store
+        .get(&UpdateKey::new(component_id, update_id))
+        .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+    let staged = entry.phase == Phase::Execute
+        && entry.status == Status::Completed
+        && entry.state == UpdateState::Finalized;
+    if entry.substate == Some("awaiting-verdict") && entry.verdict_tx.is_some() {
+        Ok(XUpdateVerdict::Paused(entry.registration_token))
+    } else if staged || (entry.adopted && entry.substate == Some("awaiting-verdict")) {
+        Ok(XUpdateVerdict::Direct(entry.registration_token))
+    } else {
+        Err(ApiError::Conflict(format!(
+            "verdict requires ACTIVATED_UNCOMMITTED, got {}",
+            x_update_state(entry)
+        )))
+    }
+}
+
+/// `PUT …/updates/{update_id}/x-update-commit` — commit an update in
+/// `ACTIVATED_UNCOMMITTED` once the orchestrator has reset the component and
+/// judged the trial. `202 + Location: .../status`.
+pub async fn put_x_update_commit(
+    State(state): State<AppState>,
+    Path((component_id, update_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    ensure_adopted(&state, &component_id, &update_id).await?;
+    let route = x_update_verdict_route(&state, &component_id, &update_id)?;
+    let backend = state.get_backend(&component_id)?;
+    let activation = backend.get_activation_state().await?;
+    if activation.state != sovd_core::FlashState::Activated {
+        return Err(ApiError::Conflict(format!(
+            "x-update-commit requires activation state Activated, got {:?}",
+            activation.state
+        )));
+    }
+    match route {
+        XUpdateVerdict::Paused(token) => claim_verdict(
+            &state,
+            &component_id,
+            &update_id,
+            token,
+            crate::state::Verdict::Commit,
+        )?,
+        XUpdateVerdict::Direct(token) => {
+            settle_directly(
+                &state,
+                &component_id,
+                &update_id,
+                token,
+                crate::state::Verdict::Commit,
+            )
+            .await
+        }
+    }
+    let (status, headers) = accepted_with_status_location(&component_id, &update_id)?;
+    Ok((status, headers))
+}
+
+/// `PUT …/updates/{update_id}/x-update-rollback` — roll back an update in
+/// `ACTIVATED_UNCOMMITTED`.
+pub async fn put_x_update_rollback(
+    State(state): State<AppState>,
+    Path((component_id, update_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    ensure_adopted(&state, &component_id, &update_id).await?;
+    match x_update_verdict_route(&state, &component_id, &update_id)? {
+        XUpdateVerdict::Paused(token) => claim_verdict(
+            &state,
+            &component_id,
+            &update_id,
+            token,
+            crate::state::Verdict::Rollback,
+        )?,
+        XUpdateVerdict::Direct(token) => {
+            settle_directly(
+                &state,
+                &component_id,
+                &update_id,
+                token,
+                crate::state::Verdict::Rollback,
+            )
+            .await
+        }
+    }
+    let (status, headers) = accepted_with_status_location(&component_id, &update_id)?;
+    Ok((status, headers))
+}
+
+/// `PUT …/updates/{update_id}/x-update-finish` — clean up a committed,
+/// rolled-back or failed update; it then reports `IDLE` and only awaits its
+/// `DELETE`. `409` before it is terminal.
+pub async fn put_x_update_finish(
+    State(state): State<AppState>,
+    Path((component_id, update_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let _ = state.get_backend(&component_id)?;
+    let mut store = state.updates.0.lock();
+    let entry = store
+        .get_mut(&UpdateKey::new(&component_id, &update_id))
+        .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+    let terminal = matches!(
+        entry.state,
+        UpdateState::Committed | UpdateState::RolledBack
+    ) || entry.status == Status::Failed;
+    if !terminal || entry.status == Status::InProgress {
+        return Err(ApiError::Conflict(format!(
+            "x-update-finish requires a committed, rolled-back or failed update, got {}",
+            x_update_state(entry)
+        )));
+    }
+    entry.finished = true;
+    entry.step = Some("finished".into());
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT …/updates/{update_id}/x-update-invalidate` — discard a prepared
+/// (`VALIDATED`) update's preparation; it returns to `READY` and can be
+/// prepared again. `409` in any other state.
+pub async fn put_x_update_invalidate(
+    State(state): State<AppState>,
+    Path((component_id, update_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let backend = state.get_backend(&component_id)?;
+    let key = UpdateKey::new(&component_id, &update_id);
+    let registration_token = {
+        let store = state.updates.0.lock();
+        let entry = store
+            .get(&key)
+            .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+        if !(entry.phase == Phase::Prepare && entry.status == Status::Completed) {
+            return Err(ApiError::Conflict(format!(
+                "x-update-invalidate requires a VALIDATED update, got {}",
+                x_update_state(entry)
+            )));
+        }
+        entry.registration_token
+    };
+    match backend.invalidate().await {
+        Ok(()) | Err(sovd_core::BackendError::NotSupported(_)) => {}
+        Err(e) => return Err(e.into()),
+    }
+    mutate_entry(&state, &key, registration_token, |entry| {
+        entry.status = Status::Pending;
+        entry.progress = None;
+        entry.step = None;
+        entry.state = UpdateState::Uploading;
+    })
+    .map_err(|e| ApiError::Conflict(e.into()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Commit or roll back on the backend for an update no task is paused on,
+/// recording the outcome on the entry like the paused task would.
+async fn settle_directly(
+    state: &AppState,
+    component_id: &str,
+    update_id: &str,
+    registration_token: Uuid,
+    verdict: crate::state::Verdict,
+) {
+    let key = UpdateKey::new(component_id, update_id);
+    let commit = verdict == crate::state::Verdict::Commit;
+    let _ = mutate_entry(state, &key, registration_token, |entry| {
+        entry.status = Status::InProgress;
+        entry.substate = Some(if commit { "committing" } else { "rolling-back" });
+        entry.step = Some(if commit { "committing" } else { "rolling back" }.into());
+    });
+    let result = match state.get_backend(component_id) {
+        Ok(backend) if commit => backend.commit_flash().await,
+        Ok(backend) => backend.rollback_flash().await,
+        Err(e) => Err(sovd_core::BackendError::Internal(format!("{e:?}"))),
+    };
+    let _ = mutate_entry(state, &key, registration_token, |entry| {
+        entry.substate = None;
+        match (commit, result) {
+            (true, Ok(())) => {
+                entry.status = Status::Completed;
+                entry.progress = Some(100);
+                entry.step = Some("completed".into());
+                entry.state = UpdateState::Committed;
+            }
+            (false, Ok(())) => {
+                entry.status = Status::Failed;
+                entry.state = UpdateState::RolledBack;
+                entry.error = Some(crate::state::UpdateError {
+                    error_code: "x-ota-verdict-rollback".into(),
+                    message: "rolled back by orchestrator verdict".into(),
+                    parameters: None,
+                });
+            }
+            (_, Err(e)) => {
+                entry.status = Status::Failed;
+                entry.step = Some(
+                    if commit {
+                        "commit_flash failed"
+                    } else {
+                        "rollback_flash failed"
+                    }
+                    .into(),
+                );
+                entry.error = Some(crate::state::UpdateError {
+                    error_code: "update-execution-failed".into(),
+                    message: format!("{}: {e}", if commit { "commit" } else { "rollback" }),
+                    parameters: None,
+                });
+            }
+        }
+    });
+}
+
+/// The update's state in the x-update `State` vocabulary, derived from the
+/// ISO phase/status and the execute substate.
+fn x_update_state(entry: &UpdatesEntry) -> &'static str {
+    if entry.finished {
+        return "IDLE";
+    }
+    match entry.substate {
+        Some("awaiting-verdict") => return "ACTIVATED_UNCOMMITTED",
+        Some("committing") => return "COMMITTING",
+        Some("rolling-back") => return "ROLLING_BACK",
+        _ => {}
+    }
+    match entry.state {
+        UpdateState::Committed => return "COMMITTED",
+        UpdateState::RolledBack => return "ROLLED_BACK",
+        _ => {}
+    }
+    match (entry.phase, entry.status) {
+        (_, Status::Failed) => "FATAL_FAILURE",
+        (Phase::Prepare, Status::Pending) => "READY",
+        (Phase::Prepare, Status::InProgress) => "PROCESSING",
+        (Phase::Prepare, Status::Completed) => "VALIDATED",
+        (Phase::Execute, Status::Pending | Status::InProgress) => "ACTIVATING",
+        // One-phase banked: activated, staged for the orchestrator's reset.
+        // `get_status` reports it ACTIVATING until the backend runs the new bank.
+        (Phase::Execute, Status::Completed) => "ACTIVATED_UNCOMMITTED",
+    }
+}
+
+/// Reserved id prefix of a trial an earlier session left on the backend.
+pub(crate) const PENDING_TRIAL_PREFIX: &str = "pending-trial-";
+
+/// Largest manifest the x-update manifest-upload contract accepts.
+const MANIFEST_LIMIT: usize = 1024 * 1024;
+
+/// Surface a trial an earlier session left on the backend (installed but not
+/// committed, with no live update session owning it) as the update
+/// `pending-trial-<component>` in `ACTIVATED_UNCOMMITTED`, so an x-update
+/// orchestrator can find it in `GET /updates` and settle it with
+/// `x-update-commit` / `x-update-rollback` (an x-ota one keeps using
+/// `x-ota-force-rollback`).
+async fn adopt_pending_trial(state: &AppState, component_id: &str) -> Result<(), ApiError> {
+    let backend = state.get_backend(component_id)?.clone();
+    // A live session (or an earlier adoption) already owns the backend's state.
+    let owned = |store: &std::collections::HashMap<UpdateKey, UpdatesEntry>| {
+        store.iter().any(|(key, entry)| {
+            key.component_id() == component_id
+                && (entry.adopted
+                    || entry.status == Status::InProgress
+                    || entry.substate.is_some()
+                    || (entry.phase == Phase::Execute && entry.state == UpdateState::Finalized))
+        })
+    };
+    if owned(&state.updates.0.lock()) {
+        return Ok(());
+    }
+    let Ok(activation) = backend.get_activation_state().await else {
+        return Ok(());
+    };
+    use sovd_core::FlashState;
+    if !activation.supports_rollback
+        || !matches!(
+            activation.state,
+            FlashState::AwaitingReboot | FlashState::Verifying | FlashState::Activated
+        )
+    {
+        return Ok(());
+    }
+    let mut store = state.updates.0.lock();
+    if owned(&store) {
+        return Ok(());
+    }
+    store.insert(
+        UpdateKey::new(
+            component_id,
+            &format!("{PENDING_TRIAL_PREFIX}{component_id}"),
+        ),
+        UpdatesEntry {
+            component_id: component_id.to_string(),
+            registration_token: Uuid::new_v4(),
+            uploads_in_progress: 0,
+            parts: Vec::new(),
+            manifest: None,
+            state: UpdateState::Finalized,
+            phase: Phase::Execute,
+            status: Status::InProgress,
+            progress: None,
+            step: Some("trial left by an earlier session".into()),
+            error: None,
+            substate: Some("awaiting-verdict"),
+            x_update: true,
+            two_phase: true,
+            adopted: true,
+            finished: false,
+            manifest_bytes: None,
+            reset_kind: Some(activation.reset_kind),
+            transfer_id: None,
+            task_handle: None,
+            verdict_tx: None,
+        },
+    );
+    Ok(())
+}
+
+/// Adopt the pending trial an id like `pending-trial-<component>` names.
+async fn ensure_adopted(
+    state: &AppState,
+    component_id: &str,
+    update_id: &str,
+) -> Result<(), ApiError> {
+    if update_id.strip_prefix(PENDING_TRIAL_PREFIX) == Some(component_id) {
+        adopt_pending_trial(state, component_id).await?;
+    }
+    Ok(())
+}
+
 /// `GET /vehicle/v1/components/{component_id}/updates/{update_id}/status`
 /// — ISO 17978-3 §7.18.7.  Returns Table 270's `UpdateStatusBody`.
 pub async fn get_status(
     State(state): State<AppState>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<Json<UpdateStatusBody>, ApiError> {
-    let _ = state.get_backend(&component_id)?;
-    let store = state.updates.0.lock();
-    let entry = store
-        .get(&UpdateKey::new(&component_id, &update_id))
-        .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
-    Ok(Json(UpdateStatusBody {
-        phase: entry.phase.as_str(),
-        status: entry.status.as_str(),
-        progress: entry.progress,
-        step: entry.step.clone(),
-        error: if entry.status == Status::Failed {
-            entry.error.clone()
-        } else {
-            None
-        },
-        substate: entry.substate,
-        reset_kind: entry.reset_kind,
-    }))
+    let backend = state.get_backend(&component_id)?.clone();
+    ensure_adopted(&state, &component_id, &update_id).await?;
+    let mut body = {
+        let store = state.updates.0.lock();
+        let entry = store
+            .get(&UpdateKey::new(&component_id, &update_id))
+            .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+        UpdateStatusBody {
+            phase: entry.phase.as_str(),
+            status: entry.status.as_str(),
+            progress: entry.progress,
+            step: entry.step.clone(),
+            error: if entry.status == Status::Failed {
+                entry.error.clone()
+            } else {
+                None
+            },
+            substate: entry.substate,
+            reset_kind: entry.reset_kind,
+            x_update: XUpdateStatus {
+                state: x_update_state(entry),
+                progress: entry.progress,
+            },
+        }
+    };
+    // x-update's ACTIVATED_UNCOMMITTED means the component RUNS the new
+    // software. A banked component only gets there through the reset its
+    // orchestrator issues (the executor never resets on its own), so until the
+    // backend runs the new bank — AwaitingReboot, then Verifying — the update
+    // is still ACTIVATING. Read outside the store lock: never `.await` holding it.
+    if body.x_update.state == "ACTIVATED_UNCOMMITTED" {
+        let running = matches!(
+            backend.get_activation_state().await.map(|a| a.state),
+            Ok(sovd_core::FlashState::Activated)
+        );
+        if !running {
+            body.x_update.state = "ACTIVATING";
+        }
+    }
+    Ok(Json(body))
 }
 
 /// GET /vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data
@@ -1372,6 +1837,40 @@ pub async fn list_bulk_data(
     Ok(Json(BulkDataListResponse { items }))
 }
 
+/// GET /vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data/{part_id}
+///
+/// The x-update manifest readback: `manifest` returns the exact uploaded L2
+/// (`application/octet-stream`), `404` before it is uploaded. Payload parts
+/// are streamed through to the backend and cannot be read back (`404`).
+pub async fn get_bulk_data_part(
+    State(state): State<AppState>,
+    Path((component_id, update_id, part_id)): Path<(String, String, String)>,
+) -> Result<axum::response::Response, ApiError> {
+    let _ = state.get_backend(&component_id)?;
+    let store = state.updates.0.lock();
+    let entry = store
+        .get(&UpdateKey::new(&component_id, &update_id))
+        .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+    if part_id != "manifest" {
+        return Err(ApiError::NotFound(format!(
+            "part {part_id:?} cannot be read back; only the manifest is kept"
+        )));
+    }
+    let bytes = entry
+        .manifest_bytes
+        .clone()
+        .ok_or_else(|| ApiError::NotFound(format!("update {update_id} has no manifest")))?;
+    Ok((
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        )],
+        bytes,
+    )
+        .into_response())
+}
+
 /// PUT /vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data/{part_id}
 pub async fn put_bulk_data_part(
     State(state): State<AppState>,
@@ -1381,6 +1880,42 @@ pub async fn put_bulk_data_part(
 ) -> Result<impl IntoResponse, ApiError> {
     let backend = state.get_backend(&component_id)?;
     let key = UpdateKey::new(&component_id, &update_id);
+    // An x-update registration's manifest follows the x-update manifest-upload
+    // contract: application/octet-stream, 1 byte to 1 MiB, an identical retry
+    // is accepted and a different manifest refused. It is read whole (it is
+    // small) so a retry can be compared before anything reaches the backend.
+    let x_update_manifest = part_id == "manifest"
+        && state
+            .updates
+            .0
+            .lock()
+            .get(&key)
+            .is_some_and(|entry| entry.x_update);
+    let (body, manifest) = if x_update_manifest {
+        let content_type = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(';').next())
+            .map(str::trim);
+        if content_type != Some("application/octet-stream") {
+            return Err(ApiError::WrongContentType(format!(
+                "the manifest must be application/octet-stream, got {content_type:?}"
+            )));
+        }
+        let bytes = axum::body::to_bytes(body, MANIFEST_LIMIT)
+            .await
+            .map_err(|_| {
+                ApiError::PayloadTooLarge(format!(
+                    "the manifest exceeds {MANIFEST_LIMIT} bytes or could not be read"
+                ))
+            })?;
+        if bytes.is_empty() {
+            return Err(ApiError::BadRequest("the manifest upload is empty".into()));
+        }
+        (Body::from(bytes.clone()), Some(bytes))
+    } else {
+        (body, None)
+    };
     let registration_token = {
         let mut store = state.updates.0.lock();
         let entry = store
@@ -1401,6 +1936,38 @@ pub async fn put_bulk_data_part(
                 entry.state.as_str()
             )));
         }
+        if let Some(new) = &manifest {
+            if entry.phase != Phase::Prepare || entry.status == Status::Completed {
+                return Err(ApiError::Conflict(format!(
+                    "update {update_id} is no longer a pending push session ({})",
+                    x_update_state(entry)
+                )));
+            }
+            if let Some(stored) = &entry.manifest_bytes {
+                if new.as_ref() != stored.as_slice() {
+                    return Err(ApiError::Conflict(format!(
+                        "update {update_id} already has a different manifest"
+                    )));
+                }
+                if let Some(part) = entry.parts.iter().find(|p| p.part_id == "manifest") {
+                    // Identical retry: answer as the first upload did.
+                    let resp = part_status_entry(&component_id, &update_id, part);
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        header::ETAG,
+                        HeaderValue::from_str(&format!("\"{}\"", resp.sha256))
+                            .map_err(|e| ApiError::Internal(format!("bad ETag header: {e}")))?,
+                    );
+                    let body = PartUploadResponse {
+                        part_id: resp.part_id,
+                        size: resp.size,
+                        sha256: resp.sha256,
+                        href: resp.href,
+                    };
+                    return Ok((StatusCode::CREATED, headers, Json(body)));
+                }
+            }
+        }
         entry.uploads_in_progress += 1;
         entry.registration_token
     };
@@ -1414,12 +1981,22 @@ pub async fn put_bulk_data_part(
     let size_counter = Arc::new(AtomicU64::new(0));
     let hasher_clone = hasher.clone();
     let size_clone = size_counter.clone();
+    // Any manifest is kept as uploaded for the x-update readback; payloads are
+    // only streamed through.
+    let manifest_copy =
+        (part_id == "manifest" && manifest.is_none()).then(|| Arc::new(Mutex::new(Vec::new())));
+    let manifest_clone = manifest_copy.clone();
     let data_stream = body.into_data_stream().map(move |chunk_res| {
         let chunk =
             chunk_res.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         size_clone.fetch_add(chunk.len() as u64, Ordering::Relaxed);
         if let Ok(mut h) = hasher_clone.lock() {
             h.update(&chunk);
+        }
+        if let Some(copy) = &manifest_clone {
+            if let Ok(mut bytes) = copy.lock() {
+                bytes.extend_from_slice(&chunk);
+            }
         }
         Ok(chunk)
     });
@@ -1459,6 +2036,11 @@ pub async fn put_bulk_data_part(
                 {
                     false
                 } else {
+                    if let Some(bytes) = &manifest {
+                        entry.manifest_bytes = Some(bytes.to_vec());
+                    } else if let Some(copy) = &manifest_copy {
+                        entry.manifest_bytes = copy.lock().ok().map(|bytes| bytes.clone());
+                    }
                     entry.parts.retain(|p| p.part_id != part_id);
                     entry.parts.push(UpdatePart {
                         part_id: part_id.clone(),
@@ -1498,6 +2080,124 @@ pub async fn put_bulk_data_part(
         href,
     };
     Ok((StatusCode::CREATED, response_headers, Json(resp)))
+}
+
+// ---------------------------------------------------------------------------
+// x-update node-level collection: `/vehicle/v1/updates/...`. Each route
+// resolves the component from the id and delegates to the component-scoped
+// handler; an id registered on several components (x-ota only) is ambiguous.
+// ---------------------------------------------------------------------------
+
+/// The component an update id is registered on; a `pending-trial-<component>`
+/// id is adopted first.
+async fn component_of(state: &AppState, update_id: &str) -> Result<String, ApiError> {
+    if let Some(component_id) = update_id.strip_prefix(PENDING_TRIAL_PREFIX) {
+        if state.get_backend(component_id).is_ok() {
+            adopt_pending_trial(state, component_id).await?;
+        }
+    }
+    let store = state.updates.0.lock();
+    let mut owners = store
+        .keys()
+        .filter(|key| key.update_id() == update_id)
+        .map(|key| key.component_id().to_string());
+    let owner = owners
+        .next()
+        .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+    if owners.next().is_some() {
+        return Err(ApiError::Conflict(format!(
+            "update id {update_id:?} is registered on several components; \
+             address it under /vehicle/v1/components/{{id}}/updates"
+        )));
+    }
+    Ok(owner)
+}
+
+/// GET /vehicle/v1/updates — every component's updates (Table 257).
+pub async fn list_node_updates(
+    State(state): State<AppState>,
+    Query(query): Query<ListUpdatesQuery>,
+) -> Result<Json<UpdatesListResponse>, ApiError> {
+    if !origin_lists_catalog(query.origin.as_deref())? {
+        return Ok(Json(UpdatesListResponse { items: Vec::new() }));
+    }
+    let components: Vec<String> = state.component_ids().into_iter().cloned().collect();
+    for component_id in &components {
+        adopt_pending_trial(&state, component_id).await?;
+    }
+    let mut items: Vec<String> = state
+        .updates
+        .0
+        .lock()
+        .keys()
+        .map(|key| key.update_id().to_string())
+        .collect();
+    items.sort();
+    items.dedup();
+    Ok(Json(UpdatesListResponse { items }))
+}
+
+macro_rules! node_route {
+    ($name:ident => $inner:ident) => {
+        pub async fn $name(
+            State(state): State<AppState>,
+            Path(update_id): Path<String>,
+        ) -> Result<axum::response::Response, ApiError> {
+            let component_id = component_of(&state, &update_id).await?;
+            $inner(State(state), Path((component_id, update_id)))
+                .await
+                .map(IntoResponse::into_response)
+        }
+    };
+}
+
+node_route!(get_node_update => get_update);
+node_route!(delete_node_update => delete_update);
+node_route!(list_node_bulk_data => list_bulk_data);
+node_route!(put_node_prepare => put_prepare);
+node_route!(get_node_status => get_status);
+node_route!(put_node_x_update_commit => put_x_update_commit);
+node_route!(put_node_x_update_rollback => put_x_update_rollback);
+node_route!(put_node_x_update_finish => put_x_update_finish);
+node_route!(put_node_x_update_invalidate => put_x_update_invalidate);
+
+/// PUT /vehicle/v1/updates/{update_id}/execute
+pub async fn put_node_execute(
+    State(state): State<AppState>,
+    Path(update_id): Path<String>,
+    query: Query<ExecuteQuery>,
+) -> Result<axum::response::Response, ApiError> {
+    let component_id = component_of(&state, &update_id).await?;
+    put_execute(State(state), Path((component_id, update_id)), query)
+        .await
+        .map(IntoResponse::into_response)
+}
+
+/// GET /vehicle/v1/updates/{update_id}/bulk-data/{part_id}
+pub async fn get_node_bulk_data_part(
+    State(state): State<AppState>,
+    Path((update_id, part_id)): Path<(String, String)>,
+) -> Result<axum::response::Response, ApiError> {
+    let component_id = component_of(&state, &update_id).await?;
+    get_bulk_data_part(State(state), Path((component_id, update_id, part_id))).await
+}
+
+/// PUT /vehicle/v1/updates/{update_id}/bulk-data/{part_id}
+pub async fn put_node_bulk_data_part(
+    State(state): State<AppState>,
+    Path((update_id, part_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<axum::response::Response, ApiError> {
+    let component_id = component_of(&state, &update_id).await?;
+    put_bulk_data_part(
+        State(state),
+        Path((component_id, update_id, part_id)),
+        headers,
+        body,
+    )
+    .await
+    .map(IntoResponse::into_response)
 }
 
 // ---------------------------------------------------------------------------

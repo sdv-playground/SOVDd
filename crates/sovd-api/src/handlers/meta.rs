@@ -845,6 +845,25 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
                             backend; bulk-data is the reverse channel \
                             for workstation / workshop deployments."
             },
+            "x-update": {
+                "kind":   "extension pack: registration option, status member, lifecycle verbs",
+                "where":  "POST /vehicle/v1/updates (and /vehicle/v1/components/{id}/updates)",
+                "fields": ["x-update.two_phase (registration)", "x-update.state", "x-update.progress"],
+                "verbs": [
+                    "PUT /vehicle/v1/updates/{update_id}/x-update-commit",
+                    "PUT /vehicle/v1/updates/{update_id}/x-update-rollback",
+                    "PUT /vehicle/v1/updates/{update_id}/x-update-finish",
+                    "PUT /vehicle/v1/updates/{update_id}/x-update-invalidate"
+                ],
+                "spec":   "traton-one-os sovd-schema-x-update-api",
+                "summary": "Served beside x-ota and interchangeable with it. A \
+                            two-phase registration pauses a banked execute at \
+                            ACTIVATED_UNCOMMITTED like x-ota-control=orchestrated; \
+                            the x-update verbs settle it, or a staged one-phase \
+                            update, or a trial an earlier session left (listed as \
+                            pending-trial-<component>). The manifest reads back \
+                            at GET .../bulk-data/manifest."
+            },
             "x-multiple": {
                 "kind":  "value token",
                 "where": "x-sovd-data-category on the templated \

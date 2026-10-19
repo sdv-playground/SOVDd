@@ -152,6 +152,24 @@ pub struct UpdatesEntry {
     /// when control mode is orchestrated.  See
     /// `tasks/spec-aligned-updates-wire.md` §2.2.
     pub substate: Option<&'static str>,
+    /// Registered with the x-update member (`x-update: {two_phase}`): the
+    /// x-update manifest-upload rules apply and the id is unique across the
+    /// node.
+    pub x_update: bool,
+    /// x-update `two_phase`: a banked execute pauses at awaiting-verdict
+    /// (x-update `ACTIVATED_UNCOMMITTED`) as if `?x-ota-control=orchestrated`
+    /// had been given.
+    pub two_phase: bool,
+    /// Synthesised for a trial an earlier session left on the backend
+    /// (`pending-trial-<component>`): there is no paused execute task, so the
+    /// x-update verdict verbs act on the backend directly.
+    pub adopted: bool,
+    /// Set by `x-update-finish`: the terminal update is cleaned up and only
+    /// awaits its `DELETE`.
+    pub finished: bool,
+    /// The `manifest` part exactly as uploaded, for the x-update readback
+    /// (`GET …/bulk-data/manifest`).
+    pub manifest_bytes: Option<Vec<u8>>,
     /// Component's declared `ResetKind`, captured from
     /// `get_activation_state()` once at register time (the component is
     /// idle then, so the call is cheap — never re-read per status-poll).

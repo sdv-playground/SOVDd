@@ -2184,3 +2184,429 @@ async fn reserved_char_id_round_trips_encoded() {
         .iter()
         .any(|i| i == "#kernel-v1"));
 }
+
+// ---------------------------------------------------------------------------
+// x-update extension pack, beside x-ota
+// ---------------------------------------------------------------------------
+
+/// Register an update with the x-update member.
+async fn open_x_update(server: &TestServer, two_phase: bool) -> String {
+    let resp = register(
+        server,
+        serde_json::json!({ "x-update": { "two_phase": two_phase } }),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+    let body: Value = resp.json().await.unwrap();
+    body["update_id"].as_str().unwrap().to_string()
+}
+
+fn x_update_state(body: &Value) -> &str {
+    body["x-update"]["state"].as_str().unwrap_or("")
+}
+
+async fn wait_for_x_update_state(server: &TestServer, id: &str, want: &str) -> Value {
+    for _ in 0..200 {
+        let body = get_status(server, id).await;
+        if x_update_state(&body) == want {
+            return body;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("x-update state never reached {want}");
+}
+
+/// Walk a banked execute through the reset an orchestrator issues: the update
+/// is ACTIVATING while the new bank is armed (AwaitingReboot) and while it
+/// boots (Verifying), and ACTIVATED_UNCOMMITTED only once the backend runs it.
+async fn reset_onto_new_bank(server: &TestServer, backend: &MockBackend, id: &str) -> Value {
+    for _ in 0..200 {
+        if *backend.flash_state.lock() == CoreFlashState::AwaitingReboot {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::AwaitingReboot);
+    assert_eq!(x_update_state(&get_status(server, id).await), "ACTIVATING");
+    *backend.flash_state.lock() = CoreFlashState::Verifying;
+    assert_eq!(x_update_state(&get_status(server, id).await), "ACTIVATING");
+    *backend.flash_state.lock() = CoreFlashState::Activated;
+    wait_for_x_update_state(server, id, "ACTIVATED_UNCOMMITTED").await
+}
+
+async fn prepare_then_execute(server: &TestServer, id: &str, query: &str) {
+    let resp = put(
+        server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/prepare"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(poll_terminal(server, id).await["status"], "completed");
+    let resp = put(
+        server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/execute{query}"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn x_update_two_phase_pauses_and_reports_states() {
+    let (server, backend) = spawn_with("banked").await;
+    let id = open_x_update(&server, true).await;
+    assert_eq!(x_update_state(&get_status(&server, &id).await), "READY");
+    upload_part(&server, &id, "manifest", b"banked").await;
+    prepare_then_execute(&server, &id, "").await;
+    let paused = reset_onto_new_bank(&server, &backend, &id).await;
+    // The x-ota fields are still there for an x-ota client.
+    assert_eq!(paused["x-ota-substate"], "awaiting-verdict");
+    assert_eq!(paused["x-ota-reset-kind"], "local");
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/x-update-commit"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(
+        x_update_state(&poll_terminal(&server, &id).await),
+        "COMMITTED"
+    );
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::Committed);
+}
+
+#[tokio::test]
+async fn x_ota_and_x_update_verbs_are_interchangeable() {
+    // An x-ota orchestrated execute settled with an x-update verb ...
+    let (server, backend) = spawn_with("banked").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"banked").await;
+    prepare_then_execute(&server, &id, "?x-ota-control=orchestrated").await;
+    reset_onto_new_bank(&server, &backend, &id).await;
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/x-update-rollback"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let body = poll_terminal(&server, &id).await;
+    assert_eq!(x_update_state(&body), "ROLLED_BACK");
+    assert_eq!(body["error"]["error_code"], "x-ota-verdict-rollback");
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
+
+    // ... and an x-update two-phase execute settled with an x-ota verb.
+    let (server, backend) = spawn_with("banked").await;
+    let id = open_x_update(&server, true).await;
+    upload_part(&server, &id, "manifest", b"banked").await;
+    prepare_then_execute(&server, &id, "").await;
+    reset_onto_new_bank(&server, &backend, &id).await;
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/x-ota-commit"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(poll_terminal(&server, &id).await["status"], "completed");
+}
+
+#[tokio::test]
+async fn x_update_verbs_settle_a_staged_one_phase_update_directly() {
+    // A one-phase banked execute stops staged for the reset; x-ota-commit
+    // keeps refusing it (no paused verdict), x-update-commit commits it.
+    let (server, backend) = spawn_with("banked").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"banked").await;
+    prepare_then_execute(&server, &id, "").await;
+    let staged = poll_terminal(&server, &id).await;
+    assert_eq!(x_update_state(&staged), "ACTIVATING");
+    reset_onto_new_bank(&server, &backend, &id).await;
+    let x_ota = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/x-ota-commit"),
+    )
+    .await;
+    assert_eq!(x_ota.status(), reqwest::StatusCode::CONFLICT);
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/x-update-commit"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(x_update_state(&get_status(&server, &id).await), "COMMITTED");
+}
+
+#[tokio::test]
+async fn x_update_finish_and_invalidate() {
+    let (server, backend) = spawn_with("banked").await;
+    let id = open_x_update(&server, true).await;
+    upload_part(&server, &id, "manifest", b"banked").await;
+    let base = format!("/vehicle/v1/components/dev1/updates/{id}");
+    assert_eq!(
+        put(&server, &format!("{base}/x-update-finish"))
+            .await
+            .status(),
+        reqwest::StatusCode::CONFLICT
+    );
+    assert_eq!(
+        put(&server, &format!("{base}/x-update-invalidate"))
+            .await
+            .status(),
+        reqwest::StatusCode::CONFLICT
+    );
+    put(&server, &format!("{base}/prepare")).await;
+    assert_eq!(
+        x_update_state(&poll_terminal(&server, &id).await),
+        "VALIDATED"
+    );
+    assert_eq!(
+        put(&server, &format!("{base}/x-update-invalidate"))
+            .await
+            .status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+    assert_eq!(x_update_state(&get_status(&server, &id).await), "READY");
+
+    put(&server, &format!("{base}/prepare")).await;
+    poll_terminal(&server, &id).await;
+    put(&server, &format!("{base}/execute")).await;
+    reset_onto_new_bank(&server, &backend, &id).await;
+    put(&server, &format!("{base}/x-update-commit")).await;
+    poll_terminal(&server, &id).await;
+    assert_eq!(
+        put(&server, &format!("{base}/x-update-finish"))
+            .await
+            .status(),
+        reqwest::StatusCode::NO_CONTENT
+    );
+    let body = get_status(&server, &id).await;
+    assert_eq!(x_update_state(&body), "IDLE");
+    assert_eq!(body["step"], "finished");
+}
+
+#[tokio::test]
+async fn x_update_node_level_collection_and_unique_ids() {
+    let (server, dev1) = spawn_two_components().await;
+    let base = server.base_url();
+    let post = |body: Value| {
+        http()
+            .post(format!("{base}/vehicle/v1/updates"))
+            .json(&body)
+            .send()
+    };
+    assert_eq!(
+        post(serde_json::json!({ "id": "j" }))
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    let resp = post(serde_json::json!({ "id": "drive-0-j", "target": "dev1", "x-update": { "two_phase": true } }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+    // An x-update id is unique across the node.
+    let dup = post(serde_json::json!({ "id": "drive-0-j", "target": "dev2", "x-update": { "two_phase": true } }))
+        .await
+        .unwrap();
+    assert_eq!(dup.status(), reqwest::StatusCode::CONFLICT);
+
+    let resp = http()
+        .put(format!(
+            "{base}/vehicle/v1/updates/drive-0-j/bulk-data/manifest"
+        ))
+        .header("content-type", "application/octet-stream")
+        .body(b"banked".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+    assert_eq!(
+        put(&server, "/vehicle/v1/updates/drive-0-j/prepare")
+            .await
+            .status(),
+        reqwest::StatusCode::ACCEPTED
+    );
+    poll_terminal(&server, "drive-0-j").await;
+    assert_eq!(
+        put(&server, "/vehicle/v1/updates/drive-0-j/execute")
+            .await
+            .status(),
+        reqwest::StatusCode::ACCEPTED
+    );
+    reset_onto_new_bank(&server, &dev1, "drive-0-j").await;
+    assert_eq!(
+        put(&server, "/vehicle/v1/updates/drive-0-j/x-update-commit")
+            .await
+            .status(),
+        reqwest::StatusCode::ACCEPTED
+    );
+    let (_, status) = get_json(&server, "/vehicle/v1/updates/drive-0-j/status").await;
+    assert_eq!(x_update_state(&status), "COMMITTED");
+
+    // x-ota keeps per-component ids; the node-level path then calls the id ambiguous.
+    for component in ["dev1", "dev2"] {
+        let resp = http()
+            .post(format!("{base}/vehicle/v1/components/{component}/updates"))
+            .json(&serde_json::json!({ "id": "shared" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::CREATED, "{component}");
+    }
+    let (status, _) = get_json(&server, "/vehicle/v1/updates/shared/status").await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn x_update_readback_and_registration_echo() {
+    let (server, _backend) = spawn_with("banked").await;
+    let base = server.base_url();
+    let id = open_x_update(&server, true).await;
+    let manifest_url = format!("{base}/vehicle/v1/components/dev1/updates/{id}/bulk-data/manifest");
+    assert_eq!(
+        http().get(&manifest_url).send().await.unwrap().status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    let (_, detail) = get_json(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}"),
+    )
+    .await;
+    assert!(detail.get("target").is_none());
+    assert_eq!(detail["x-update"]["target"], "dev1");
+    assert_eq!(detail["x-update"]["two_phase"], true);
+
+    let l2 = b"\xd8\x6b\xa2\x02original-l2".to_vec();
+    upload_part(&server, &id, "manifest", &l2).await;
+    let resp = http().get(&manifest_url).send().await.unwrap();
+    assert_eq!(resp.headers()["content-type"], "application/octet-stream");
+    assert_eq!(resp.bytes().await.unwrap().to_vec(), l2);
+
+    // An x-ota update's manifest reads back too.
+    let ota = open_update(&server).await;
+    upload_part(&server, &ota, "manifest", b"ota-l2").await;
+    let resp = http()
+        .get(format!(
+            "{base}/vehicle/v1/components/dev1/updates/{ota}/bulk-data/manifest"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.bytes().await.unwrap().to_vec(), b"ota-l2".to_vec());
+}
+
+#[tokio::test]
+async fn x_update_manifest_upload_contract() {
+    let (server, _backend) = spawn_with("banked").await;
+    let id = open_x_update(&server, true).await;
+    let url = format!(
+        "{}/vehicle/v1/components/dev1/updates/{id}/bulk-data/manifest",
+        server.base_url()
+    );
+    let upload = |content_type: &'static str, body: Vec<u8>| {
+        http()
+            .put(&url)
+            .header("content-type", content_type)
+            .body(body)
+            .send()
+    };
+    assert_eq!(
+        upload("application/json", b"{}".to_vec())
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
+    assert_eq!(
+        upload("application/octet-stream", Vec::new())
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        upload("application/octet-stream", vec![0u8; 1024 * 1024 + 1])
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::PAYLOAD_TOO_LARGE
+    );
+    let first = upload("application/octet-stream", b"the-l2".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(first.status(), reqwest::StatusCode::CREATED);
+    let retry = upload("application/octet-stream", b"the-l2".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), reqwest::StatusCode::CREATED);
+    assert_eq!(retry.headers()["etag"], first.headers()["etag"]);
+    assert_eq!(
+        upload("application/octet-stream", b"another-l2".to_vec())
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::CONFLICT
+    );
+
+    // An x-ota registration keeps the lenient upload: any content type, replaceable.
+    let ota = open_update(&server).await;
+    let ota_url = format!(
+        "{}/vehicle/v1/components/dev1/updates/{ota}/bulk-data/manifest",
+        server.base_url()
+    );
+    for body in [b"one".to_vec(), b"two".to_vec()] {
+        let resp = http().put(&ota_url).body(body).send().await.unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+    }
+}
+
+#[tokio::test]
+async fn x_update_lists_a_pending_trial_and_force_rollback_retires_it() {
+    let (server, backend) = spawn_with("banked").await;
+    *backend.flash_state.lock() = CoreFlashState::Activated;
+    let (_, list) = get_json(
+        &server,
+        "/vehicle/v1/components/dev1/updates?origin=proximity",
+    )
+    .await;
+    assert_eq!(list["items"], serde_json::json!(["pending-trial-dev1"]));
+    assert_eq!(
+        x_update_state(&get_status(&server, "pending-trial-dev1").await),
+        "ACTIVATED_UNCOMMITTED"
+    );
+    // The x-ota way out still works and leaves no stale pending trial behind.
+    let resp = put(&server, "/vehicle/v1/components/dev1/x-ota-force-rollback").await;
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+    let (_, list) = get_json(
+        &server,
+        "/vehicle/v1/components/dev1/updates?origin=proximity",
+    )
+    .await;
+    assert_eq!(list["items"], serde_json::json!([]));
+
+    // The x-update way: roll the pending trial back.
+    *backend.flash_state.lock() = CoreFlashState::Activated;
+    let resp = put(
+        &server,
+        "/vehicle/v1/updates/pending-trial-dev1/x-update-rollback",
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
+    assert_eq!(
+        x_update_state(&get_status(&server, "pending-trial-dev1").await),
+        "ROLLED_BACK"
+    );
+    let resp = register(&server, serde_json::json!({ "id": "pending-trial-dev1" })).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn discovery_lists_x_update_beside_x_ota() {
+    let (server, _backend) = spawn_with("singleshot").await;
+    let (_, body) = get_json(&server, "/.well-known/sovd-extensions").await;
+    assert!(body["extensions"].get("x-ota-control").is_some());
+    let verbs = body["extensions"]["x-update"]["verbs"].as_array().unwrap();
+    assert!(verbs
+        .iter()
+        .any(|v| v.as_str().unwrap_or("").contains("x-update-commit")));
+}

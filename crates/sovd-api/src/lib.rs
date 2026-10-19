@@ -483,7 +483,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data/{part_id}",
-            put(handlers::updates::put_bulk_data_part),
+            put(handlers::updates::put_bulk_data_part).get(handlers::updates::get_bulk_data_part),
         )
         // ISO 17978-3 §7.18 spec verbs — async 202 + Location :: /status.
         // The F.D8b vendor-extension `/executions{action}` wire (deprecated
@@ -529,6 +529,71 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/vehicle/v1/components/{component_id}/x-ota-force-rollback",
             put(handlers::updates::put_x_ota_force_rollback),
+        )
+        // x-update extension pack (traton-one-os `sovd-schema-x-update-api`)
+        // beside x-ota: lifecycle verbs on any update, and a node-level
+        // collection where `POST /updates` names the component in `target`.
+        .route(
+            "/vehicle/v1/components/{component_id}/updates/{update_id}/x-update-commit",
+            put(handlers::updates::put_x_update_commit),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/updates/{update_id}/x-update-rollback",
+            put(handlers::updates::put_x_update_rollback),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/updates/{update_id}/x-update-finish",
+            put(handlers::updates::put_x_update_finish),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/updates/{update_id}/x-update-invalidate",
+            put(handlers::updates::put_x_update_invalidate),
+        )
+        .route(
+            "/vehicle/v1/updates",
+            post(handlers::updates::register_node_update)
+                .get(handlers::updates::list_node_updates),
+        )
+        .route(
+            "/vehicle/v1/updates/{update_id}",
+            get(handlers::updates::get_node_update).delete(handlers::updates::delete_node_update),
+        )
+        .route(
+            "/vehicle/v1/updates/{update_id}/bulk-data",
+            get(handlers::updates::list_node_bulk_data),
+        )
+        .route(
+            "/vehicle/v1/updates/{update_id}/bulk-data/{part_id}",
+            put(handlers::updates::put_node_bulk_data_part)
+                .get(handlers::updates::get_node_bulk_data_part),
+        )
+        .route(
+            "/vehicle/v1/updates/{update_id}/prepare",
+            put(handlers::updates::put_node_prepare),
+        )
+        .route(
+            "/vehicle/v1/updates/{update_id}/execute",
+            put(handlers::updates::put_node_execute),
+        )
+        .route(
+            "/vehicle/v1/updates/{update_id}/status",
+            get(handlers::updates::get_node_status),
+        )
+        .route(
+            "/vehicle/v1/updates/{update_id}/x-update-commit",
+            put(handlers::updates::put_node_x_update_commit),
+        )
+        .route(
+            "/vehicle/v1/updates/{update_id}/x-update-rollback",
+            put(handlers::updates::put_node_x_update_rollback),
+        )
+        .route(
+            "/vehicle/v1/updates/{update_id}/x-update-finish",
+            put(handlers::updates::put_node_x_update_finish),
+        )
+        .route(
+            "/vehicle/v1/updates/{update_id}/x-update-invalidate",
+            put(handlers::updates::put_node_x_update_invalidate),
         )
         // Admin routes - DID definitions management.
         //

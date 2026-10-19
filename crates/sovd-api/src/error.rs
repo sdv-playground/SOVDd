@@ -79,6 +79,11 @@ pub enum ApiError {
     /// whose target doesn't match the addressed component.  Carries
     /// `vendor-specific` error_code with vendor `wrong-target`.
     UnsupportedMediaType(String),
+    /// 415 Unsupported Media Type for a body in the wrong format (the
+    /// x-update manifest upload expects `application/octet-stream`).
+    WrongContentType(String),
+    /// 413 Content Too Large (the x-update manifest upload is at most 1 MiB).
+    PayloadTooLarge(String),
     /// 500 Internal Server Error — `sovd-server-failure`.
     Internal(String),
 }
@@ -164,6 +169,14 @@ impl IntoResponse for ApiError {
             ApiError::UnsupportedMediaType(msg) => (
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 GenericError::vendor("wrong-target", msg),
+            ),
+            ApiError::WrongContentType(msg) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                GenericError::vendor("wrong-content-type", msg),
+            ),
+            ApiError::PayloadTooLarge(msg) => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                GenericError::vendor("payload-too-large", msg),
             ),
             ApiError::Internal(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
