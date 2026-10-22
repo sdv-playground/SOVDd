@@ -1,0 +1,155 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SOVD x-update extension",
+    "version": "1.0.0-draft.1",
+    "description": "Additions to the ISO 17978-3 §7.18 software-update resources for two-phase updates. Paths are relative to the SOVD base URI resolved from /version-info (sovd_info[].base_uri). `{entity-path}` is the standard entity path (`components/{id}`, `apps/{id}`); servers that also expose the §7.18 node collection serve the same path items under `/updates/{update_id}` and resolve the entity by id. Standard operations (register, prepare, execute, status, delete, restart) are not restated; only the x-update members and verbs are."
+  },
+  "paths": {
+    "/{entity-path}/updates": {
+      "post": {
+        "operationId": "registerUpdate",
+        "summary": "Standard registration (§7.18) with the x-update member",
+        "description": "Body = standard registration + `x-update` RegistrationOptions. Reconnect rule: if the executor still holds durable state for an update with the same `id` on this entity (any state from VALIDATED to ROLLED_BACK), the server re-creates the resource from that state instead of starting a new update, answers 201 as usual, and reports `x-update.adopted: true` in the details and status bodies. A registration with the same id but a different manifest is refused 409 precondition-not-fulfilled.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$", "description": "Client-chosen; stable across client restarts so the reconnect rule applies." },
+                  "x-update": { "$ref": "./sovd-x-update.schema.json#/$defs/RegistrationOptions" }
+                },
+                "required": ["id"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Created or adopted. Location: the update resource.", "headers": { "Location": { "schema": { "type": "string" } } } },
+          "409": { "description": "update-process-in-progress: another update is active on this entity; or precondition-not-fulfilled: same id, different manifest." }
+        }
+      }
+    },
+    "/{entity-path}/updates/{update_id}": {
+      "get": {
+        "operationId": "readUpdate",
+        "summary": "Standard details with the x-update member",
+        "responses": {
+          "200": {
+            "description": "Standard details body plus `x-update`.",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "x-update": { "$ref": "./sovd-x-update.schema.json#/$defs/Details" } } } } }
+          }
+        }
+      }
+    },
+    "/{entity-path}/updates/{update_id}/status": {
+      "get": {
+        "operationId": "readUpdateStatus",
+        "summary": "Standard status (Table 270) with the x-update member",
+        "description": "`phase`, `status`, `step`, `progress`, `error` keep their ISO meaning and must agree with `x-update.state` per the table in README.md.",
+        "responses": {
+          "200": {
+            "description": "Standard status body plus `x-update`.",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "x-update": { "$ref": "./sovd-x-update.schema.json#/$defs/Status" } }, "required": ["x-update"] } } }
+          }
+        }
+      }
+    },
+    "/{entity-path}/updates/{update_id}/bulk-data/manifest": {
+      "put": {
+        "operationId": "uploadManifest",
+        "summary": "Upload the update's manifest",
+        "description": "Allowed while READY. The bytes are opaque to the server and handed to the executor unchanged at prepare. An identical re-upload is accepted and answered 201 again; a different manifest while one is stored is refused 409.",
+        "requestBody": { "required": true, "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary", "minLength": 1 } } } },
+        "responses": {
+          "201": { "description": "Stored.", "content": { "application/json": { "schema": { "$ref": "./sovd-x-update.schema.json#/$defs/ManifestUploadResponse" } } } },
+          "400": { "description": "Empty body." },
+          "404": { "description": "Unknown update." },
+          "409": { "description": "precondition-not-fulfilled: not READY, or a different manifest is stored." },
+          "413": { "description": "Larger than the server's advertised limit." },
+          "415": { "description": "Not application/octet-stream." }
+        }
+      },
+      "get": {
+        "operationId": "readManifest",
+        "summary": "Read back the stored manifest bytes",
+        "description": "Serves the exact bytes uploaded, in every state from READY (with a stored manifest) to ROLLED_BACK, including after adoption, so a reconnecting client can verify it is driving the update it thinks it is.",
+        "responses": {
+          "200": { "description": "The bytes.", "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } },
+          "404": { "description": "Unknown update or no manifest stored." }
+        }
+      }
+    },
+    "/{entity-path}/updates/{update_id}/x-update-commit": { "$ref": "#/components/pathItems/commit" },
+    "/{entity-path}/updates/{update_id}/x-update-rollback": { "$ref": "#/components/pathItems/rollback" },
+    "/{entity-path}/updates/{update_id}/x-update-finish": { "$ref": "#/components/pathItems/finish" },
+    "/{entity-path}/updates/{update_id}/x-update-invalidate": { "$ref": "#/components/pathItems/invalidate" },
+    "/{node-entity-path}/data/x-update-state": {
+      "get": {
+        "operationId": "readNodeUpdateState",
+        "summary": "Node-level observation for sequencing restarts and verdicts",
+        "description": "Served by the entity that owns the node (the one whose PUT status/restart restarts the node). One read tells the client which updates are in flight, whether a node restart is still owed, and whether the node has restarted since arming.",
+        "responses": {
+          "200": { "description": "Facts.", "content": { "application/json": { "schema": { "$ref": "./sovd-x-update.schema.json#/$defs/NodeUpdateState" } } } }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "entityPath": { "name": "entity-path", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Standard entity path, e.g. components/host." },
+      "updateId": { "name": "update_id", "in": "path", "required": true, "schema": { "type": "string" } }
+    },
+    "responses": {
+      "accepted": {
+        "description": "Accepted. Poll the Location.",
+        "headers": { "Location": { "required": true, "schema": { "type": "string" }, "description": "The update's status resource." } }
+      },
+      "notFound": { "description": "Unknown update." },
+      "wrongState": {
+        "description": "precondition-not-fulfilled. The error message names the current x-update state.",
+        "content": { "application/json": { "schema": { "type": "object", "properties": { "error_code": { "const": "precondition-not-fulfilled" }, "message": { "type": "string" }, "parameters": { "type": "object", "properties": { "state": { "$ref": "./sovd-x-update.schema.json#/$defs/State" } } } } } } }
+      }
+    },
+    "pathItems": {
+      "commit": {
+        "parameters": [ { "$ref": "#/components/parameters/entityPath" }, { "$ref": "#/components/parameters/updateId" } ],
+        "put": {
+          "operationId": "commitUpdate",
+          "summary": "Make the running new software permanent",
+          "description": "Precondition: ACTIVATED_UNCOMMITTED. The server does not second-guess the client: if the client has observed the restart and the new software running, the commit is accepted. Whether the commit itself succeeds is reported in the status (COMMITTED, or FAILED with an error). The client decides from observable facts (node boot id, x-update-state, the entity's own version and health), not the server.",
+          "responses": { "202": { "$ref": "#/components/responses/accepted" }, "404": { "$ref": "#/components/responses/notFound" }, "409": { "$ref": "#/components/responses/wrongState" } }
+        }
+      },
+      "rollback": {
+        "parameters": [ { "$ref": "#/components/parameters/entityPath" }, { "$ref": "#/components/parameters/updateId" } ],
+        "put": {
+          "operationId": "rollbackUpdate",
+          "summary": "Put the previous software back in effect",
+          "description": "Precondition: ACTIVATING, ACTIVATED_UNCOMMITTED or FAILED. Ends ROLLED_BACK (standard status=failed, error_code=update-rolled-back). If the rollback itself needs a reset, reset_kind says which; the client issues it the same way as for activation.",
+          "responses": { "202": { "$ref": "#/components/responses/accepted" }, "404": { "$ref": "#/components/responses/notFound" }, "409": { "$ref": "#/components/responses/wrongState" } }
+        }
+      },
+      "finish": {
+        "parameters": [ { "$ref": "#/components/parameters/entityPath" }, { "$ref": "#/components/parameters/updateId" } ],
+        "put": {
+          "operationId": "finishUpdate",
+          "summary": "Release staged data; keep the resource for reading until DELETE",
+          "description": "Precondition: COMMITTED, ROLLED_BACK or FAILED. Idempotent: a second finish on a FINISHED update is 202 again. Ends FINISHED. DELETE then removes the resource.",
+          "responses": { "202": { "$ref": "#/components/responses/accepted" }, "404": { "$ref": "#/components/responses/notFound" }, "409": { "$ref": "#/components/responses/wrongState" } }
+        }
+      },
+      "invalidate": {
+        "parameters": [ { "$ref": "#/components/parameters/entityPath" }, { "$ref": "#/components/parameters/updateId" } ],
+        "put": {
+          "operationId": "invalidateUpdate",
+          "summary": "Discard the prepared package without activating it",
+          "description": "Precondition: VALIDATED. Ends READY with the manifest kept, so prepare may run again. DELETE is the alternative that also removes the resource.",
+          "responses": { "202": { "$ref": "#/components/responses/accepted" }, "404": { "$ref": "#/components/responses/notFound" }, "409": { "$ref": "#/components/responses/wrongState" } }
+        }
+      }
+    }
+  }
+}

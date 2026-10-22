@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sdv-playground.github.io/sovd/x-update/v1/sovd-x-update.schema.json",
+  "title": "SovdXUpdate",
+  "description": "The x-update extension to the ISO 17978-3 §7.18 software-update resource family. It adds exactly what a two-phase (activate, then decide) update needs on top of the standard resource: a registration option, a lifecycle state, the kind of reset an activation needs, four verbs, a manifest part, and a node-level observation resource. It defines no executor internals. Everything a client needs to decide is observable; nothing in this contract lets the server refuse a verdict on the client's behalf.",
+  "$defs": {
+    "RegistrationOptions": {
+      "title": "x-update member of the registration body",
+      "description": "Nested as `x-update` in the standard POST {entity}/updates body. Absent means a standard one-phase update.",
+      "type": "object",
+      "properties": {
+        "two_phase": {
+          "type": "boolean",
+          "default": false,
+          "description": "Stop after activation and keep the update ACTIVATED_UNCOMMITTED until the client sends x-update-commit or x-update-rollback. Without it the server commits as part of execute."
+        }
+      },
+      "additionalProperties": false
+    },
+    "State": {
+      "title": "x-update lifecycle state",
+      "description": "Total over the life of the update resource. Each value fixes the standard `phase`/`status` pair the same status body must carry (see the table in README.md); a server never reports a pair that contradicts the state. Values are UPPER_SNAKE and never change spelling between servers.",
+      "type": "string",
+      "enum": [
+        "READY",
+        "PREPARING",
+        "VALIDATED",
+        "ACTIVATING",
+        "ACTIVATED_UNCOMMITTED",
+        "COMMITTING",
+        "COMMITTED",
+        "ROLLING_BACK",
+        "ROLLED_BACK",
+        "FAILED",
+        "FINISHED"
+      ],
+      "x-descriptions": {
+        "READY": "Registered, or invalidated. Nothing is staged. prepare may be sent. phase=prepare status=pending.",
+        "PREPARING": "prepare accepted: transfer, verification and staging are running. phase=prepare status=inProgress.",
+        "VALIDATED": "prepare completed: the package is verified and staged, nothing is activated. execute or x-update-invalidate may be sent. phase=prepare status=completed.",
+        "ACTIVATING": "execute accepted: the new software is being installed or is armed but is not yet running. When reset_kind is component or node the state stays ACTIVATING until that reset has happened and the new software is observed running. phase=execute status=inProgress.",
+        "ACTIVATED_UNCOMMITTED": "The new software is running and a verdict is owed (two_phase only). x-update-commit or x-update-rollback may be sent. phase=execute status=inProgress.",
+        "COMMITTING": "x-update-commit accepted and running. phase=execute status=inProgress.",
+        "COMMITTED": "The new software is permanent. x-update-finish may be sent. phase=execute status=completed.",
+        "ROLLING_BACK": "x-update-rollback accepted and running, or the server is reverting after a failure. phase=execute status=inProgress.",
+        "ROLLED_BACK": "The previous software is in effect again. x-update-finish may be sent. phase=execute status=failed error.error_code=update-rolled-back.",
+        "FAILED": "A prepare or execute step failed and nothing is in a half state the client must resolve; details in the standard error object. x-update-finish or DELETE may be sent. status=failed in the phase that failed.",
+        "FINISHED": "x-update-finish completed: staged data released, the resource is kept only for reading and awaits DELETE. phase/status unchanged from the terminal state."
+      }
+    },
+    "ResetKind": {
+      "title": "Reset an activation needs",
+      "description": "Known once the package is VALIDATED. The client issues the reset; the server only reports which one. `component`: the standard PUT {component}/status/restart on this component makes the new software run. `node`: the whole node must restart, by PUT {node-entity}/status/restart on the entity that owns the node (or by any out-of-band restart such as an ignition cycle); one node restart activates every update on that node that reports `node`. `none`: the new software runs without a reset.",
+      "type": "string",
+      "enum": ["none", "component", "node"]
+    },
+    "Status": {
+      "title": "x-update member of the update status body",
+      "description": "Nested as `x-update` in the standard GET {entity}/updates/{id}/status body (ISO 17978-3 Table 270). The standard members (phase, status, progress, step, error) keep their meaning; `state` refines them.",
+      "type": "object",
+      "properties": {
+        "state": { "$ref": "#/$defs/State" },
+        "reset_kind": {
+          "$ref": "#/$defs/ResetKind",
+          "description": "Present from VALIDATED on. Absent before the package is verified."
+        },
+        "two_phase": {
+          "type": "boolean",
+          "description": "Echo of the registration option, so a client that reconnects knows whether a verdict will be owed."
+        },
+        "adopted": {
+          "type": "boolean",
+          "description": "True when this resource was re-created from durable executor state by a registration with the same id (see README.md, reconnect). Absent or false otherwise."
+        }
+      },
+      "required": ["state"],
+      "additionalProperties": false
+    },
+    "Details": {
+      "title": "x-update member of the update details body",
+      "description": "Nested as `x-update` in the standard GET {entity}/updates/{id} body.",
+      "type": "object",
+      "properties": {
+        "two_phase": { "type": "boolean" },
+        "reset_kind": { "$ref": "#/$defs/ResetKind" },
+        "adopted": { "type": "boolean" }
+      },
+      "required": ["two_phase"],
+      "additionalProperties": false
+    },
+    "Verb": {
+      "title": "x-update verbs",
+      "description": "Each is PUT {entity}/updates/{id}/<verb> with an empty body, answered 202 with a Location header to the status resource, or 409 precondition-not-fulfilled naming the current state. The precondition is a State, nothing else: a server does not refuse a verdict because of its own view of the outcome.",
+      "type": "string",
+      "enum": ["x-update-commit", "x-update-rollback", "x-update-finish", "x-update-invalidate"],
+      "x-preconditions": {
+        "x-update-commit": ["ACTIVATED_UNCOMMITTED"],
+        "x-update-rollback": ["ACTIVATING", "ACTIVATED_UNCOMMITTED", "FAILED"],
+        "x-update-finish": ["COMMITTED", "ROLLED_BACK", "FAILED"],
+        "x-update-invalidate": ["VALIDATED"]
+      }
+    },
+    "ManifestUploadResponse": {
+      "title": "Response to PUT {entity}/updates/{id}/bulk-data/manifest",
+      "description": "The uploaded part is the update's manifest, opaque to the server: the server stores the bytes and hands them to the executor unchanged. Verification belongs to the executor.",
+      "type": "object",
+      "properties": {
+        "part_id": { "type": "string", "const": "manifest" },
+        "size": { "type": "integer", "minimum": 1, "description": "Bytes stored." },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Digest of the stored bytes, so a reconnecting client can verify without a GET." }
+      },
+      "required": ["part_id", "size"],
+      "additionalProperties": false
+    },
+    "NodeUpdateState": {
+      "title": "Node-level observation: GET {node-entity}/data/x-update-state",
+      "description": "Everything a client needs to sequence a node restart and the verdicts after it, in one read. Facts only; the client decides.",
+      "type": "object",
+      "properties": {
+        "node_boot_id": {
+          "type": ["string", "null"],
+          "description": "Opaque identifier of the node's current boot. Changes on every node restart. null when the node cannot tell."
+        },
+        "updates": {
+          "type": "array",
+          "description": "Every update resource on this node that is not READY and not FINISHED, in registration order.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "update_id": { "type": "string" },
+              "entity": { "type": "string", "description": "Path of the entity the update targets, e.g. components/host." },
+              "state": { "$ref": "#/$defs/State" },
+              "reset_kind": { "$ref": "#/$defs/ResetKind" }
+            },
+            "required": ["update_id", "entity", "state"],
+            "additionalProperties": false
+          }
+        },
+        "reboot_owed": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Entities whose activation reported reset_kind=node and for which no verdict has been recorded yet. Persists across the restart; emptied only by commit, rollback or finish."
+        },
+        "rebooted_since_arming": {
+          "type": ["boolean", "null"],
+          "description": "Whether node_boot_id differs from the one recorded when the first entry of reboot_owed was armed. null when reboot_owed is empty or the node cannot tell. false means the client has not restarted the node yet; true means it has and the verdicts may be given."
+        }
+      },
+      "required": ["node_boot_id", "updates", "reboot_owed", "rebooted_since_arming"],
+      "additionalProperties": false
+    },
+    "ErrorCode": {
+      "title": "x-update error codes",
+      "description": "Used in the standard error object's error_code beside the ISO codes (precondition-not-fulfilled, update-process-in-progress, ...).",
+      "type": "string",
+      "enum": ["update-rolled-back"],
+      "x-descriptions": {
+        "update-rolled-back": "The update was rolled back on the client's request or by the server after a failed activation. Carried while state is ROLLED_BACK so a client that reads only the standard body sees status=failed and a reason."
+      }
+    },
+    "Capability": {
+      "title": "Component capability advertisement",
+      "description": "Nested as `capabilities` in the standard GET {entity-path} body of every entity that accepts updates. A client discovers update targets by listing components and keeping those with software_update=true; no vendor root attribute is needed.",
+      "type": "object",
+      "properties": {
+        "software_update": { "type": "boolean" }
+      },
+      "required": ["software_update"]
+    }
+  }
+}
