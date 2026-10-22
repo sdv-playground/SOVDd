@@ -2298,6 +2298,37 @@ async fn x_update_two_phase_pauses_and_reports_states() {
 }
 
 #[tokio::test]
+async fn x_update_rolls_back_an_activation_awaiting_its_restart() {
+    // Activated, but the component has not restarted onto the new bank yet:
+    // still ACTIVATING, and a rollback is accepted there.
+    let (server, backend) = spawn_with("banked").await;
+    let id = open_x_update(&server, true).await;
+    upload_part(&server, &id, "manifest", b"banked").await;
+    prepare_then_execute(&server, &id, "").await;
+    assert_eq!(
+        x_update_state(&get_status(&server, &id).await),
+        "ACTIVATING"
+    );
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/x-update-commit"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/x-update-rollback"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(
+        x_update_state(&poll_terminal(&server, &id).await),
+        "ROLLED_BACK"
+    );
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
+}
+
+#[tokio::test]
 async fn x_ota_and_x_update_verbs_are_interchangeable() {
     // An x-ota orchestrated execute settled with an x-update verb ...
     let (server, backend) = spawn_with("banked").await;
