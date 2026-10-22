@@ -451,7 +451,7 @@ no trial: `… → Activated → commit_flash() → Complete`.
   `DELETE` aborts via a stored `AbortHandle`. **Orchestrated mode** (`PUT execute?x-ota-control=orchestrated`)
   pauses at `substate=awaiting-verdict` on a `watch` channel until `x-ota-commit`/`x-ota-rollback`
   (or a watchdog fires; default 600 s). See the C-026 note in §1 for the vendor-verb status.
-- **x-update extension pack** (traton-one-os `sovd-schema-x-update-api`), served beside x-ota and
+- **x-update extension pack** (traton-one-os `sovd-schema-x-update-api`; contract in `docs/x-update/`), served beside x-ota and
   interchangeable with it: a registration with `x-update: {two_phase: true}` pauses a banked execute
   like `?x-ota-control=orchestrated`; the status body adds `x-update: {state, progress}` next to the
   x-ota fields; `x-update-commit`/`-rollback` (also on a staged one-phase update or an adopted

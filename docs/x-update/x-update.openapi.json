@@ -1,0 +1,1198 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SOVD x-update extension",
+    "version": "0.1.0",
+    "description": "Additions to the ISO 17978-3 §7.18 software-update resources for two-phase updates, as implemented by SOVDd and the traton-one-os SOVD server. The member and value shapes are `sovd-x-update.schema.json` (`RegistrationOptions`, `ExtensionVerb`, `State`, `Status`, `ManifestUploadResponse`), the same file as traton-one-os `sovd-schema-x-update-api`. Paths are relative to the SOVD base URI from `/version-info` (`/vehicle/v1` on SOVDd, `/v1` on traton-one-os); the node collection `/updates` and the component collections `/components/{component_id}/updates` address the same updates, and update ids are unique across the node.\n\nThree rules hold throughout: the client owns the update id; the client awaits states and restarts, it never issues a restart; and `x-update.state` is the one value a client decides on."
+  },
+  "paths": {
+    "/updates": {
+      "get": {
+        "summary": "List the updates the node holds",
+        "description": "Every update the executors hold, by the id the client registered it under, including updates registered before a server or executor restart. A client that restarted without local state finds its updates here and recognises them by their ids.",
+        "responses": {
+          "200": {
+            "description": "Update ids",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateList"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Register an update (§7.18.9) with the x-update member",
+        "description": "The client chooses the id and the server keeps it verbatim; it never assigns or rewrites an id. On the node collection `target` selects the executor; on a component collection it is optional and must name that component. Register without `url` or `staging_path`, then upload the manifest.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Registration"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Registered",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "`…/updates/{update_id}`"
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid id or body, or unknown target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The id is already registered, or the executor holds another update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/updates/{update_id}": {
+      "parameters": [
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "$ref": "#/components/schemas/UpdateId"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Update details (§7.18.3)",
+        "description": "Standard details plus `x-update` echoing the registration.",
+        "responses": {
+          "200": {
+            "description": "Details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Details"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Remove an update (§7.18.8)",
+        "description": "Allowed before execute, and once the update is `IDLE` after `x-update-finish` or `FATAL_FAILURE`. In the execute phase the client settles the update first (`x-update-rollback` or `x-update-commit`, then `x-update-finish`).",
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Execute phase, not yet finished",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/updates/{update_id}/status": {
+      "parameters": [
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "$ref": "#/components/schemas/UpdateId"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Update status (§7.18.7) with the x-update member",
+        "description": "`phase`, `status`, `progress`, `step` and `error` are the standard members; `x-update.state` is what a client acts on. See `XUpdateState`.",
+        "responses": {
+          "200": {
+            "description": "Status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/updates/{update_id}/bulk-data/manifest": {
+      "parameters": [
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "$ref": "#/components/schemas/UpdateId"
+          }
+        }
+      ],
+      "put": {
+        "summary": "Upload the original L2 SUIT envelope",
+        "description": "Before preparation. Transport only: verification and payload handling belong to the executor. An identical retry is accepted; different bytes are refused.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "minLength": 1,
+                "maxLength": 1048576
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./sovd-x-update.schema.json#/$defs/ManifestUploadResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty upload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already prepared, or a different manifest is stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Larger than 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Not application/octet-stream",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "Read the uploaded manifest back",
+        "description": "The exact uploaded bytes, so a reconnecting client can check it holds the same update.",
+        "responses": {
+          "200": {
+            "description": "Uploaded bytes",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update, or no manifest uploaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/updates/{update_id}/x-update-commit": {
+      "parameters": [
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "$ref": "#/components/schemas/UpdateId"
+          }
+        }
+      ],
+      "put": {
+        "summary": "Commit an activated update",
+        "description": "From `ACTIVATED_UNCOMMITTED`; the update goes through `COMMITTING` to `COMMITTED`, or to `FATAL_FAILURE` if the commit fails.",
+        "responses": {
+          "202": {
+            "description": "Accepted; poll the status resource until the state settles.",
+            "headers": {
+              "Location": {
+                "description": "`…/updates/{update_id}/status`, under the prefix the request used.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not `ACTIVATED_UNCOMMITTED`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/updates/{update_id}/x-update-rollback": {
+      "parameters": [
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "$ref": "#/components/schemas/UpdateId"
+          }
+        }
+      ],
+      "put": {
+        "summary": "Roll back an activated update",
+        "description": "From `ACTIVATING`, `VERIFYING` or `ACTIVATED_UNCOMMITTED`; the update goes through `ROLLING_BACK` to `ROLLED_BACK`. A rollback that needs a restart waits in `ROLLING_BACK` for it.",
+        "responses": {
+          "202": {
+            "description": "Accepted; poll the status resource until the state settles.",
+            "headers": {
+              "Location": {
+                "description": "`…/updates/{update_id}/status`, under the prefix the request used.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not in the execute phase, or already committed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/updates/{update_id}/x-update-finish": {
+      "parameters": [
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "$ref": "#/components/schemas/UpdateId"
+          }
+        }
+      ],
+      "put": {
+        "summary": "Clean up a settled update",
+        "description": "From `COMMITTED`, `ROLLED_BACK` or `FATAL_FAILURE`; the update goes through `CLEANING_UP` to `IDLE` and then only awaits its `DELETE`.",
+        "responses": {
+          "202": {
+            "description": "Accepted; poll the status resource until the state settles.",
+            "headers": {
+              "Location": {
+                "description": "`…/updates/{update_id}/status`, under the prefix the request used.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not settled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/updates/{update_id}/x-update-invalidate": {
+      "parameters": [
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "$ref": "#/components/schemas/UpdateId"
+          }
+        }
+      ],
+      "put": {
+        "summary": "Discard a preparation",
+        "description": "From `VALIDATED`; the update returns to `PROCESSED` and can be prepared again.",
+        "responses": {
+          "202": {
+            "description": "Accepted; poll the status resource until the state settles.",
+            "headers": {
+              "Location": {
+                "description": "`…/updates/{update_id}/status`, under the prefix the request used.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not `VALIDATED`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/components/{component_id}/updates": {
+      "parameters": [
+        {
+          "name": "component_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "summary": "List the updates the node holds",
+        "description": "Every update the executors hold, by the id the client registered it under, including updates registered before a server or executor restart. A client that restarted without local state finds its updates here and recognises them by their ids.",
+        "responses": {
+          "200": {
+            "description": "Update ids",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateList"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Register an update (§7.18.9) with the x-update member",
+        "description": "The client chooses the id and the server keeps it verbatim; it never assigns or rewrites an id. On the node collection `target` selects the executor; on a component collection it is optional and must name that component. Register without `url` or `staging_path`, then upload the manifest.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Registration"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Registered",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "`…/updates/{update_id}`"
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid id or body, or unknown target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The id is already registered, or the executor holds another update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/components/{component_id}/updates/{update_id}": {
+      "parameters": [
+        {
+          "name": "component_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "$ref": "#/components/schemas/UpdateId"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Update details (§7.18.3)",
+        "description": "Standard details plus `x-update` echoing the registration.",
+        "responses": {
+          "200": {
+            "description": "Details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Details"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Remove an update (§7.18.8)",
+        "description": "Allowed before execute, and once the update is `IDLE` after `x-update-finish` or `FATAL_FAILURE`. In the execute phase the client settles the update first (`x-update-rollback` or `x-update-commit`, then `x-update-finish`).",
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Execute phase, not yet finished",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/components/{component_id}/updates/{update_id}/status": {
+      "parameters": [
+        {
+          "name": "component_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "$ref": "#/components/schemas/UpdateId"
+          }
+        }
+      ],
+      "get": {
+        "summary": "Update status (§7.18.7) with the x-update member",
+        "description": "`phase`, `status`, `progress`, `step` and `error` are the standard members; `x-update.state` is what a client acts on. See `XUpdateState`.",
+        "responses": {
+          "200": {
+            "description": "Status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/components/{component_id}/updates/{update_id}/bulk-data/manifest": {
+      "parameters": [
+        {
+          "name": "component_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "$ref": "#/components/schemas/UpdateId"
+          }
+        }
+      ],
+      "put": {
+        "summary": "Upload the original L2 SUIT envelope",
+        "description": "Before preparation. Transport only: verification and payload handling belong to the executor. An identical retry is accepted; different bytes are refused.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "minLength": 1,
+                "maxLength": 1048576
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./sovd-x-update.schema.json#/$defs/ManifestUploadResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty upload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already prepared, or a different manifest is stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Larger than 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Not application/octet-stream",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "Read the uploaded manifest back",
+        "description": "The exact uploaded bytes, so a reconnecting client can check it holds the same update.",
+        "responses": {
+          "200": {
+            "description": "Uploaded bytes",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update, or no manifest uploaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/components/{component_id}/updates/{update_id}/x-update-commit": {
+      "parameters": [
+        {
+          "name": "component_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "$ref": "#/components/schemas/UpdateId"
+          }
+        }
+      ],
+      "put": {
+        "summary": "Commit an activated update",
+        "description": "From `ACTIVATED_UNCOMMITTED`; the update goes through `COMMITTING` to `COMMITTED`, or to `FATAL_FAILURE` if the commit fails.",
+        "responses": {
+          "202": {
+            "description": "Accepted; poll the status resource until the state settles.",
+            "headers": {
+              "Location": {
+                "description": "`…/updates/{update_id}/status`, under the prefix the request used.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not `ACTIVATED_UNCOMMITTED`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/components/{component_id}/updates/{update_id}/x-update-rollback": {
+      "parameters": [
+        {
+          "name": "component_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "$ref": "#/components/schemas/UpdateId"
+          }
+        }
+      ],
+      "put": {
+        "summary": "Roll back an activated update",
+        "description": "From `ACTIVATING`, `VERIFYING` or `ACTIVATED_UNCOMMITTED`; the update goes through `ROLLING_BACK` to `ROLLED_BACK`. A rollback that needs a restart waits in `ROLLING_BACK` for it.",
+        "responses": {
+          "202": {
+            "description": "Accepted; poll the status resource until the state settles.",
+            "headers": {
+              "Location": {
+                "description": "`…/updates/{update_id}/status`, under the prefix the request used.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not in the execute phase, or already committed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/components/{component_id}/updates/{update_id}/x-update-finish": {
+      "parameters": [
+        {
+          "name": "component_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "$ref": "#/components/schemas/UpdateId"
+          }
+        }
+      ],
+      "put": {
+        "summary": "Clean up a settled update",
+        "description": "From `COMMITTED`, `ROLLED_BACK` or `FATAL_FAILURE`; the update goes through `CLEANING_UP` to `IDLE` and then only awaits its `DELETE`.",
+        "responses": {
+          "202": {
+            "description": "Accepted; poll the status resource until the state settles.",
+            "headers": {
+              "Location": {
+                "description": "`…/updates/{update_id}/status`, under the prefix the request used.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not settled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/components/{component_id}/updates/{update_id}/x-update-invalidate": {
+      "parameters": [
+        {
+          "name": "component_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "$ref": "#/components/schemas/UpdateId"
+          }
+        }
+      ],
+      "put": {
+        "summary": "Discard a preparation",
+        "description": "From `VALIDATED`; the update returns to `PROCESSED` and can be prepared again.",
+        "responses": {
+          "202": {
+            "description": "Accepted; poll the status resource until the state settles.",
+            "headers": {
+              "Location": {
+                "description": "`…/updates/{update_id}/status`, under the prefix the request used.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not `VALIDATED`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "UpdateId": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$",
+        "description": "Chosen by the client, 1-64 characters, not starting with `.`. The server stores and reports it verbatim."
+      },
+      "UpdateList": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UpdateId"
+            }
+          }
+        }
+      },
+      "Registration": {
+        "type": "object",
+        "required": [
+          "id",
+          "x-update"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/UpdateId"
+          },
+          "target": {
+            "type": "string",
+            "description": "The executor (component) the update is for."
+          },
+          "x-update": {
+            "$ref": "./sovd-x-update.schema.json#/$defs/RegistrationOptions"
+          }
+        }
+      },
+      "Details": {
+        "type": "object",
+        "description": "Standard §7.18.3 details; only the x-update member is shown.",
+        "properties": {
+          "x-update": {
+            "type": "object",
+            "required": [
+              "target",
+              "two_phase"
+            ],
+            "properties": {
+              "target": {
+                "type": "string"
+              },
+              "two_phase": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      },
+      "StatusBody": {
+        "type": "object",
+        "required": [
+          "phase",
+          "status",
+          "x-update"
+        ],
+        "properties": {
+          "phase": {
+            "type": "string",
+            "enum": [
+              "prepare",
+              "execute"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "inProgress",
+              "completed",
+              "failed"
+            ]
+          },
+          "progress": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "step": {
+            "type": "string",
+            "description": "Free text for people; not for decisions."
+          },
+          "error": {
+            "$ref": "#/components/schemas/GenericError"
+          },
+          "x-update": {
+            "allOf": [
+              {
+                "$ref": "./sovd-x-update.schema.json#/$defs/Status"
+              }
+            ],
+            "properties": {
+              "state": {
+                "$ref": "#/components/schemas/XUpdateState"
+              }
+            }
+          }
+        }
+      },
+      "XUpdateState": {
+        "allOf": [
+          {
+            "$ref": "./sovd-x-update.schema.json#/$defs/State"
+          }
+        ],
+        "description": "The state of the update, one value of the shared `State` enum. A client compares this value and nothing else; `phase`/`status` stay the standard members and do not encode the x-update state.\n\nSettled states, where the update stays until the client acts (or, for `ACTIVATING`, until a restart happens):\n- `VALIDATED`: prepared. Next: `execute`, `x-update-invalidate`, or `DELETE`.\n- `ACTIVATED_UNCOMMITTED`: the new software runs and awaits a verdict. Next: `x-update-commit` or `x-update-rollback`.\n- `COMMITTED`: committed. Next: `x-update-finish`.\n- `ROLLED_BACK`: rolled back, whether the client asked for it or the executor rolled back on its own (auto-rollback, e.g. the new software did not come up). Next: `x-update-finish`.\n- `FATAL_FAILURE`: the executor cannot continue the update. Next: `x-update-finish` or `DELETE`.\n- `IDLE` with `status: completed`: finished. Next: `DELETE`. (`IDLE` before preparation means the executor has not taken the update yet.)\n\nTransient states, which the client awaits: `READY`, `TRANSFERRING_META`, `PROCESSING`, `PROCESSED` (processed, not validated; also after `x-update-invalidate`), `VALIDATING`, `ACTIVATING`, `VERIFYING`, `COMMITTING`, `ROLLING_BACK`, `CLEANING_UP`.\n\nRestarts. An activation that needs a component or node restart stays in `ACTIVATING` (`step` may say why, e.g. `awaiting-ignition-cycle`) until the restart has happened, then passes `VERIFYING` to `ACTIVATED_UNCOMMITTED`. The client does not issue the restart and the server does not ask it to: the restart may come from the vehicle's state management, a tester or an ignition cycle. The client awaits the state."
+      },
+      "GenericError": {
+        "type": "object",
+        "description": "ISO 17978-3 §5.8.3 GenericError.",
+        "required": [
+          "error_code",
+          "message"
+        ],
+        "properties": {
+          "error_code": {
+            "type": "string"
+          },
+          "vendor_code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

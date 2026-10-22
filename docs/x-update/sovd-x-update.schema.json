@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SovdXUpdateApi",
+  "description": "x-update extensions to the SOVD software-update resource family.",
+  "type": "object",
+  "properties": {
+    "registration_options": {
+      "$ref": "#/$defs/RegistrationOptions"
+    },
+    "extension_verb": {
+      "$ref": "#/$defs/ExtensionVerb"
+    },
+    "status": {
+      "$ref": "#/$defs/Status"
+    },
+    "manifest_upload_response": {
+      "$ref": "#/$defs/ManifestUploadResponse"
+    }
+  },
+  "required": [
+    "registration_options",
+    "extension_verb",
+    "status"
+  ],
+  "$defs": {
+    "RegistrationOptions": {
+      "description": "Options supplied when registering an update. In two-phase mode activation stops before commit.",
+      "type": "object",
+      "properties": {
+        "two_phase": {
+          "description": "Keep an activated update uncommitted until an explicit x-update-commit or x-update-rollback request.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "two_phase"
+      ],
+      "additionalProperties": false
+    },
+    "ExtensionVerb": {
+      "description": "x-update lifecycle verbs extending the standard SOVD update operations.",
+      "type": "string",
+      "enum": [
+        "x-update-commit",
+        "x-update-finish",
+        "x-update-rollback",
+        "x-update-invalidate"
+      ]
+    },
+    "State": {
+      "description": "Native UpdateExecutor state exposed by the additive x-update status attribute.",
+      "type": "string",
+      "enum": [
+        "IDLE",
+        "READY",
+        "PROCESSING",
+        "ACTIVATING",
+        "ACTIVATED_UNCOMMITTED",
+        "ROLLING_BACK",
+        "ROLLED_BACK",
+        "CLEANING_UP",
+        "VERIFYING",
+        "TRANSFERRING_META",
+        "PROCESSED",
+        "VALIDATING",
+        "VALIDATED",
+        "COMMITTING",
+        "COMMITTED",
+        "FATAL_FAILURE"
+      ]
+    },
+    "Status": {
+      "description": "x-update-specific status nested in the standard update status response as x-update.",
+      "type": "object",
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/State"
+        },
+        "progress": {
+          "description": "Progress of the active transfer or lifecycle operation in percent.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "additionalProperties": false
+    },
+    "ManifestUploadResponse": {
+      "description": "Response to PUT {updates-prefix}/{id}/bulk-data/manifest; the body uploaded is the original binary L2 SUIT envelope.",
+      "type": "object",
+      "properties": {
+        "part_id": {
+          "type": "string",
+          "enum": [
+            "manifest"
+          ]
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        }
+      },
+      "required": [
+        "part_id",
+        "size"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
