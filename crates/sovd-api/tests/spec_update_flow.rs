@@ -2189,16 +2189,39 @@ async fn reserved_char_id_round_trips_encoded() {
 // x-update extension pack, beside x-ota
 // ---------------------------------------------------------------------------
 
-/// Register an update with the x-update member.
+/// Register an update with the x-update member, under an id of the client's.
 async fn open_x_update(server: &TestServer, two_phase: bool) -> String {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    let id = format!(
+        "x-update-{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
     let resp = register(
         server,
-        serde_json::json!({ "x-update": { "two_phase": two_phase } }),
+        serde_json::json!({ "id": id, "x-update": { "two_phase": two_phase } }),
     )
     .await;
     assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
     let body: Value = resp.json().await.unwrap();
-    body["update_id"].as_str().unwrap().to_string()
+    assert_eq!(body["update_id"], id.as_str());
+    id
+}
+
+#[tokio::test]
+async fn x_update_registration_needs_the_clients_id() {
+    let (server, _backend) = spawn_with("banked").await;
+    let resp = register(
+        &server,
+        serde_json::json!({ "x-update": { "two_phase": true } }),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let (_, list) = get_json(
+        &server,
+        "/vehicle/v1/components/dev1/updates?origin=proximity",
+    )
+    .await;
+    assert_eq!(list["items"], serde_json::json!([]));
 }
 
 fn x_update_state(body: &Value) -> &str {
@@ -2557,47 +2580,6 @@ async fn x_update_manifest_upload_contract() {
         let resp = http().put(&ota_url).body(body).send().await.unwrap();
         assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
     }
-}
-
-#[tokio::test]
-async fn x_update_lists_a_pending_trial_and_force_rollback_retires_it() {
-    let (server, backend) = spawn_with("banked").await;
-    *backend.flash_state.lock() = CoreFlashState::Activated;
-    let (_, list) = get_json(
-        &server,
-        "/vehicle/v1/components/dev1/updates?origin=proximity",
-    )
-    .await;
-    assert_eq!(list["items"], serde_json::json!(["pending-trial-dev1"]));
-    assert_eq!(
-        x_update_state(&get_status(&server, "pending-trial-dev1").await),
-        "ACTIVATED_UNCOMMITTED"
-    );
-    // The x-ota way out still works and leaves no stale pending trial behind.
-    let resp = put(&server, "/vehicle/v1/components/dev1/x-ota-force-rollback").await;
-    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
-    let (_, list) = get_json(
-        &server,
-        "/vehicle/v1/components/dev1/updates?origin=proximity",
-    )
-    .await;
-    assert_eq!(list["items"], serde_json::json!([]));
-
-    // The x-update way: roll the pending trial back.
-    *backend.flash_state.lock() = CoreFlashState::Activated;
-    let resp = put(
-        &server,
-        "/vehicle/v1/updates/pending-trial-dev1/x-update-rollback",
-    )
-    .await;
-    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
-    assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
-    assert_eq!(
-        x_update_state(&get_status(&server, "pending-trial-dev1").await),
-        "ROLLED_BACK"
-    );
-    let resp = register(&server, serde_json::json!({ "id": "pending-trial-dev1" })).await;
-    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

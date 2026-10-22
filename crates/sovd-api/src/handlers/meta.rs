@@ -855,14 +855,13 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
                     "PUT /vehicle/v1/updates/{update_id}/x-update-finish",
                     "PUT /vehicle/v1/updates/{update_id}/x-update-invalidate"
                 ],
-                "spec":   "traton-one-os sovd-schema-x-update-api",
+                "spec":   "docs/x-update (traton-one-os sovd-schema-x-update-api)",
                 "summary": "Served beside x-ota and interchangeable with it. A \
                             two-phase registration pauses a banked execute at \
                             ACTIVATED_UNCOMMITTED like x-ota-control=orchestrated; \
                             the x-update verbs settle it, or a staged one-phase \
-                            update, or a trial an earlier session left (listed as \
-                            pending-trial-<component>). The manifest reads back \
-                            at GET .../bulk-data/manifest."
+                            update. The client owns the update ids. The manifest \
+                            reads back at GET .../bulk-data/manifest."
             },
             "x-multiple": {
                 "kind":  "value token",

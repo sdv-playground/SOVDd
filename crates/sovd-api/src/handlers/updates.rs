@@ -270,13 +270,13 @@ async fn register_inner(
                     .into(),
             ));
         }
-        Some(id) if id.starts_with(PENDING_TRIAL_PREFIX) => {
-            return Err(ApiError::BadRequest(format!(
-                "{PENDING_TRIAL_PREFIX}* update ids are reserved for trials left by an \
-                 earlier session"
-            )));
-        }
         Some(id) if !id.is_empty() => id.to_string(),
+        // The x-update client owns its ids: the server never makes one up.
+        _ if req.x_update.is_some() || node_level => {
+            return Err(ApiError::BadRequest(
+                "an x-update registration carries the client's id".into(),
+            ));
+        }
         _ => Uuid::new_v4().to_string(),
     };
     let x_update = req.x_update.is_some() || node_level;
@@ -340,7 +340,6 @@ async fn register_inner(
                 substate: None,
                 x_update,
                 two_phase,
-                adopted: false,
                 finished: false,
                 manifest_bytes: None,
                 reset_kind: None,
@@ -504,8 +503,6 @@ pub async fn list_updates(
     if !origin_lists_catalog(query.origin.as_deref())? {
         return Ok(Json(UpdatesListResponse { items: Vec::new() }));
     }
-    adopt_pending_trial(&state, &component_id).await?;
-
     let store = state.updates.0.lock();
     let mut items: Vec<String> = store
         .iter()
@@ -525,7 +522,6 @@ pub async fn get_update(
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let backend = state.get_backend(&component_id)?;
-    ensure_adopted(&state, &component_id, &update_id).await?;
 
     // §7.18.1.5: `autonomous` is a read-only indirection to a concrete id on
     // servers that self-select. SOVDd performs no self-governed selection, so
@@ -1353,12 +1349,6 @@ pub async fn put_x_ota_force_rollback(
 ) -> Result<StatusCode, ApiError> {
     let backend = state.get_backend(&component_id)?;
     backend.rollback_flash().await?;
-    // The trial is gone, so is the update that stood for it.
-    state
-        .updates
-        .0
-        .lock()
-        .retain(|key, entry| !(entry.adopted && key.component_id() == component_id));
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1432,8 +1422,7 @@ fn claim_verdict(
 
 /// How an x-update verdict verb reaches the update: by waking the execute task
 /// paused at `awaiting-verdict`, or directly on the backend when no task is
-/// paused (a one-phase banked update staged for its reset, or a trial an
-/// earlier session left behind).
+/// paused (a one-phase banked update staged for its reset).
 enum XUpdateVerdict {
     Paused(Uuid),
     Direct(Uuid),
@@ -1454,7 +1443,7 @@ fn x_update_verdict_route(
         && entry.state == UpdateState::Finalized;
     if entry.substate == Some("awaiting-verdict") && entry.verdict_tx.is_some() {
         Ok(XUpdateVerdict::Paused(entry.registration_token))
-    } else if staged || (entry.adopted && entry.substate == Some("awaiting-verdict")) {
+    } else if staged {
         Ok(XUpdateVerdict::Direct(entry.registration_token))
     } else {
         Err(ApiError::Conflict(format!(
@@ -1471,7 +1460,6 @@ pub async fn put_x_update_commit(
     State(state): State<AppState>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    ensure_adopted(&state, &component_id, &update_id).await?;
     let route = x_update_verdict_route(&state, &component_id, &update_id)?;
     let backend = state.get_backend(&component_id)?;
     let activation = backend.get_activation_state().await?;
@@ -1510,7 +1498,6 @@ pub async fn put_x_update_rollback(
     State(state): State<AppState>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    ensure_adopted(&state, &component_id, &update_id).await?;
     match x_update_verdict_route(&state, &component_id, &update_id)? {
         XUpdateVerdict::Paused(token) => claim_verdict(
             &state,
@@ -1685,92 +1672,8 @@ fn x_update_state(entry: &UpdatesEntry) -> &'static str {
     }
 }
 
-/// Reserved id prefix of a trial an earlier session left on the backend.
-pub(crate) const PENDING_TRIAL_PREFIX: &str = "pending-trial-";
-
 /// Largest manifest the x-update manifest-upload contract accepts.
 const MANIFEST_LIMIT: usize = 1024 * 1024;
-
-/// Surface a trial an earlier session left on the backend (installed but not
-/// committed, with no live update session owning it) as the update
-/// `pending-trial-<component>` in `ACTIVATED_UNCOMMITTED`, so an x-update
-/// orchestrator can find it in `GET /updates` and settle it with
-/// `x-update-commit` / `x-update-rollback` (an x-ota one keeps using
-/// `x-ota-force-rollback`).
-async fn adopt_pending_trial(state: &AppState, component_id: &str) -> Result<(), ApiError> {
-    let backend = state.get_backend(component_id)?.clone();
-    // A live session (or an earlier adoption) already owns the backend's state.
-    let owned = |store: &std::collections::HashMap<UpdateKey, UpdatesEntry>| {
-        store.iter().any(|(key, entry)| {
-            key.component_id() == component_id
-                && (entry.adopted
-                    || entry.status == Status::InProgress
-                    || entry.substate.is_some()
-                    || (entry.phase == Phase::Execute && entry.state == UpdateState::Finalized))
-        })
-    };
-    if owned(&state.updates.0.lock()) {
-        return Ok(());
-    }
-    let Ok(activation) = backend.get_activation_state().await else {
-        return Ok(());
-    };
-    use sovd_core::FlashState;
-    if !activation.supports_rollback
-        || !matches!(
-            activation.state,
-            FlashState::AwaitingReboot | FlashState::Verifying | FlashState::Activated
-        )
-    {
-        return Ok(());
-    }
-    let mut store = state.updates.0.lock();
-    if owned(&store) {
-        return Ok(());
-    }
-    store.insert(
-        UpdateKey::new(
-            component_id,
-            &format!("{PENDING_TRIAL_PREFIX}{component_id}"),
-        ),
-        UpdatesEntry {
-            component_id: component_id.to_string(),
-            registration_token: Uuid::new_v4(),
-            uploads_in_progress: 0,
-            parts: Vec::new(),
-            manifest: None,
-            state: UpdateState::Finalized,
-            phase: Phase::Execute,
-            status: Status::InProgress,
-            progress: None,
-            step: Some("trial left by an earlier session".into()),
-            error: None,
-            substate: Some("awaiting-verdict"),
-            x_update: true,
-            two_phase: true,
-            adopted: true,
-            finished: false,
-            manifest_bytes: None,
-            reset_kind: Some(activation.reset_kind),
-            transfer_id: None,
-            task_handle: None,
-            verdict_tx: None,
-        },
-    );
-    Ok(())
-}
-
-/// Adopt the pending trial an id like `pending-trial-<component>` names.
-async fn ensure_adopted(
-    state: &AppState,
-    component_id: &str,
-    update_id: &str,
-) -> Result<(), ApiError> {
-    if update_id.strip_prefix(PENDING_TRIAL_PREFIX) == Some(component_id) {
-        adopt_pending_trial(state, component_id).await?;
-    }
-    Ok(())
-}
 
 /// `GET /vehicle/v1/components/{component_id}/updates/{update_id}/status`
 /// — ISO 17978-3 §7.18.7.  Returns Table 270's `UpdateStatusBody`.
@@ -1779,7 +1682,6 @@ pub async fn get_status(
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<Json<UpdateStatusBody>, ApiError> {
     let backend = state.get_backend(&component_id)?.clone();
-    ensure_adopted(&state, &component_id, &update_id).await?;
     let mut body = {
         let store = state.updates.0.lock();
         let entry = store
@@ -2088,14 +1990,8 @@ pub async fn put_bulk_data_part(
 // handler; an id registered on several components (x-ota only) is ambiguous.
 // ---------------------------------------------------------------------------
 
-/// The component an update id is registered on; a `pending-trial-<component>`
-/// id is adopted first.
+/// The component an update id is registered on.
 async fn component_of(state: &AppState, update_id: &str) -> Result<String, ApiError> {
-    if let Some(component_id) = update_id.strip_prefix(PENDING_TRIAL_PREFIX) {
-        if state.get_backend(component_id).is_ok() {
-            adopt_pending_trial(state, component_id).await?;
-        }
-    }
     let store = state.updates.0.lock();
     let mut owners = store
         .keys()
@@ -2120,10 +2016,6 @@ pub async fn list_node_updates(
 ) -> Result<Json<UpdatesListResponse>, ApiError> {
     if !origin_lists_catalog(query.origin.as_deref())? {
         return Ok(Json(UpdatesListResponse { items: Vec::new() }));
-    }
-    let components: Vec<String> = state.component_ids().into_iter().cloned().collect();
-    for component_id in &components {
-        adopt_pending_trial(&state, component_id).await?;
     }
     let mut items: Vec<String> = state
         .updates

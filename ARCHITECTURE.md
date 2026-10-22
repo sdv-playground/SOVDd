@@ -454,12 +454,11 @@ no trial: `… → Activated → commit_flash() → Complete`.
 - **x-update extension pack** (traton-one-os `sovd-schema-x-update-api`; contract in `docs/x-update/`), served beside x-ota and
   interchangeable with it: a registration with `x-update: {two_phase: true}` pauses a banked execute
   like `?x-ota-control=orchestrated`; the status body adds `x-update: {state, progress}` next to the
-  x-ota fields; `x-update-commit`/`-rollback` (also on a staged one-phase update or an adopted
-  `pending-trial-<component>`), `-finish` and `-invalidate` work on any update; a node-level
+  x-ota fields; `x-update-commit`/`-rollback` (also on a staged one-phase update), `-finish` and `-invalidate` work on any update; a node-level
   `/vehicle/v1/updates` collection resolves the component from the id; the update detail echoes
   `x-update: {target, two_phase}` and `GET …/bulk-data/manifest` reads the uploaded L2 back. An
   x-update registration's manifest follows the x-update upload contract (octet-stream, ≤ 1 MiB,
-  identical retry, else 409) and its id is unique across the node; x-ota registrations keep their
+  identical retry, else 409) and its id, which the client must give, is unique across the node; x-ota registrations keep their
   per-component ids and lenient uploads.
 
 ---

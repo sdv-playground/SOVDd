@@ -160,10 +160,6 @@ pub struct UpdatesEntry {
     /// (x-update `ACTIVATED_UNCOMMITTED`) as if `?x-ota-control=orchestrated`
     /// had been given.
     pub two_phase: bool,
-    /// Synthesised for a trial an earlier session left on the backend
-    /// (`pending-trial-<component>`): there is no paused execute task, so the
-    /// x-update verdict verbs act on the backend directly.
-    pub adopted: bool,
     /// Set by `x-update-finish`: the terminal update is cleaned up and only
     /// awaits its `DELETE`.
     pub finished: bool,
