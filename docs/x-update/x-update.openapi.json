@@ -361,7 +361,7 @@
       ],
       "put": {
         "summary": "Roll back an activated update",
-        "description": "From `ACTIVATING` or `ACTIVATED_UNCOMMITTED`; the update goes through `ROLLING_BACK` to `ROLLED_BACK`. A rollback that needs a restart waits in `ROLLING_BACK` for it.",
+        "description": "From `ACTIVATED_UNCOMMITTED`, or from `ACTIVATING` once the activation itself is done and the update only awaits its settlement to `ACTIVATED_UNCOMMITTED` (e.g. the restart). While the activation operation is still running the server may answer 409; the client retries. The update goes through `ROLLING_BACK` to `ROLLED_BACK`. A rollback that needs a restart waits in `ROLLING_BACK` for it.",
         "responses": {
           "202": {
             "description": "Accepted; poll the status resource until the state settles.",
@@ -902,7 +902,7 @@
       ],
       "put": {
         "summary": "Roll back an activated update",
-        "description": "From `ACTIVATING` or `ACTIVATED_UNCOMMITTED`; the update goes through `ROLLING_BACK` to `ROLLED_BACK`. A rollback that needs a restart waits in `ROLLING_BACK` for it.",
+        "description": "From `ACTIVATED_UNCOMMITTED`, or from `ACTIVATING` once the activation itself is done and the update only awaits its settlement to `ACTIVATED_UNCOMMITTED` (e.g. the restart). While the activation operation is still running the server may answer 409; the client retries. The update goes through `ROLLING_BACK` to `ROLLED_BACK`. A rollback that needs a restart waits in `ROLLING_BACK` for it.",
         "responses": {
           "202": {
             "description": "Accepted; poll the status resource until the state settles.",
