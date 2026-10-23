@@ -160,7 +160,9 @@ pub enum XUpdateState {
     Preparing,
     Prepared,
     Executing,
-    Trial,
+    /// `execute` has done its work: the new software runs and a verdict is
+    /// awaited (the standard phase stays `inProgress` until the verdict).
+    Executed,
     Committing,
     Committed,
     RollingBack,
@@ -1433,21 +1435,7 @@ pub async fn get_status(
 ) -> Result<Json<UpdateStatusBody>, ApiError> {
     let backend = state.get_backend(&component_id)?;
     let key = UpdateKey::new(&component_id, &update_id);
-    let phase = {
-        let store = state.updates.0.lock();
-        store
-            .get(&key)
-            .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?
-            .phase
-    };
-    // Only the execute phase needs the backend's view (trial vs. still
-    // executing). Read it outside the store lock; a failure here must never
-    // fail the status read.
-    let activation = if phase == Phase::Execute {
-        backend.get_activation_state().await.ok().map(|a| a.state)
-    } else {
-        None
-    };
+    let activation = execute_activation(&state, backend, &key, &update_id).await?;
     let store = state.updates.0.lock();
     let entry = store
         .get(&key)
@@ -1471,6 +1459,29 @@ pub async fn get_status(
     }))
 }
 
+/// The backend's activation state, read for an update in the execute phase
+/// only (it tells executing from executed). Read outside the store lock; a
+/// failure here must never fail the caller.
+async fn execute_activation(
+    state: &AppState,
+    backend: &Arc<dyn sovd_core::DiagnosticBackend>,
+    key: &UpdateKey,
+    update_id: &str,
+) -> Result<Option<sovd_core::FlashState>, ApiError> {
+    let phase = state
+        .updates
+        .0
+        .lock()
+        .get(key)
+        .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?
+        .phase;
+    Ok(if phase == Phase::Execute {
+        backend.get_activation_state().await.ok().map(|a| a.state)
+    } else {
+        None
+    })
+}
+
 /// Derive the x-update verb-named state from the entry's spec phase/status,
 /// its orchestrated substate and legacy state, and (execute phase only) the
 /// backend's activation state.
@@ -1486,7 +1497,7 @@ pub(crate) fn x_update_state(
         (Phase::Prepare, Status::Failed) => XUpdateState::Failed,
         (Phase::Execute, Status::InProgress) => match entry.substate {
             Some("awaiting-verdict") if activation == Some(FlashState::Activated) => {
-                XUpdateState::Trial
+                XUpdateState::Executed
             }
             Some("committing") => XUpdateState::Committing,
             Some("rolling-back") => XUpdateState::RollingBack,
@@ -1496,7 +1507,7 @@ pub(crate) fn x_update_state(
             UpdateState::Committed => XUpdateState::Committed,
             UpdateState::Finalized => match activation {
                 Some(FlashState::Committed) => XUpdateState::Committed,
-                Some(FlashState::Activated) => XUpdateState::Trial,
+                Some(FlashState::Activated) => XUpdateState::Executed,
                 _ => XUpdateState::Executing,
             },
             _ => XUpdateState::Committed,
@@ -1819,7 +1830,7 @@ mod tests {
             (
                 entry(Execute, InProgress, Some("awaiting-verdict"), reg),
                 act,
-                XUpdateState::Trial,
+                XUpdateState::Executed,
             ),
             (
                 entry(Execute, InProgress, Some("awaiting-verdict"), reg),
@@ -1854,7 +1865,7 @@ mod tests {
             (
                 entry(Execute, Completed, None, UpdateState::Finalized),
                 act,
-                XUpdateState::Trial,
+                XUpdateState::Executed,
             ),
             (
                 entry(Execute, Completed, None, UpdateState::Finalized),

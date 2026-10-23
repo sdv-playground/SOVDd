@@ -27,7 +27,7 @@ Body: `{"verdict": "commit" | "rollback"}`. It comes in two standard shapes.
 | 202 + `Location: {entity}/updates/{update_id}/status` | accepted; the update moves to COMMITTING or ROLLING_BACK |
 | 422 | `verdict` missing or not one of `commit`, `rollback` (400 for malformed JSON, 415 without `Content-Type: application/json`, as for every JSON body on this server) |
 | 404 | unknown update |
-| 409 `precondition-not-fulfilled` | the update is not awaiting a verdict; `commit` additionally requires the executor to report the new software running (state TRIAL) |
+| 409 `precondition-not-fulfilled` | the update is not awaiting a verdict; `commit` additionally requires the executor to report the new software running (state EXECUTED) |
 
 Served by this crate.
 
@@ -78,7 +78,7 @@ The state is total, and the standard `phase`/`status` in the same body agree wit
 | PREPARING | prepare | inProgress | verifying and staging |
 | PREPARED | prepare | completed | staged in the inactive bank; `execute` or `DELETE` |
 | EXECUTING | execute | inProgress | armed; the restart named by `reset_kind` has not been observed yet |
-| TRIAL | execute | inProgress | the new software runs; a verdict is awaited |
+| EXECUTED | execute | inProgress | execute has done its work: the new software runs and a verdict is awaited (the standard phase stays inProgress until the verdict) |
 | COMMITTING | execute | inProgress | commit accepted and running |
 | COMMITTED | execute | completed | permanent |
 | ROLLING_BACK | execute | inProgress | rollback accepted and running (the client's, or the executor's own, e.g. after failed trial boots) |
@@ -106,7 +106,7 @@ The x-ota member `x-ota-reset-kind` keeps its old vocabulary (`none`, `local`,
 
 | `verdict` | meaning |
 |---|---|
-| true | `execute` stops at TRIAL; a verdict is required |
+| true | `execute` stops at EXECUTED; a verdict is required |
 | false | `execute` commits on its own |
 | absent | the server cannot tell |
 
@@ -139,7 +139,7 @@ restart and the verdict.
 5. Read `x-update-state`.
 6. If `reset_kind` is `node`: restart the node's entity (`PUT {node-entity}/status/restart`) if
    authorized, otherwise wait for someone else to.
-7. When `rebooted_since_arming` is true and the updates report TRIAL: send one node verdict
+7. When `rebooted_since_arming` is true and the updates report EXECUTED: send one node verdict
    (all or nothing).
 8. `DELETE` each update.
 

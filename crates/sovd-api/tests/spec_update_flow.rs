@@ -2227,7 +2227,10 @@ async fn x_update_verdict_commit_mirrors_x_ota_commit() {
     assert_eq!(*backend.flash_state.lock(), CoreFlashState::AwaitingReboot);
 
     *backend.flash_state.lock() = CoreFlashState::Activated;
-    assert_eq!(get_status(&server, &id).await["x-update"]["state"], "TRIAL");
+    assert_eq!(
+        get_status(&server, &id).await["x-update"]["state"],
+        "EXECUTED"
+    );
 
     let resp = put_json(&server, &verdict_path(&id), commit).await;
     assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
@@ -2241,9 +2244,15 @@ async fn x_update_verdict_commit_mirrors_x_ota_commit() {
 }
 
 #[tokio::test]
-async fn x_update_verdict_rollback_mirrors_x_ota_rollback() {
+async fn x_update_rollback_accepted_while_executing_awaits_the_restart() {
+    // The execute itself is done and paused for its verdict, but the
+    // component has not restarted onto the new software: still EXECUTING.
     let (server, backend, id) = banked_awaiting_verdict().await;
     assert_eq!(*backend.flash_state.lock(), CoreFlashState::AwaitingReboot);
+    assert_eq!(
+        get_status(&server, &id).await["x-update"]["state"],
+        "EXECUTING"
+    );
 
     let resp = put_json(
         &server,
@@ -2257,6 +2266,28 @@ async fn x_update_verdict_rollback_mirrors_x_ota_rollback() {
     assert_eq!(final_body["status"], "failed");
     assert_eq!(final_body["x-update"]["state"], "ROLLED_BACK");
     assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
+}
+
+#[tokio::test]
+async fn x_update_rollback_from_executed() {
+    let (server, backend, id) = banked_awaiting_verdict().await;
+    *backend.flash_state.lock() = CoreFlashState::Activated;
+    assert_eq!(
+        get_status(&server, &id).await["x-update"]["state"],
+        "EXECUTED"
+    );
+
+    let resp = put_json(
+        &server,
+        &verdict_path(&id),
+        serde_json::json!({ "verdict": "rollback" }),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(
+        poll_terminal(&server, &id).await["x-update"]["state"],
+        "ROLLED_BACK"
+    );
 }
 
 #[tokio::test]
@@ -2276,7 +2307,10 @@ async fn x_update_verdict_rejects_bad_body() {
         );
     }
     // Bad bodies must not have consumed the verdict.
-    assert_eq!(get_status(&server, &id).await["x-update"]["state"], "TRIAL");
+    assert_eq!(
+        get_status(&server, &id).await["x-update"]["state"],
+        "EXECUTED"
+    );
 
     let resp = put_json(
         &server,
@@ -2289,7 +2323,7 @@ async fn x_update_verdict_rejects_bad_body() {
 }
 
 #[tokio::test]
-async fn x_update_verdict_rejected_when_not_awaiting_verdict() {
+async fn x_update_verdicts_rejected_before_execute() {
     let (server, _backend) = spawn_with("banked").await;
     let id = open_update(&server).await;
     upload_part(&server, &id, "manifest", b"x").await;

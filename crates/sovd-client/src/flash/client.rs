@@ -156,7 +156,7 @@ pub struct UpdateStatusBody {
 /// must not fail to parse a status carrying a future state name.
 #[derive(Debug, Clone, Deserialize)]
 pub struct XUpdateStatus {
-    /// e.g. `TRIAL`, `COMMITTED`, `ROLLED_BACK`.
+    /// e.g. `EXECUTED`, `COMMITTED`, `ROLLED_BACK`.
     pub state: String,
     /// `none` | `component` | `node`.
     #[serde(default)]
