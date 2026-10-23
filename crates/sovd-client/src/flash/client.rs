@@ -345,7 +345,9 @@ impl FlashClient {
     /// `commit` / `rollback` / `abort` first.
     #[instrument(skip(self))]
     pub async fn open_update(&self) -> Result<OpenUpdateResponse> {
-        self.post_open(&serde_json::json!({})).await
+        // The client owns the update id; the server never makes one up.
+        let id = uuid::Uuid::new_v4().to_string();
+        self.post_open(&serde_json::json!({ "id": id })).await
     }
 
     /// `POST /vehicle/v1/components/{id}/updates` declaring a meaningful
@@ -649,7 +651,7 @@ impl FlashClient {
     /// Posts the `Commit` verdict, then polls until terminal.
     #[instrument(skip(self))]
     pub async fn spec_commit(&self) -> Result<UpdateStatusBody> {
-        self.post_verdict_and_wait(FlashConfig::updates_x_ota_commit_path, None)
+        self.post_verdict_and_wait(FlashConfig::updates_x_ota_commit_path)
             .await
     }
 
@@ -657,26 +659,29 @@ impl FlashClient {
     /// Posts the `Rollback` verdict, then polls until terminal.
     #[instrument(skip(self))]
     pub async fn spec_rollback(&self) -> Result<UpdateStatusBody> {
-        self.post_verdict_and_wait(FlashConfig::updates_x_ota_rollback_path, None)
+        self.post_verdict_and_wait(FlashConfig::updates_x_ota_rollback_path)
             .await
     }
 
-    /// `PUT /updates/{update_id}/x-update-verdict` with body
-    /// `{"verdict": verdict}` (`"commit"` | `"rollback"`) — the x-update
-    /// alias of `spec_commit` / `spec_rollback`. Polls until terminal.
+    /// `PUT /updates/{update_id}/x-update-commit` — the x-update alias of
+    /// `spec_commit`. Polls until terminal.
     #[instrument(skip(self))]
-    pub async fn spec_verdict(&self, verdict: &str) -> Result<UpdateStatusBody> {
-        self.post_verdict_and_wait(
-            FlashConfig::updates_x_update_verdict_path,
-            Some(serde_json::json!({ "verdict": verdict })),
-        )
-        .await
+    pub async fn spec_x_update_commit(&self) -> Result<UpdateStatusBody> {
+        self.post_verdict_and_wait(FlashConfig::updates_x_update_commit_path)
+            .await
+    }
+
+    /// `PUT /updates/{update_id}/x-update-rollback` — the x-update alias of
+    /// `spec_rollback`. Polls until terminal.
+    #[instrument(skip(self))]
+    pub async fn spec_x_update_rollback(&self) -> Result<UpdateStatusBody> {
+        self.post_verdict_and_wait(FlashConfig::updates_x_update_rollback_path)
+            .await
     }
 
     async fn post_verdict_and_wait(
         &self,
         path_for: fn(&FlashConfig, &str) -> String,
-        body: Option<serde_json::Value>,
     ) -> Result<UpdateStatusBody> {
         let update_id = self
             .current_update_id()
@@ -685,9 +690,6 @@ impl FlashClient {
         let path = path_for(&self.config, &update_id);
         let url = self.build_url(&path)?;
         let mut req = self.client.put(url);
-        if let Some(body) = &body {
-            req = req.json(body);
-        }
         req = self.add_auth(req);
         let resp = req.send().await?;
         if resp.status() != StatusCode::ACCEPTED {

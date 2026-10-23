@@ -160,8 +160,6 @@ pub enum XUpdateState {
     Preparing,
     Prepared,
     Executing,
-    /// `execute` has done its work: the new software runs and a verdict is
-    /// awaited (the standard phase stays `inProgress` until the verdict).
     Executed,
     Committing,
     Committed,
@@ -187,19 +185,6 @@ impl From<sovd_core::ResetKind> for XUpdateResetKind {
             sovd_core::ResetKind::RequiresEcuReset => Self::Node,
         }
     }
-}
-
-/// Body of `PUT /updates/{id}/x-update-verdict`.
-#[derive(Debug, Deserialize)]
-pub struct VerdictBody {
-    pub verdict: VerdictWord,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum VerdictWord {
-    Commit,
-    Rollback,
 }
 
 #[derive(Debug, Serialize)]
@@ -273,9 +258,9 @@ pub async fn register_update(
         }
     }
 
-    // Resolve the stable package id: a client-declared id (Table 261 `id`)
-    // becomes the catalog key; absent → mint a UUID. `autonomous` is reserved
-    // (§7.18.1.5) and cannot be registered as an installable package.
+    // The client owns the package id (Table 261 `id`): it becomes the catalog
+    // key verbatim, and the server never makes one up. `autonomous` is
+    // reserved (§7.18.1.5) and cannot be registered as an installable package.
     let update_id = match req.id.as_deref() {
         Some(AUTONOMOUS_PACKAGE_ID) => {
             return Err(ApiError::BadRequest(
@@ -285,7 +270,11 @@ pub async fn register_update(
             ));
         }
         Some(id) if !id.is_empty() => id.to_string(),
-        _ => Uuid::new_v4().to_string(),
+        _ => {
+            return Err(ApiError::BadRequest(
+                "a registration carries the client's update id".into(),
+            ))
+        }
     };
     let manifest = req.manifest;
     let key = UpdateKey::new(&component_id, &update_id);
@@ -1279,21 +1268,54 @@ pub async fn put_x_ota_rollback(
     verdict_rollback(&state, &component_id, &update_id)
 }
 
-/// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-update-verdict`
+/// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-update-commit`
 ///
-/// x-update alias of `x-ota-commit` / `x-ota-rollback`: one verb with the
-/// verdict in the body (`{"verdict": "commit" | "rollback"}`). Same
-/// preconditions and response (`202 + Location: .../status`) as the verb
-/// it stands for.
-pub async fn put_x_update_verdict(
+/// x-update alias of `x-ota-commit`: same precondition (`EXECUTED`) and
+/// response (`202 + Location: .../status`); repeated on a `COMMITTED`
+/// update it is accepted and changes nothing.
+pub async fn put_x_update_commit(
     State(state): State<AppState>,
     Path((component_id, update_id)): Path<(String, String)>,
-    Json(body): Json<VerdictBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    match body.verdict {
-        VerdictWord::Commit => verdict_commit(&state, &component_id, &update_id).await,
-        VerdictWord::Rollback => verdict_rollback(&state, &component_id, &update_id),
+    if settled_as(&state, &component_id, &update_id, XUpdateState::Committed).await? {
+        return accepted_with_status_location(&component_id, &update_id);
     }
+    verdict_commit(&state, &component_id, &update_id).await
+}
+
+/// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-update-rollback`
+///
+/// x-update alias of `x-ota-rollback`: accepted in `EXECUTING` and
+/// `EXECUTED`, and repeated on a `ROLLED_BACK` update, where it changes
+/// nothing. `202 + Location: .../status`.
+pub async fn put_x_update_rollback(
+    State(state): State<AppState>,
+    Path((component_id, update_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    if settled_as(&state, &component_id, &update_id, XUpdateState::RolledBack).await? {
+        return accepted_with_status_location(&component_id, &update_id);
+    }
+    verdict_rollback(&state, &component_id, &update_id)
+}
+
+/// Whether the update already settled the way a repeated verdict asks for: a
+/// commit on a COMMITTED update (or a rollback on a ROLLED_BACK one) is
+/// accepted and changes nothing, so a client may send the verdict to every
+/// update of a node transaction, one after another.
+async fn settled_as(
+    state: &AppState,
+    component_id: &str,
+    update_id: &str,
+    settled: XUpdateState,
+) -> Result<bool, ApiError> {
+    let backend = state.get_backend(component_id)?;
+    let key = UpdateKey::new(component_id, update_id);
+    let activation = execute_activation(state, backend, &key, update_id).await?;
+    let store = state.updates.0.lock();
+    let entry = store
+        .get(&key)
+        .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+    Ok(x_update_state(entry, activation) == settled)
 }
 
 /// Commit verdict: requires the backend to report `Activated` (the trial is
@@ -1783,16 +1805,6 @@ mod tests {
             serde_json::to_value(XUpdateResetKind::from(sovd_core::ResetKind::Local)).unwrap(),
             "component"
         );
-    }
-
-    #[test]
-    fn verdict_body_parses_lowercase_words() {
-        let b: VerdictBody = serde_json::from_str(r#"{"verdict":"commit"}"#).unwrap();
-        assert_eq!(b.verdict, VerdictWord::Commit);
-        let b: VerdictBody = serde_json::from_str(r#"{"verdict":"rollback"}"#).unwrap();
-        assert_eq!(b.verdict, VerdictWord::Rollback);
-        assert!(serde_json::from_str::<VerdictBody>(r#"{"verdict":"maybe"}"#).is_err());
-        assert!(serde_json::from_str::<VerdictBody>("{}").is_err());
     }
 
     #[test]

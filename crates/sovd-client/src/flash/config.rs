@@ -468,11 +468,17 @@ impl FlashConfig {
             update_id
         )
     }
-    /// x-update alias of the two verdict verbs: one verb, verdict in the
-    /// body.
-    pub fn updates_x_update_verdict_path(&self, update_id: &str) -> String {
+    /// x-update aliases of the two verdict verbs.
+    pub fn updates_x_update_commit_path(&self, update_id: &str) -> String {
         format!(
-            "{}/updates/{}/x-update-verdict",
+            "{}/updates/{}/x-update-commit",
+            self.base_prefix(),
+            update_id
+        )
+    }
+    pub fn updates_x_update_rollback_path(&self, update_id: &str) -> String {
+        format!(
+            "{}/updates/{}/x-update-rollback",
             self.base_prefix(),
             update_id
         )

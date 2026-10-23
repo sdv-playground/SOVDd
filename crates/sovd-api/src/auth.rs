@@ -202,7 +202,8 @@ pub fn route_capability(method: &Method, path: &str) -> Capability {
         Capability::Admin
     } else if path.contains("/x-ota-commit")
         || path.contains("/x-ota-rollback")
-        || path.contains("/x-update-verdict")
+        || path.contains("/x-update-commit")
+        || path.contains("/x-update-rollback")
     {
         Capability::UpdateVerdict
     } else if path.contains("/operations/x-ota-commit-trials")
@@ -766,11 +767,13 @@ mod tests {
             ),
             Capability::UpdateVerdict
         );
-        // The x-update alias of the node verdict (served by the embedder).
-        assert_eq!(
-            route_capability(&post, "/vehicle/v1/operations/x-update-verdict/executions"),
-            Capability::UpdateVerdict
-        );
+        // The x-update aliases of the node verdicts (served by the embedder).
+        for op in ["x-update-commit", "x-update-rollback"] {
+            assert_eq!(
+                route_capability(&post, &format!("/vehicle/v1/operations/{op}/executions")),
+                Capability::UpdateVerdict
+            );
+        }
         // The trials branch wins over the generic /operations branch even on GET.
         assert_eq!(
             route_capability(
@@ -786,7 +789,6 @@ mod tests {
         // The `/updates` orchestration verbs (`x-ota-` family, C-026) must
         // resolve to UpdateVerdict, not the generic `/updates` capabilities.
         let put = Method::PUT;
-        let post = Method::POST;
         assert_eq!(
             route_capability(&put, "/vehicle/v1/components/dev1/updates/u1/x-ota-commit"),
             Capability::UpdateVerdict
@@ -798,17 +800,16 @@ mod tests {
             ),
             Capability::UpdateVerdict
         );
-        assert_eq!(
-            route_capability(
-                &put,
-                "/vehicle/v1/components/dev1/updates/u1/x-update-verdict"
-            ),
-            Capability::UpdateVerdict
-        );
-        assert_eq!(
-            route_capability(&post, "/vehicle/v1/operations/x-update-verdict/executions"),
-            Capability::UpdateVerdict
-        );
+        for verb in ["x-update-commit", "x-update-rollback"] {
+            assert_eq!(
+                route_capability(
+                    &put,
+                    &format!("/vehicle/v1/components/dev1/updates/u1/{verb}")
+                ),
+                Capability::UpdateVerdict,
+                "{verb}"
+            );
+        }
         // force-rollback is deliberately absent from the verdict branch and
         // falls through to the catch-all — unchanged by the rename.
         assert_eq!(

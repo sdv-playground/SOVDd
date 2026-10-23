@@ -42,6 +42,24 @@ pub struct ComponentDetailResponse {
     pub logs: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub apps: Option<String>,
+    /// Vendor extension: the executor's x-update state. `IDLE` once it holds
+    /// no update (every update deleted and cleaned up), else `BUSY`.
+    #[serde(rename = "x-update")]
+    pub x_update: XUpdateExecutor,
+}
+
+/// `x-update` member of the component body.
+#[derive(Serialize)]
+pub struct XUpdateExecutor {
+    pub state: XUpdateExecutorState,
+}
+
+/// Whether the executor holds an update.
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum XUpdateExecutorState {
+    Idle,
+    Busy,
 }
 
 #[derive(Serialize)]
@@ -168,6 +186,19 @@ pub async fn get_component(
             Some(format!("/vehicle/v1/components/{}/apps", component_id))
         } else {
             None
+        },
+        x_update: XUpdateExecutor {
+            state: if state
+                .updates
+                .0
+                .lock()
+                .keys()
+                .any(|key| key.component_id() == component_id)
+            {
+                XUpdateExecutorState::Busy
+            } else {
+                XUpdateExecutorState::Idle
+            },
         },
     };
 

@@ -520,12 +520,15 @@ pub fn create_router(state: AppState) -> Router {
             "/vehicle/v1/components/{component_id}/updates/{update_id}/x-ota-rollback",
             put(handlers::updates::put_x_ota_rollback),
         )
-        // x-update alias of the verdict surface: one verb, verdict in the
-        // body (`{"verdict": "commit" | "rollback"}`).  Same semantics as
-        // x-ota-commit / x-ota-rollback.
+        // x-update aliases of the verdict verbs (same semantics as
+        // x-ota-commit / x-ota-rollback).
         .route(
-            "/vehicle/v1/components/{component_id}/updates/{update_id}/x-update-verdict",
-            put(handlers::updates::put_x_update_verdict),
+            "/vehicle/v1/components/{component_id}/updates/{update_id}/x-update-commit",
+            put(handlers::updates::put_x_update_commit),
+        )
+        .route(
+            "/vehicle/v1/components/{component_id}/updates/{update_id}/x-update-rollback",
+            put(handlers::updates::put_x_update_rollback),
         )
         // Unconditional trial-state clear — separate from x-ota-rollback
         // (which is the orchestrator's verdict on an awaiting-verdict

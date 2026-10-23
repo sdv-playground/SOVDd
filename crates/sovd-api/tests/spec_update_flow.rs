@@ -414,10 +414,12 @@ fn http() -> reqwest::Client {
 }
 
 async fn open_update(server: &TestServer) -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let id = format!("update-{}", NEXT.fetch_add(1, Ordering::Relaxed));
     let url = format!("{}/vehicle/v1/components/dev1/updates", server.base_url());
     let resp = http()
         .post(url)
-        .json(&serde_json::json!({}))
+        .json(&serde_json::json!({ "id": id }))
         .send()
         .await
         .expect("open_update");
@@ -1537,6 +1539,21 @@ async fn register(server: &TestServer, body: Value) -> reqwest::Response {
     http().post(url).json(&body).send().await.expect("register")
 }
 
+#[tokio::test]
+async fn registration_without_an_id_is_refused() {
+    let (server, _backend) = spawn_with("banked").await;
+    for body in [serde_json::json!({}), serde_json::json!({ "id": "" })] {
+        let resp = register(&server, body.clone()).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST, "{body}");
+    }
+    let (_, list) = get_json(
+        &server,
+        "/vehicle/v1/components/dev1/updates?origin=proximity",
+    )
+    .await;
+    assert_eq!(list["items"], serde_json::json!([]));
+}
+
 /// §7.18.2 Table 257: `GET /updates` is a `string[]` catalog of package ids,
 /// filtered by `origin` (Table 254/255). `remote` (the default) lists nothing
 /// on SOVDd; `proximity` / custom `x-<ext>-` list the staged ids; `x-sovd-`
@@ -2190,16 +2207,8 @@ async fn reserved_char_id_round_trips_encoded() {
 // x-update aliases (verdict verb, state projection, capability)
 // ---------------------------------------------------------------------------
 
-async fn put_json(server: &TestServer, path: &str, body: Value) -> reqwest::Response {
-    let url = format!("{}{}", server.base_url(), path);
-    http().put(url).json(&body).send().await.expect("put_json")
-}
-
-fn verdict_path(id: &str) -> String {
-    format!(
-        "/vehicle/v1/components/dev1/updates/{}/x-update-verdict",
-        id
-    )
+fn x_update_path(id: &str, verb: &str) -> String {
+    format!("/vehicle/v1/components/dev1/updates/{id}/{verb}")
 }
 
 /// Banked server with an update driven to the awaiting-verdict point.
@@ -2214,15 +2223,14 @@ async fn banked_awaiting_verdict() -> (TestServer, Arc<MockBackend>, String) {
 }
 
 #[tokio::test]
-async fn x_update_verdict_commit_mirrors_x_ota_commit() {
+async fn x_update_commit_mirrors_x_ota_commit() {
     let (server, backend, id) = banked_awaiting_verdict().await;
 
     let body = get_status(&server, &id).await;
     assert_eq!(body["x-update"]["state"], "EXECUTING");
     assert_eq!(body["x-update"]["reset_kind"], "component");
 
-    let commit = serde_json::json!({ "verdict": "commit" });
-    let resp = put_json(&server, &verdict_path(&id), commit.clone()).await;
+    let resp = put(&server, &x_update_path(&id, "x-update-commit")).await;
     assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
     assert_eq!(*backend.flash_state.lock(), CoreFlashState::AwaitingReboot);
 
@@ -2232,7 +2240,7 @@ async fn x_update_verdict_commit_mirrors_x_ota_commit() {
         "EXECUTED"
     );
 
-    let resp = put_json(&server, &verdict_path(&id), commit).await;
+    let resp = put(&server, &x_update_path(&id, "x-update-commit")).await;
     assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
     let loc = resp.headers()["location"].to_str().unwrap().to_string();
     assert!(loc.ends_with("/status"), "location was {loc}");
@@ -2254,12 +2262,7 @@ async fn x_update_rollback_accepted_while_executing_awaits_the_restart() {
         "EXECUTING"
     );
 
-    let resp = put_json(
-        &server,
-        &verdict_path(&id),
-        serde_json::json!({ "verdict": "rollback" }),
-    )
-    .await;
+    let resp = put(&server, &x_update_path(&id, "x-update-rollback")).await;
     assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
 
     let final_body = poll_terminal(&server, &id).await;
@@ -2276,50 +2279,65 @@ async fn x_update_rollback_from_executed() {
         get_status(&server, &id).await["x-update"]["state"],
         "EXECUTED"
     );
-
-    let resp = put_json(
-        &server,
-        &verdict_path(&id),
-        serde_json::json!({ "verdict": "rollback" }),
-    )
-    .await;
+    let resp = put(&server, &x_update_path(&id, "x-update-rollback")).await;
     assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
     assert_eq!(
         poll_terminal(&server, &id).await["x-update"]["state"],
         "ROLLED_BACK"
     );
+    // Repeated: accepted, changes nothing; a commit is refused.
+    let resp = put(&server, &x_update_path(&id, "x-update-rollback")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let resp = put(&server, &x_update_path(&id, "x-update-commit")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
 }
 
 #[tokio::test]
-async fn x_update_verdict_rejects_bad_body() {
+async fn x_update_delete_after_commit_leaves_the_executor_idle() {
     let (server, backend, id) = banked_awaiting_verdict().await;
-    *backend.flash_state.lock() = CoreFlashState::Activated;
+    let executor = |server: &TestServer| {
+        let server = server.base_url().to_string();
+        async move {
+            let body: Value = http()
+                .get(format!("{server}/vehicle/v1/components/dev1"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            body["x-update"]["state"].as_str().unwrap_or("").to_string()
+        }
+    };
+    assert_eq!(executor(&server).await, "BUSY");
 
-    for bad in [
-        serde_json::json!({ "verdict": "maybe" }),
-        serde_json::json!({}),
-    ] {
-        let resp = put_json(&server, &verdict_path(&id), bad.clone()).await;
-        assert_eq!(
-            resp.status(),
-            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
-            "body {bad}"
-        );
-    }
-    // Bad bodies must not have consumed the verdict.
+    *backend.flash_state.lock() = CoreFlashState::Activated;
+    let resp = put(&server, &x_update_path(&id, "x-update-commit")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(
+        poll_terminal(&server, &id).await["x-update"]["state"],
+        "COMMITTED"
+    );
+    // A repeated commit (one after another across a node transaction) is
+    // accepted and changes nothing; a rollback is refused.
+    let resp = put(&server, &x_update_path(&id, "x-update-commit")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let resp = put(&server, &x_update_path(&id, "x-update-rollback")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
     assert_eq!(
         get_status(&server, &id).await["x-update"]["state"],
-        "EXECUTED"
+        "COMMITTED"
     );
 
-    let resp = put_json(
-        &server,
-        &verdict_path(&id),
-        serde_json::json!({ "verdict": "commit" }),
-    )
-    .await;
-    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
-    assert_eq!(poll_terminal(&server, &id).await["status"], "completed");
+    assert_eq!(executor(&server).await, "BUSY");
+
+    let url = format!(
+        "{}/vehicle/v1/components/dev1/updates/{id}",
+        server.base_url()
+    );
+    let resp = http().delete(url).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+    assert_eq!(executor(&server).await, "IDLE");
 }
 
 #[tokio::test]
@@ -2327,14 +2345,9 @@ async fn x_update_verdicts_rejected_before_execute() {
     let (server, _backend) = spawn_with("banked").await;
     let id = open_update(&server).await;
     upload_part(&server, &id, "manifest", b"x").await;
-    for verdict in ["commit", "rollback"] {
-        let resp = put_json(
-            &server,
-            &verdict_path(&id),
-            serde_json::json!({ "verdict": verdict }),
-        )
-        .await;
-        assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT, "{verdict}");
+    for verb in ["x-update-commit", "x-update-rollback"] {
+        let resp = put(&server, &x_update_path(&id, verb)).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT, "{verb}");
     }
 }
 

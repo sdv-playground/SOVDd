@@ -836,14 +836,15 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
             "x-update": {
                 "kind":   "lifecycle verb + status member + capability flag",
                 "verbs": [
-                    "PUT /vehicle/v1/components/{id}/updates/{update_id}/x-update-verdict",
-                    "POST /vehicle/v1/operations/x-update-verdict/executions (served by the embedding machine manager)"
+                    "PUT /vehicle/v1/components/{id}/updates/{update_id}/x-update-commit",
+                    "PUT /vehicle/v1/components/{id}/updates/{update_id}/x-update-rollback",
+                    "POST /vehicle/v1/operations/x-update-commit/executions (served by the embedding machine manager)",
+                    "POST /vehicle/v1/operations/x-update-rollback/executions (served by the embedding machine manager)"
                 ],
-                "body":   {"verdict": "commit | rollback"},
-                "fields": ["x-update.state", "x-update.reset_kind", "capabilities.x-update.verdict"],
+                "fields": ["x-update.state", "x-update.reset_kind", "capabilities.x-update.verdict", "component x-update.state (IDLE | BUSY)"],
                 "spec":   "docs/x-update.md",
-                "summary": "Aliases of the x-ota verdict surface: one verb \
-                            with the verdict in the body, verb-named \
+                "summary": "Aliases of the x-ota verdict surface: explicit \
+                            commit and rollback verbs, verb-named \
                             states, and whether a verdict is awaited is an \
                             executor property advertised in capabilities, \
                             not a registration option."

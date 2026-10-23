@@ -454,9 +454,10 @@ no trial: `… → Activated → commit_flash() → Complete`.
 - **x-update aliases** ([docs/x-update.md](docs/x-update.md)) are served beside the x-ota names.
   The `x-update` status member (`state`, `reset_kind`) is derived from the update entry and the
   backend's `ActivationState`, not stored separately; `reset_kind` maps `None`/`Local`/
-  `RequiresEcuReset` to `none`/`component`/`node`. `PUT …/x-update-verdict` reuses the x-ota
+  `RequiresEcuReset` to `none`/`component`/`node`. `PUT …/x-update-commit`/`-rollback` reuse the x-ota
   verdict plumbing (the same `watch` channel and precondition checks as `x-ota-commit`/
-  `x-ota-rollback`). The node-level verdict operation and `data/x-update-state` are served by the
+  `x-ota-rollback`). The component body's `x-update.state` is `IDLE` once the component holds no
+  update (after `DELETE`), else `BUSY`. The node-level verdict operations and `data/x-update-state` are served by the
   embedding machine manager, not by this crate.
 
 ---
