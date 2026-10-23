@@ -200,7 +200,10 @@ pub fn route_capability(method: &Method, path: &str) -> Capability {
     let is_get = method == Method::GET;
     if path.starts_with("/admin/") {
         Capability::Admin
-    } else if path.contains("/x-ota-commit") || path.contains("/x-ota-rollback") {
+    } else if path.contains("/x-ota-commit")
+        || path.contains("/x-ota-rollback")
+        || path.contains("/x-update-verdict")
+    {
         Capability::UpdateVerdict
     } else if path.contains("/operations/x-ota-commit-trials")
         || path.contains("/operations/x-ota-rollback-trials")
@@ -763,6 +766,11 @@ mod tests {
             ),
             Capability::UpdateVerdict
         );
+        // The x-update alias of the node verdict (served by the embedder).
+        assert_eq!(
+            route_capability(&post, "/vehicle/v1/operations/x-update-verdict/executions"),
+            Capability::UpdateVerdict
+        );
         // The trials branch wins over the generic /operations branch even on GET.
         assert_eq!(
             route_capability(
@@ -778,6 +786,7 @@ mod tests {
         // The `/updates` orchestration verbs (`x-ota-` family, C-026) must
         // resolve to UpdateVerdict, not the generic `/updates` capabilities.
         let put = Method::PUT;
+        let post = Method::POST;
         assert_eq!(
             route_capability(&put, "/vehicle/v1/components/dev1/updates/u1/x-ota-commit"),
             Capability::UpdateVerdict
@@ -787,6 +796,17 @@ mod tests {
                 &put,
                 "/vehicle/v1/components/dev1/updates/u1/x-ota-rollback"
             ),
+            Capability::UpdateVerdict
+        );
+        assert_eq!(
+            route_capability(
+                &put,
+                "/vehicle/v1/components/dev1/updates/u1/x-update-verdict"
+            ),
+            Capability::UpdateVerdict
+        );
+        assert_eq!(
+            route_capability(&post, "/vehicle/v1/operations/x-update-verdict/executions"),
             Capability::UpdateVerdict
         );
         // force-rollback is deliberately absent from the verdict branch and

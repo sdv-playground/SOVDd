@@ -911,6 +911,7 @@ async fn discovery_endpoint_lists_vendor_extensions() {
     let exts = &body["extensions"];
     assert!(exts.get("x-ota-control").is_some());
     assert!(exts.get("x-ota-bulk-data").is_some());
+    assert!(exts.get("x-update").is_some());
     let verbs = &exts["x-ota-control"]["verbs"];
     assert!(
         verbs
@@ -2183,4 +2184,194 @@ async fn reserved_char_id_round_trips_encoded() {
         .unwrap()
         .iter()
         .any(|i| i == "#kernel-v1"));
+}
+
+// ---------------------------------------------------------------------------
+// x-update aliases (verdict verb, state projection, capability)
+// ---------------------------------------------------------------------------
+
+async fn put_json(server: &TestServer, path: &str, body: Value) -> reqwest::Response {
+    let url = format!("{}{}", server.base_url(), path);
+    http().put(url).json(&body).send().await.expect("put_json")
+}
+
+fn verdict_path(id: &str) -> String {
+    format!(
+        "/vehicle/v1/components/dev1/updates/{}/x-update-verdict",
+        id
+    )
+}
+
+/// Banked server with an update driven to the awaiting-verdict point.
+async fn banked_awaiting_verdict() -> (TestServer, Arc<MockBackend>, String) {
+    let (server, backend) = spawn_with("banked").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"banked").await;
+    upload_part(&server, &id, "#kernel", b"\xCAfake").await;
+    prepare_and_orchestrated_execute(&server, &id).await;
+    wait_for_substate(&server, &id, "awaiting-verdict").await;
+    (server, backend, id)
+}
+
+#[tokio::test]
+async fn x_update_verdict_commit_mirrors_x_ota_commit() {
+    let (server, backend, id) = banked_awaiting_verdict().await;
+
+    let body = get_status(&server, &id).await;
+    assert_eq!(body["x-update"]["state"], "EXECUTING");
+    assert_eq!(body["x-update"]["reset_kind"], "component");
+
+    let commit = serde_json::json!({ "verdict": "commit" });
+    let resp = put_json(&server, &verdict_path(&id), commit.clone()).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::AwaitingReboot);
+
+    *backend.flash_state.lock() = CoreFlashState::Activated;
+    assert_eq!(get_status(&server, &id).await["x-update"]["state"], "TRIAL");
+
+    let resp = put_json(&server, &verdict_path(&id), commit).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let loc = resp.headers()["location"].to_str().unwrap().to_string();
+    assert!(loc.ends_with("/status"), "location was {loc}");
+
+    let final_body = poll_terminal(&server, &id).await;
+    assert_eq!(final_body["status"], "completed");
+    assert_eq!(final_body["x-update"]["state"], "COMMITTED");
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::Committed);
+}
+
+#[tokio::test]
+async fn x_update_verdict_rollback_mirrors_x_ota_rollback() {
+    let (server, backend, id) = banked_awaiting_verdict().await;
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::AwaitingReboot);
+
+    let resp = put_json(
+        &server,
+        &verdict_path(&id),
+        serde_json::json!({ "verdict": "rollback" }),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+
+    let final_body = poll_terminal(&server, &id).await;
+    assert_eq!(final_body["status"], "failed");
+    assert_eq!(final_body["x-update"]["state"], "ROLLED_BACK");
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
+}
+
+#[tokio::test]
+async fn x_update_verdict_rejects_bad_body() {
+    let (server, backend, id) = banked_awaiting_verdict().await;
+    *backend.flash_state.lock() = CoreFlashState::Activated;
+
+    for bad in [
+        serde_json::json!({ "verdict": "maybe" }),
+        serde_json::json!({}),
+    ] {
+        let resp = put_json(&server, &verdict_path(&id), bad.clone()).await;
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            "body {bad}"
+        );
+    }
+    // Bad bodies must not have consumed the verdict.
+    assert_eq!(get_status(&server, &id).await["x-update"]["state"], "TRIAL");
+
+    let resp = put_json(
+        &server,
+        &verdict_path(&id),
+        serde_json::json!({ "verdict": "commit" }),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(poll_terminal(&server, &id).await["status"], "completed");
+}
+
+#[tokio::test]
+async fn x_update_verdict_rejected_when_not_awaiting_verdict() {
+    let (server, _backend) = spawn_with("banked").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"x").await;
+    for verdict in ["commit", "rollback"] {
+        let resp = put_json(
+            &server,
+            &verdict_path(&id),
+            serde_json::json!({ "verdict": verdict }),
+        )
+        .await;
+        assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT, "{verdict}");
+    }
+}
+
+#[tokio::test]
+async fn x_update_state_through_prepare_on_banked() {
+    let (server, _backend) = spawn_with("banked").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"banked").await;
+    upload_part(&server, &id, "#kernel", b"\xCAfake").await;
+
+    let body = get_status(&server, &id).await;
+    assert_eq!(body["phase"], "prepare");
+    assert_eq!(body["x-update"]["state"], "READY");
+    assert_eq!(body["x-update"]["reset_kind"], "component");
+
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{}/prepare", id),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let body = poll_terminal(&server, &id).await;
+    assert_eq!(body["status"], "completed");
+    assert_eq!(body["x-update"]["state"], "PREPARED");
+
+    let resp = put(
+        &server,
+        &format!(
+            "/vehicle/v1/components/dev1/updates/{}/execute?x-ota-control=orchestrated",
+            id
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let body = wait_for_substate(&server, &id, "awaiting-verdict").await;
+    assert_eq!(body["x-update"]["state"], "EXECUTING");
+}
+
+#[tokio::test]
+async fn x_update_state_singleshot_ends_committed() {
+    let (server, _backend) = spawn_with("singleshot").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"hsm").await;
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{}/prepare", id),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    poll_terminal(&server, &id).await;
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{}/execute", id),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let body = poll_terminal(&server, &id).await;
+    assert_eq!(body["status"], "completed");
+    assert_eq!(body["x-update"]["state"], "COMMITTED");
+}
+
+#[tokio::test]
+async fn component_advertises_x_update_verdict_capability() {
+    for (shape, want) in [("banked", true), ("singleshot", false)] {
+        let (server, _backend) = spawn_with(shape).await;
+        let (st, body) = get_json(&server, "/vehicle/v1/components/dev1").await;
+        assert_eq!(st, reqwest::StatusCode::OK);
+        assert_eq!(
+            body["capabilities"]["x-update"]["verdict"],
+            Value::Bool(want),
+            "{shape}"
+        );
+    }
 }

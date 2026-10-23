@@ -146,6 +146,21 @@ pub struct UpdateStatusBody {
     /// Absent on servers that haven't migrated → `None`.
     #[serde(default, rename = "x-ota-reset-kind")]
     pub reset_kind: Option<sovd_core::ResetKind>,
+    /// Vendor extension: the x-update view (verb-named state + reset
+    /// kind). Absent on servers that haven't migrated → `None`.
+    #[serde(rename = "x-update", default)]
+    pub x_update: Option<XUpdateStatus>,
+}
+
+/// `x-update` member of [`UpdateStatusBody`]. Strings on purpose: a client
+/// must not fail to parse a status carrying a future state name.
+#[derive(Debug, Clone, Deserialize)]
+pub struct XUpdateStatus {
+    /// e.g. `TRIAL`, `COMMITTED`, `ROLLED_BACK`.
+    pub state: String,
+    /// `none` | `component` | `node`.
+    #[serde(default)]
+    pub reset_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -634,28 +649,45 @@ impl FlashClient {
     /// Posts the `Commit` verdict, then polls until terminal.
     #[instrument(skip(self))]
     pub async fn spec_commit(&self) -> Result<UpdateStatusBody> {
-        self.post_verdict_and_wait("x-ota-commit").await
+        self.post_verdict_and_wait(FlashConfig::updates_x_ota_commit_path, None)
+            .await
     }
 
     /// `PUT /updates/{update_id}/x-ota-rollback` — Phase B vendor verb.
     /// Posts the `Rollback` verdict, then polls until terminal.
     #[instrument(skip(self))]
     pub async fn spec_rollback(&self) -> Result<UpdateStatusBody> {
-        self.post_verdict_and_wait("x-ota-rollback").await
+        self.post_verdict_and_wait(FlashConfig::updates_x_ota_rollback_path, None)
+            .await
     }
 
-    async fn post_verdict_and_wait(&self, verb: &str) -> Result<UpdateStatusBody> {
+    /// `PUT /updates/{update_id}/x-update-verdict` with body
+    /// `{"verdict": verdict}` (`"commit"` | `"rollback"`) — the x-update
+    /// alias of `spec_commit` / `spec_rollback`. Polls until terminal.
+    #[instrument(skip(self))]
+    pub async fn spec_verdict(&self, verdict: &str) -> Result<UpdateStatusBody> {
+        self.post_verdict_and_wait(
+            FlashConfig::updates_x_update_verdict_path,
+            Some(serde_json::json!({ "verdict": verdict })),
+        )
+        .await
+    }
+
+    async fn post_verdict_and_wait(
+        &self,
+        path_for: fn(&FlashConfig, &str) -> String,
+        body: Option<serde_json::Value>,
+    ) -> Result<UpdateStatusBody> {
         let update_id = self
             .current_update_id()
             .await
             .ok_or(FlashError::NoSession)?;
-        let path = match verb {
-            "x-ota-commit" => self.config.updates_x_ota_commit_path(&update_id),
-            "x-ota-rollback" => self.config.updates_x_ota_rollback_path(&update_id),
-            _ => unreachable!("post_verdict_and_wait called with non-verdict verb"),
-        };
+        let path = path_for(&self.config, &update_id);
         let url = self.build_url(&path)?;
         let mut req = self.client.put(url);
+        if let Some(body) = &body {
+            req = req.json(body);
+        }
         req = self.add_auth(req);
         let resp = req.send().await?;
         if resp.status() != StatusCode::ACCEPTED {

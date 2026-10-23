@@ -833,6 +833,21 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
                             stuck backend trial state when no in-flight \
                             update_id exists."
             },
+            "x-update": {
+                "kind":   "lifecycle verb + status member + capability flag",
+                "verbs": [
+                    "PUT /vehicle/v1/components/{id}/updates/{update_id}/x-update-verdict",
+                    "POST /vehicle/v1/operations/x-update-verdict/executions (served by the embedding machine manager)"
+                ],
+                "body":   {"verdict": "commit | rollback"},
+                "fields": ["x-update.state", "x-update.reset_kind", "capabilities.x-update.verdict"],
+                "spec":   "docs/x-update.md",
+                "summary": "Aliases of the x-ota verdict surface: one verb \
+                            with the verdict in the body, verb-named \
+                            states, and whether a verdict is awaited is an \
+                            executor property advertised in capabilities, \
+                            not a registration option."
+            },
             "x-ota-bulk-data": {
                 "kind":      "sub-resource",
                 "endpoints": [
