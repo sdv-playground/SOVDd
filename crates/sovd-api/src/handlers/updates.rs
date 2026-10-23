@@ -137,6 +137,67 @@ pub struct UpdateStatusBody {
     /// of defaulting every component to `Local`.
     #[serde(rename = "x-ota-reset-kind", skip_serializing_if = "Option::is_none")]
     pub reset_kind: Option<sovd_core::ResetKind>,
+    /// Vendor extension: the x-update view of this update — a verb-named
+    /// state plus the reset kind. Filled for every update (a view, not a
+    /// mode). See `docs/x-update.md`.
+    #[serde(rename = "x-update", skip_serializing_if = "Option::is_none")]
+    pub x_update: Option<XUpdateStatus>,
+}
+
+/// `x-update` member of [`UpdateStatusBody`].
+#[derive(Debug, Clone, Serialize)]
+pub struct XUpdateStatus {
+    pub state: XUpdateState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset_kind: Option<XUpdateResetKind>,
+}
+
+/// Verb-named lifecycle state carried in `x-update.state`.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum XUpdateState {
+    Ready,
+    Preparing,
+    Prepared,
+    Executing,
+    Trial,
+    Committing,
+    Committed,
+    RollingBack,
+    RolledBack,
+    Failed,
+}
+
+/// `x-update.reset_kind`: what has to restart for the update to take effect.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum XUpdateResetKind {
+    None,
+    Component,
+    Node,
+}
+
+impl From<sovd_core::ResetKind> for XUpdateResetKind {
+    fn from(kind: sovd_core::ResetKind) -> Self {
+        match kind {
+            sovd_core::ResetKind::None => Self::None,
+            sovd_core::ResetKind::Local => Self::Component,
+            sovd_core::ResetKind::RequiresEcuReset => Self::Node,
+        }
+    }
+}
+
+/// Body of `PUT /updates/{id}/x-update-verdict`.
+#[derive(Debug, Deserialize)]
+pub struct VerdictBody {
+    pub verdict: VerdictWord,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum VerdictWord {
+    Commit,
+    Rollback,
 }
 
 #[derive(Debug, Serialize)]
@@ -1203,25 +1264,7 @@ pub async fn put_x_ota_commit(
     State(state): State<AppState>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let registration_token = validate_verdict(&state, &component_id, &update_id)?;
-    let backend = state.get_backend(&component_id)?;
-    let activation = backend.get_activation_state().await?;
-    if activation.state != sovd_core::FlashState::Activated {
-        return Err(ApiError::Conflict(format!(
-            "x-ota commit requires activation state Activated, got {:?}",
-            activation.state
-        )));
-    }
-
-    claim_verdict(
-        &state,
-        &component_id,
-        &update_id,
-        registration_token,
-        crate::state::Verdict::Commit,
-    )?;
-    let (status, headers) = accepted_with_status_location(&component_id, &update_id)?;
-    Ok((status, headers))
+    verdict_commit(&state, &component_id, &update_id).await
 }
 
 /// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-ota-rollback`
@@ -1231,16 +1274,69 @@ pub async fn put_x_ota_rollback(
     State(state): State<AppState>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let registration_token = validate_verdict(&state, &component_id, &update_id)?;
+    verdict_rollback(&state, &component_id, &update_id)
+}
+
+/// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-update-verdict`
+///
+/// x-update alias of `x-ota-commit` / `x-ota-rollback`: one verb with the
+/// verdict in the body (`{"verdict": "commit" | "rollback"}`). Same
+/// preconditions and response (`202 + Location: .../status`) as the verb
+/// it stands for.
+pub async fn put_x_update_verdict(
+    State(state): State<AppState>,
+    Path((component_id, update_id)): Path<(String, String)>,
+    Json(body): Json<VerdictBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    match body.verdict {
+        VerdictWord::Commit => verdict_commit(&state, &component_id, &update_id).await,
+        VerdictWord::Rollback => verdict_rollback(&state, &component_id, &update_id),
+    }
+}
+
+/// Commit verdict: requires the backend to report `Activated` (the trial is
+/// live) before the verdict is claimed.
+async fn verdict_commit(
+    state: &AppState,
+    component_id: &str,
+    update_id: &str,
+) -> Result<(StatusCode, HeaderMap), ApiError> {
+    let registration_token = validate_verdict(state, component_id, update_id)?;
+    let backend = state.get_backend(component_id)?;
+    let activation = backend.get_activation_state().await?;
+    if activation.state != sovd_core::FlashState::Activated {
+        return Err(ApiError::Conflict(format!(
+            "x-ota commit requires activation state Activated, got {:?}",
+            activation.state
+        )));
+    }
+
     claim_verdict(
-        &state,
-        &component_id,
-        &update_id,
+        state,
+        component_id,
+        update_id,
+        registration_token,
+        crate::state::Verdict::Commit,
+    )?;
+    accepted_with_status_location(component_id, update_id)
+}
+
+/// Rollback verdict: no activation check — rolling back is always allowed
+/// from `awaiting-verdict`.
+fn verdict_rollback(
+    state: &AppState,
+    component_id: &str,
+    update_id: &str,
+) -> Result<(StatusCode, HeaderMap), ApiError> {
+    let registration_token = validate_verdict(state, component_id, update_id)?;
+    claim_verdict(
+        state,
+        component_id,
+        update_id,
         registration_token,
         crate::state::Verdict::Rollback,
     )?;
-    let (status, headers) = accepted_with_status_location(&component_id, &update_id)?;
-    Ok((status, headers))
+    accepted_with_status_location(component_id, update_id)
 }
 
 /// `PUT /vehicle/v1/components/{component_id}/x-ota-force-rollback`
@@ -1335,10 +1431,26 @@ pub async fn get_status(
     State(state): State<AppState>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<Json<UpdateStatusBody>, ApiError> {
-    let _ = state.get_backend(&component_id)?;
+    let backend = state.get_backend(&component_id)?;
+    let key = UpdateKey::new(&component_id, &update_id);
+    let phase = {
+        let store = state.updates.0.lock();
+        store
+            .get(&key)
+            .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?
+            .phase
+    };
+    // Only the execute phase needs the backend's view (trial vs. still
+    // executing). Read it outside the store lock; a failure here must never
+    // fail the status read.
+    let activation = if phase == Phase::Execute {
+        backend.get_activation_state().await.ok().map(|a| a.state)
+    } else {
+        None
+    };
     let store = state.updates.0.lock();
     let entry = store
-        .get(&UpdateKey::new(&component_id, &update_id))
+        .get(&key)
         .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
     Ok(Json(UpdateStatusBody {
         phase: entry.phase.as_str(),
@@ -1352,7 +1464,49 @@ pub async fn get_status(
         },
         substate: entry.substate,
         reset_kind: entry.reset_kind,
+        x_update: Some(XUpdateStatus {
+            state: x_update_state(entry, activation),
+            reset_kind: entry.reset_kind.map(Into::into),
+        }),
     }))
+}
+
+/// Derive the x-update verb-named state from the entry's spec phase/status,
+/// its orchestrated substate and legacy state, and (execute phase only) the
+/// backend's activation state.
+pub(crate) fn x_update_state(
+    entry: &UpdatesEntry,
+    activation: Option<sovd_core::FlashState>,
+) -> XUpdateState {
+    use sovd_core::FlashState;
+    match (entry.phase, entry.status) {
+        (Phase::Prepare, Status::Pending) => XUpdateState::Ready,
+        (Phase::Prepare, Status::InProgress) => XUpdateState::Preparing,
+        (Phase::Prepare, Status::Completed) => XUpdateState::Prepared,
+        (Phase::Prepare, Status::Failed) => XUpdateState::Failed,
+        (Phase::Execute, Status::InProgress) => match entry.substate {
+            Some("awaiting-verdict") if activation == Some(FlashState::Activated) => {
+                XUpdateState::Trial
+            }
+            Some("committing") => XUpdateState::Committing,
+            Some("rolling-back") => XUpdateState::RollingBack,
+            _ => XUpdateState::Executing,
+        },
+        (Phase::Execute, Status::Completed) => match entry.state {
+            UpdateState::Committed => XUpdateState::Committed,
+            UpdateState::Finalized => match activation {
+                Some(FlashState::Committed) => XUpdateState::Committed,
+                Some(FlashState::Activated) => XUpdateState::Trial,
+                _ => XUpdateState::Executing,
+            },
+            _ => XUpdateState::Committed,
+        },
+        (Phase::Execute, Status::Failed) => match entry.state {
+            UpdateState::RolledBack => XUpdateState::RolledBack,
+            _ => XUpdateState::Failed,
+        },
+        (Phase::Execute, Status::Pending) => XUpdateState::Executing,
+    }
 }
 
 /// GET /vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data
@@ -1564,4 +1718,181 @@ async fn await_flash_settled(
     Err(ApiError::GatewayTimeout(
         "flash transfer did not settle within 30s after start_flash".into(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sovd_core::FlashState;
+
+    fn entry(
+        phase: Phase,
+        status: Status,
+        substate: Option<&'static str>,
+        state: UpdateState,
+    ) -> UpdatesEntry {
+        UpdatesEntry {
+            phase,
+            status,
+            substate,
+            state,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn x_update_wire_strings() {
+        let body = UpdateStatusBody {
+            phase: Phase::Execute.as_str(),
+            status: Status::Failed.as_str(),
+            progress: None,
+            step: None,
+            error: None,
+            substate: None,
+            reset_kind: None,
+            x_update: Some(XUpdateStatus {
+                state: XUpdateState::RolledBack,
+                reset_kind: Some(sovd_core::ResetKind::RequiresEcuReset.into()),
+            }),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(
+            json.contains(r#""x-update":{"state":"ROLLED_BACK","reset_kind":"node"}"#),
+            "{json}"
+        );
+        assert_eq!(
+            serde_json::to_value(XUpdateState::RollingBack).unwrap(),
+            "ROLLING_BACK"
+        );
+        assert_eq!(
+            serde_json::to_value(XUpdateResetKind::from(sovd_core::ResetKind::None)).unwrap(),
+            "none"
+        );
+        assert_eq!(
+            serde_json::to_value(XUpdateResetKind::from(sovd_core::ResetKind::Local)).unwrap(),
+            "component"
+        );
+    }
+
+    #[test]
+    fn verdict_body_parses_lowercase_words() {
+        let b: VerdictBody = serde_json::from_str(r#"{"verdict":"commit"}"#).unwrap();
+        assert_eq!(b.verdict, VerdictWord::Commit);
+        let b: VerdictBody = serde_json::from_str(r#"{"verdict":"rollback"}"#).unwrap();
+        assert_eq!(b.verdict, VerdictWord::Rollback);
+        assert!(serde_json::from_str::<VerdictBody>(r#"{"verdict":"maybe"}"#).is_err());
+        assert!(serde_json::from_str::<VerdictBody>("{}").is_err());
+    }
+
+    #[test]
+    fn x_update_state_derivation() {
+        use Phase::*;
+        use Status::*;
+        let reg = UpdateState::Registered;
+        let act = Some(FlashState::Activated);
+        let cases: &[(UpdatesEntry, Option<FlashState>, XUpdateState)] = &[
+            (
+                entry(Prepare, Pending, None, reg),
+                None,
+                XUpdateState::Ready,
+            ),
+            (
+                entry(Prepare, InProgress, None, reg),
+                None,
+                XUpdateState::Preparing,
+            ),
+            (
+                entry(Prepare, Completed, None, reg),
+                None,
+                XUpdateState::Prepared,
+            ),
+            (
+                entry(Prepare, Failed, None, reg),
+                None,
+                XUpdateState::Failed,
+            ),
+            (
+                entry(Execute, InProgress, None, reg),
+                act,
+                XUpdateState::Executing,
+            ),
+            (
+                entry(Execute, InProgress, Some("awaiting-verdict"), reg),
+                act,
+                XUpdateState::Trial,
+            ),
+            (
+                entry(Execute, InProgress, Some("awaiting-verdict"), reg),
+                Some(FlashState::AwaitingReboot),
+                XUpdateState::Executing,
+            ),
+            (
+                entry(Execute, InProgress, Some("awaiting-verdict"), reg),
+                None,
+                XUpdateState::Executing,
+            ),
+            (
+                entry(Execute, InProgress, Some("committing"), reg),
+                act,
+                XUpdateState::Committing,
+            ),
+            (
+                entry(Execute, InProgress, Some("rolling-back"), reg),
+                act,
+                XUpdateState::RollingBack,
+            ),
+            (
+                entry(Execute, Completed, None, UpdateState::Committed),
+                None,
+                XUpdateState::Committed,
+            ),
+            (
+                entry(Execute, Completed, None, UpdateState::Finalized),
+                Some(FlashState::Committed),
+                XUpdateState::Committed,
+            ),
+            (
+                entry(Execute, Completed, None, UpdateState::Finalized),
+                act,
+                XUpdateState::Trial,
+            ),
+            (
+                entry(Execute, Completed, None, UpdateState::Finalized),
+                Some(FlashState::AwaitingReboot),
+                XUpdateState::Executing,
+            ),
+            (
+                entry(Execute, Completed, None, UpdateState::Finalized),
+                None,
+                XUpdateState::Executing,
+            ),
+            (
+                entry(Execute, Completed, None, UpdateState::Verified),
+                None,
+                XUpdateState::Committed,
+            ),
+            (
+                entry(Execute, Failed, None, UpdateState::RolledBack),
+                None,
+                XUpdateState::RolledBack,
+            ),
+            (
+                entry(Execute, Failed, None, reg),
+                None,
+                XUpdateState::Failed,
+            ),
+        ];
+        for (e, activation, want) in cases {
+            assert_eq!(
+                x_update_state(e, *activation),
+                *want,
+                "{:?}/{:?} substate={:?} state={:?} activation={:?}",
+                e.phase,
+                e.status,
+                e.substate,
+                e.state,
+                activation
+            );
+        }
+    }
 }

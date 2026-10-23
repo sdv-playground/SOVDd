@@ -64,6 +64,18 @@ pub struct CapabilitiesResponse {
     pub diagnostics: bool,
     /// §7.12 configurations collection (read/write/reset configuration resources).
     pub configurations: bool,
+    /// Vendor extension: x-update executor properties, derived from the
+    /// backend's `update_shape()`. Absent when the shape is not advertised.
+    #[serde(rename = "x-update", skip_serializing_if = "Option::is_none")]
+    pub x_update: Option<XUpdateCapability>,
+}
+
+/// `capabilities.x-update` member.
+#[derive(Serialize)]
+pub struct XUpdateCapability {
+    /// Whether an update on this component pauses in trial for a verdict
+    /// (`banked`) or completes without one (`singleshot`).
+    pub verdict: bool,
 }
 
 impl From<&Capabilities> for CapabilitiesResponse {
@@ -84,6 +96,7 @@ impl From<&Capabilities> for CapabilitiesResponse {
             bulk_data: caps.bulk_data,
             diagnostics: caps.diagnostics,
             configurations: caps.configurations,
+            x_update: None,
         }
     }
 }
@@ -130,13 +143,19 @@ pub async fn get_component(
     let backend = state.get_backend(&component_id)?;
     let info = backend.entity_info();
     let caps = backend.capabilities();
+    let mut capabilities = CapabilitiesResponse::from(caps);
+    capabilities.x_update = match backend.update_shape() {
+        "banked" => Some(XUpdateCapability { verdict: true }),
+        "singleshot" => Some(XUpdateCapability { verdict: false }),
+        _ => None,
+    };
 
     let response = ComponentDetailResponse {
         id: component_id.clone(),
         name: info.name.clone(),
         description: info.description.clone(),
         entity_type: info.entity_type.clone(),
-        capabilities: CapabilitiesResponse::from(caps),
+        capabilities,
         data: format!("/vehicle/v1/components/{}/data", component_id),
         faults: format!("/vehicle/v1/components/{}/faults", component_id),
         operations: format!("/vehicle/v1/components/{}/operations", component_id),

@@ -468,6 +468,15 @@ impl FlashConfig {
             update_id
         )
     }
+    /// x-update alias of the two verdict verbs: one verb, verdict in the
+    /// body.
+    pub fn updates_x_update_verdict_path(&self, update_id: &str) -> String {
+        format!(
+            "{}/updates/{}/x-update-verdict",
+            self.base_prefix(),
+            update_id
+        )
+    }
     /// Trial-recovery vendor verb — unconditional backend rollback.
     /// Lives at the component root (not under `/updates/{id}`) because
     /// by definition no in-flight update_id exists for a stuck trial.
