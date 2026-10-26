@@ -44,11 +44,12 @@ update. No body.
 
 Per-update verdicts are for single-component executors and for `component` (local) resets.
 Updates that one node restart activates (`reset_kind` `node`) form one node transaction, settled
-all or nothing by the node operations below; a per-update verdict on one of them is refused with
-409 `precondition-not-fulfilled`.
+all or nothing by the node operations below. This contract gives a per-update verdict on a member
+of a node transaction no meaning: a client does not send one, and a server may refuse it with 409
+`precondition-not-fulfilled`.
 
-Served by this crate. The refusal on a node transaction is the backend's: this crate forwards the
-verdict to the update's executor and reports what it answers.
+Served by this crate, which forwards the verdict to the update's executor and reports what it
+answers.
 
 ### Per node (operations)
 
@@ -159,8 +160,9 @@ restart and the verdict.
 4. `PUT execute` on each; each goes EXECUTING.
 5. The restart named by `reset_kind` happens: whoever is authorized issues
    `PUT {entity}/status/restart`, or a power cycle does it. The client awaits EXECUTED.
-6. When the updates report EXECUTED: send each its verdict (`x-update-commit` or
-   `x-update-rollback`, or the node operation), and await COMMITTED or ROLLED_BACK. A rollback
+6. When the updates report EXECUTED: send the verdict and await COMMITTED or ROLLED_BACK. A
+   single-component or `component` update takes `x-update-commit` / `x-update-rollback` on the
+   update; a node transaction takes the node operation once, for all of its updates. A rollback
    may also be sent while an update is still EXECUTING.
 7. `DELETE` each update.
 
