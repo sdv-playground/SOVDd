@@ -176,13 +176,12 @@ restart and the verdict.
 2. Upload the manifest and parts.
 3. `PUT prepare` on each; wait for PREPARED.
 4. `PUT execute` on each; each goes EXECUTING.
-5. Read `x-update-state`.
-6. The restart named by `reset_kind` happens (whoever is authorized issues it); await it
-   (`rebooted_since_arming`, `node_boot_id`).
-7. When the updates report EXECUTED: send each its verdict (`x-update-commit` or
+5. The restart named by `reset_kind` happens (a power cycle, or whoever is authorized issues
+   `PUT {entity}/status/restart`). The client does not watch for it; it awaits EXECUTED.
+6. When the updates report EXECUTED: send each its verdict (`x-update-commit` or
    `x-update-rollback`, or the node operation), and await COMMITTED or ROLLED_BACK. A rollback
    may also be sent while an update is still EXECUTING.
-8. `DELETE` each update; await each executor's IDLE.
+7. `DELETE` each update; await each executor's IDLE.
 
 A client that restarted lists `GET {entity}/updates`, recognises its ids, and continues from each
 update's state.
