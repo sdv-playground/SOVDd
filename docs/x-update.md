@@ -11,36 +11,56 @@ awaited at all is a property of the executor, not a choice the client makes per 
 restart that activates new software is the standard §7.19 `PUT {entity}/status/restart`, gated by
 the server's authorization scope; this contract does not say who issues it. An orchestrator
 holding a suitable token, a workshop tester, the vehicle's state management and an ignition
-cycle are all valid. `x-update` is served beside `x-ota` as a set of aliases; the `x-ota` names
-will be deprecated later.
+cycle are all valid. The client owns the update ids. Every verb is explicit and
+addressed to the update's executor. `x-update` is served beside `x-ota` as a set of aliases; the
+`x-ota` names will be deprecated later.
 
-## Verdict: `x-update-verdict`
+## Update ids and listing
 
-Body: `{"verdict": "commit" | "rollback"}`. It comes in two standard shapes.
+The client gives the id in every registration (`POST {entity}/updates`, `id`); a registration
+without one is refused with 400. The server keeps it verbatim and never assigns, replaces or
+derives an id of its own.
 
-### Per update (lifecycle PUT)
+`GET {entity}/updates` lists the updates the server holds, by the client's id. A server may
+rebuild that list from its executor after a restart, and may adopt a re-registration whose id the
+executor still holds; neither is required by this contract, and a client that converges from the
+executor's reported state needs neither.
 
-`PUT {entity}/updates/{update_id}/x-update-verdict` decides this one update.
+## Verdicts: `x-update-commit`, `x-update-rollback`
+
+`PUT {entity}/updates/{update_id}/x-update-commit` and `…/x-update-rollback` decide this one
+update. No body.
+
+| verb | accepted in |
+|---|---|
+| `x-update-commit` | EXECUTED; again in COMMITTED, where it changes nothing |
+| `x-update-rollback` | EXECUTING, EXECUTED; again in ROLLED_BACK, where it changes nothing |
 
 | answer | when |
 |---|---|
 | 202 + `Location: {entity}/updates/{update_id}/status` | accepted; the update moves to COMMITTING or ROLLING_BACK |
-| 422 | `verdict` missing or not one of `commit`, `rollback` (400 for malformed JSON, 415 without `Content-Type: application/json`, as for every JSON body on this server) |
 | 404 | unknown update |
-| 409 `precondition-not-fulfilled` | the update is not awaiting a verdict; `commit` additionally requires the executor to report the new software running (state EXECUTED) |
+| 409 `precondition-not-fulfilled` | not in a state the verb is accepted in |
 
-Served by this crate.
+Per-update verdicts are for single-component executors and for `component` (local) resets.
+Updates that one node restart activates (`reset_kind` `node`) form one node transaction, settled
+all or nothing by the node operations below. This contract gives a per-update verdict on a member
+of a node transaction no meaning: a client does not send one, and a server may refuse it with 409
+`precondition-not-fulfilled`.
 
-### Per node (operation)
+Served by this crate, which forwards the verdict to the update's executor and reports what it
+answers.
 
-`POST /vehicle/v1/operations/x-update-verdict/executions`, body
-`{"verdict": "commit" | "rollback", "nonce"?: string}`, decides every component in the node's open
-transaction, all or nothing. The answer is an ISO §7.14 OperationExecution:
+### Per node (operations)
+
+`POST /vehicle/v1/operations/x-update-commit/executions` and `…/x-update-rollback/executions`,
+body `{"nonce"?: string}`, commit or roll back every component in the node's open transaction,
+all or nothing. The answer is an ISO §7.14 OperationExecution:
 
 ```json
 {
   "execution_id": "...",
-  "operation_id": "x-update-verdict",
+  "operation_id": "x-update-commit",
   "status": "completed",
   "result": { "committed": ["<component id>", "..."], "skipped": ["..."] },
   "nonce": "<echoed if sent>"
@@ -57,10 +77,11 @@ transaction, all or nothing. The answer is an ISO §7.14 OperationExecution:
 
 Served by the embedding machine manager, not by this crate.
 
-### Finish and invalidate
+## Delete
 
-There is no x-update verb for either. Finish is the standard `DELETE {entity}/updates/{update_id}`
-after a terminal state; invalidate is the same `DELETE` before `execute`.
+Once an update has settled (COMMITTED, ROLLED_BACK or FAILED), the client removes it with the
+standard `DELETE {entity}/updates/{update_id}`; before `execute`, the same `DELETE` discards a
+prepared update. There is no finish verb.
 
 ## Status member
 
@@ -70,7 +91,8 @@ after a terminal state; invalidate is the same `DELETE` before `execute`.
 "x-update": { "state": "<State>", "reset_kind": "none" | "component" | "node" }
 ```
 
-The state is total, and the standard `phase`/`status` in the same body agree with it:
+The states are named after the verbs that lead to them. The state is total, and the standard
+`phase`/`status` in the same body agree with it:
 
 | state | phase | status | meaning |
 |---|---|---|---|
@@ -78,7 +100,7 @@ The state is total, and the standard `phase`/`status` in the same body agree wit
 | PREPARING | prepare | inProgress | verifying and staging |
 | PREPARED | prepare | completed | staged in the inactive bank; `execute` or `DELETE` |
 | EXECUTING | execute | inProgress | armed; the restart named by `reset_kind` has not been observed yet |
-| EXECUTED | execute | inProgress | execute has done its work: the new software runs and a verdict is awaited (the standard phase stays inProgress until the verdict) |
+| EXECUTED | execute | inProgress | the new software runs; a verdict is awaited |
 | COMMITTING | execute | inProgress | commit accepted and running |
 | COMMITTED | execute | completed | permanent |
 | ROLLING_BACK | execute | inProgress | rollback accepted and running (the client's, or the executor's own, e.g. after failed trial boots) |
@@ -136,21 +158,20 @@ restart and the verdict.
 2. Upload the manifest and parts.
 3. `PUT prepare` on each; wait for PREPARED.
 4. `PUT execute` on each; each goes EXECUTING.
-5. Read `x-update-state`.
-6. If `reset_kind` is `node`: restart the node's entity (`PUT {node-entity}/status/restart`) if
-   authorized, otherwise wait for someone else to.
-7. When `rebooted_since_arming` is true and the updates report EXECUTED: send one node verdict
-   (all or nothing).
-8. `DELETE` each update.
-
-Per-update verdicts are for single-component executors and for `component` (local) resets.
+5. The restart named by `reset_kind` happens: whoever is authorized issues
+   `PUT {entity}/status/restart`, or a power cycle does it. The client awaits EXECUTED.
+6. When the updates report EXECUTED: send the verdict and await COMMITTED or ROLLED_BACK. A
+   single-component or `component` update takes `x-update-commit` / `x-update-rollback` on the
+   update; a node transaction takes the node operation once, for all of its updates. A rollback
+   may also be sent while an update is still EXECUTING.
+7. `DELETE` each update.
 
 ## Aliases
 
 | x-ota name | x-update equivalent | served by |
 |---|---|---|
-| `x-ota-commit`, `x-ota-rollback` (per update) | `PUT …/updates/{id}/x-update-verdict` | this crate |
-| `x-ota-commit-trials`, `x-ota-rollback-trials` | node `x-update-verdict` operation | machine manager |
+| `x-ota-commit`, `x-ota-rollback` (per update) | `PUT …/updates/{id}/x-update-commit`, `…/x-update-rollback` | this crate |
+| `x-ota-commit-trials`, `x-ota-rollback-trials` | node `x-update-commit`, `x-update-rollback` operations | machine manager |
 | `x-ota-update-state` | `x-update-state` | machine manager |
 | `x-ota-reset-kind`, `x-ota-substate` | `x-update.reset_kind`, `x-update.state` | this crate |
 | `?x-ota-control=orchestrated` | unchanged for now; the executor's `verdict` property replaces it later | this crate |
@@ -160,5 +181,7 @@ Per-update verdicts are for single-component executors and for `component` (loca
 ## Not in this version
 
 - Executors that need a verdict refusing `automated` with 409.
-- Listing held updates after a server restart; only the per-update path is served.
 - Retiring the x-ota names.
+- Listing held updates after a server or executor restart, and adopting a re-registration the
+  executor still holds.
+- Executor-side recording of the update id (which the listing above needs).

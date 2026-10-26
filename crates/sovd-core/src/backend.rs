@@ -922,6 +922,20 @@ pub trait DiagnosticBackend: Send + Sync {
         self.receive_package(&data).await
     }
 
+    /// A part of the update, named by the client's part id, as
+    /// `receive_package_stream` but addressed. The default forwards to
+    /// `receive_package_stream`; an executor that stages parts by name
+    /// overrides it.
+    async fn receive_package_part(
+        &self,
+        part_id: &str,
+        stream: PackageStream,
+        content_length: Option<u64>,
+    ) -> BackendResult<String> {
+        let _ = part_id;
+        self.receive_package_stream(stream, content_length).await
+    }
+
     /// List all stored packages
     async fn list_packages(&self) -> BackendResult<Vec<PackageInfo>> {
         Err(crate::error::BackendError::NotSupported(
@@ -1142,6 +1156,21 @@ pub trait DiagnosticBackend: Send + Sync {
         ))
     }
 
+    /// The client's id for the update being registered or prepared. An
+    /// executor that keeps the id with the update it stages records it here;
+    /// the default ignores it.
+    async fn note_update_id(&self, update_id: &str) -> BackendResult<()> {
+        let _ = update_id;
+        Ok(())
+    }
+
+    /// The updates this executor holds, from its durable state: staged,
+    /// prepared, armed or running unconfirmed. Settled updates are not held.
+    /// The default holds none.
+    async fn held_updates(&self) -> BackendResult<Vec<HeldUpdate>> {
+        Ok(Vec::new())
+    }
+
     // =========================================================================
     // Mode Control (Session, Security, Link)
     // =========================================================================
@@ -1302,6 +1331,40 @@ pub struct UpdatePackageDescriptor {
     pub affected_components: Vec<String>,
 }
 
+/// An update the executor holds, rebuilt from its own durable state.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct HeldUpdate {
+    /// The client's update id, as recorded by `note_update_id`.
+    pub id: String,
+    /// The bank the update is staged in.
+    pub bank: String,
+    /// Where the update stands.
+    pub state: HeldState,
+    /// The parts staged for the update.
+    pub parts: Vec<HeldPart>,
+}
+
+/// State of a [`HeldUpdate`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum HeldState {
+    Preparing,
+    Prepared,
+    Executing,
+    Executed,
+}
+
+/// One staged part of a [`HeldUpdate`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct HeldPart {
+    /// The client's part id.
+    pub name: String,
+    /// Size in bytes.
+    pub size: u64,
+    /// SHA-256 of the part.
+    pub sha256: String,
+}
+
 /// One uploaded bulk-data part, as seen by [`DiagnosticBackend::describe_update_package`].
 #[derive(Debug, Clone, Copy)]
 pub struct UpdatePartRef<'a> {
@@ -1365,5 +1428,92 @@ pub fn default_descriptor_from_context(ctx: &UpdatePackageContext<'_>) -> Update
         updated_components: Vec::new(),
         // Default: the addressed component is the one affected.
         affected_components: vec![format!("/vehicle/v1/components/{}", ctx.component_id)],
+    }
+}
+
+#[cfg(test)]
+mod held_update_tests {
+    use super::*;
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    /// A backend overriding nothing the hooks cover.
+    struct Plain(EntityInfo, Capabilities);
+
+    #[async_trait::async_trait]
+    impl DiagnosticBackend for Plain {
+        fn entity_info(&self) -> &EntityInfo {
+            &self.0
+        }
+        fn capabilities(&self) -> &Capabilities {
+            &self.1
+        }
+        async fn list_parameters(&self) -> BackendResult<Vec<ParameterInfo>> {
+            Ok(Vec::new())
+        }
+        async fn read_data(&self, _: &[String]) -> BackendResult<Vec<DataValue>> {
+            Ok(Vec::new())
+        }
+        async fn get_faults(&self, _: Option<&FaultFilter>) -> BackendResult<FaultsResult> {
+            Ok(FaultsResult {
+                faults: Vec::new(),
+                status_availability_mask: None,
+            })
+        }
+        async fn list_operations(&self) -> BackendResult<Vec<OperationInfo>> {
+            Ok(Vec::new())
+        }
+        async fn start_operation(&self, op: &str, _: &[u8]) -> BackendResult<OperationExecution> {
+            Err(crate::error::BackendError::OperationNotFound(op.into()))
+        }
+    }
+
+    /// Drive a future that never actually suspends (no runtime in this crate's
+    /// dev-dependencies).
+    fn ready<T>(fut: impl Future<Output = T>) -> T {
+        let mut fut = std::pin::pin!(fut);
+        match fut.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(v) => v,
+            Poll::Pending => panic!("default hook suspended"),
+        }
+    }
+
+    fn plain() -> Plain {
+        Plain(
+            EntityInfo {
+                id: "dev1".into(),
+                name: "dev1".into(),
+                entity_type: "ecu".into(),
+                description: None,
+                href: "/vehicle/v1/components/dev1".into(),
+                status: None,
+            },
+            Capabilities::default(),
+        )
+    }
+
+    #[test]
+    fn held_updates_default_is_empty_and_is_serializable() {
+        let backend = plain();
+        assert!(ready(backend.held_updates()).unwrap().is_empty());
+        // The id hook defaults to accepting anything.
+        assert!(ready(backend.note_update_id("pkg-1")).is_ok());
+
+        let held = HeldUpdate {
+            id: "pkg-1".into(),
+            bank: "B".into(),
+            state: HeldState::Executed,
+            parts: vec![HeldPart {
+                name: "manifest".into(),
+                size: 12,
+                sha256: "ab".repeat(32),
+            }],
+        };
+        let json = serde_json::to_value(&held).unwrap();
+        assert_eq!(json["state"], "EXECUTED");
+        assert_eq!(json["bank"], "B");
+        assert_eq!(json["parts"][0]["name"], "manifest");
+        let back: HeldUpdate = serde_json::from_value(json).unwrap();
+        assert_eq!(back, held);
     }
 }

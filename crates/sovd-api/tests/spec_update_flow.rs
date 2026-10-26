@@ -72,6 +72,10 @@ struct MockBackend {
     activation_query_gate: AsyncGate,
     rollback_flash_gate: AsyncGate,
     abort_flash_gate: AsyncGate,
+    /// Hook calls in arrival order: `note:<id>`, `start_flash`, `part:<id>`.
+    hook_log: Mutex<Vec<String>>,
+    /// What `note_update_id` answers: 0 = Ok, 1 = Busy, 2 = NotSupported.
+    note_update_id_mode: AtomicU64,
     /// Optional gateway-style child sub-entity (drives the C-073
     /// gateway-child subscription-resource path).
     child: Option<Arc<MockBackend>>,
@@ -115,6 +119,8 @@ impl MockBackend {
             activation_query_gate: AsyncGate::default(),
             rollback_flash_gate: AsyncGate::default(),
             abort_flash_gate: AsyncGate::default(),
+            hook_log: Mutex::new(Vec::new()),
+            note_update_id_mode: AtomicU64::new(0),
             child,
             data_tx: tokio::sync::broadcast::channel(16).0,
         }
@@ -193,6 +199,25 @@ impl DiagnosticBackend for MockBackend {
         Err(BackendError::OperationNotFound(op_id.into()))
     }
 
+    async fn note_update_id(&self, update_id: &str) -> BackendResult<()> {
+        self.hook_log.lock().push(format!("note:{update_id}"));
+        match self.note_update_id_mode.load(Ordering::SeqCst) {
+            1 => Err(BackendError::Busy("id refused".into())),
+            2 => Err(BackendError::NotSupported("note_update_id".into())),
+            _ => Ok(()),
+        }
+    }
+
+    async fn receive_package_part(
+        &self,
+        part_id: &str,
+        stream: PackageStream,
+        content_length: Option<u64>,
+    ) -> BackendResult<String> {
+        self.hook_log.lock().push(format!("part:{part_id}"));
+        self.receive_package_stream(stream, content_length).await
+    }
+
     async fn receive_package_stream(
         &self,
         mut stream: PackageStream,
@@ -225,6 +250,7 @@ impl DiagnosticBackend for MockBackend {
 
     async fn start_flash(&self) -> BackendResult<String> {
         let call = self.start_flash_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        self.hook_log.lock().push("start_flash".into());
         self.start_flash_gate.wait_if_enabled().await;
         if self.fail_start_flash_call.load(Ordering::SeqCst) == call {
             return Err(BackendError::Internal(format!(
@@ -414,10 +440,12 @@ fn http() -> reqwest::Client {
 }
 
 async fn open_update(server: &TestServer) -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let id = format!("update-{}", NEXT.fetch_add(1, Ordering::Relaxed));
     let url = format!("{}/vehicle/v1/components/dev1/updates", server.base_url());
     let resp = http()
         .post(url)
-        .json(&serde_json::json!({}))
+        .json(&serde_json::json!({ "id": id }))
         .send()
         .await
         .expect("open_update");
@@ -1537,6 +1565,21 @@ async fn register(server: &TestServer, body: Value) -> reqwest::Response {
     http().post(url).json(&body).send().await.expect("register")
 }
 
+#[tokio::test]
+async fn registration_without_an_id_is_refused() {
+    let (server, _backend) = spawn_with("banked").await;
+    for body in [serde_json::json!({}), serde_json::json!({ "id": "" })] {
+        let resp = register(&server, body.clone()).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST, "{body}");
+    }
+    let (_, list) = get_json(
+        &server,
+        "/vehicle/v1/components/dev1/updates?origin=proximity",
+    )
+    .await;
+    assert_eq!(list["items"], serde_json::json!([]));
+}
+
 /// §7.18.2 Table 257: `GET /updates` is a `string[]` catalog of package ids,
 /// filtered by `origin` (Table 254/255). `remote` (the default) lists nothing
 /// on SOVDd; `proximity` / custom `x-<ext>-` list the staged ids; `x-sovd-`
@@ -2190,16 +2233,8 @@ async fn reserved_char_id_round_trips_encoded() {
 // x-update aliases (verdict verb, state projection, capability)
 // ---------------------------------------------------------------------------
 
-async fn put_json(server: &TestServer, path: &str, body: Value) -> reqwest::Response {
-    let url = format!("{}{}", server.base_url(), path);
-    http().put(url).json(&body).send().await.expect("put_json")
-}
-
-fn verdict_path(id: &str) -> String {
-    format!(
-        "/vehicle/v1/components/dev1/updates/{}/x-update-verdict",
-        id
-    )
+fn x_update_path(id: &str, verb: &str) -> String {
+    format!("/vehicle/v1/components/dev1/updates/{id}/{verb}")
 }
 
 /// Banked server with an update driven to the awaiting-verdict point.
@@ -2214,15 +2249,14 @@ async fn banked_awaiting_verdict() -> (TestServer, Arc<MockBackend>, String) {
 }
 
 #[tokio::test]
-async fn x_update_verdict_commit_mirrors_x_ota_commit() {
+async fn x_update_commit_mirrors_x_ota_commit() {
     let (server, backend, id) = banked_awaiting_verdict().await;
 
     let body = get_status(&server, &id).await;
     assert_eq!(body["x-update"]["state"], "EXECUTING");
     assert_eq!(body["x-update"]["reset_kind"], "component");
 
-    let commit = serde_json::json!({ "verdict": "commit" });
-    let resp = put_json(&server, &verdict_path(&id), commit.clone()).await;
+    let resp = put(&server, &x_update_path(&id, "x-update-commit")).await;
     assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
     assert_eq!(*backend.flash_state.lock(), CoreFlashState::AwaitingReboot);
 
@@ -2232,7 +2266,7 @@ async fn x_update_verdict_commit_mirrors_x_ota_commit() {
         "EXECUTED"
     );
 
-    let resp = put_json(&server, &verdict_path(&id), commit).await;
+    let resp = put(&server, &x_update_path(&id, "x-update-commit")).await;
     assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
     let loc = resp.headers()["location"].to_str().unwrap().to_string();
     assert!(loc.ends_with("/status"), "location was {loc}");
@@ -2254,12 +2288,7 @@ async fn x_update_rollback_accepted_while_executing_awaits_the_restart() {
         "EXECUTING"
     );
 
-    let resp = put_json(
-        &server,
-        &verdict_path(&id),
-        serde_json::json!({ "verdict": "rollback" }),
-    )
-    .await;
+    let resp = put(&server, &x_update_path(&id, "x-update-rollback")).await;
     assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
 
     let final_body = poll_terminal(&server, &id).await;
@@ -2276,50 +2305,47 @@ async fn x_update_rollback_from_executed() {
         get_status(&server, &id).await["x-update"]["state"],
         "EXECUTED"
     );
-
-    let resp = put_json(
-        &server,
-        &verdict_path(&id),
-        serde_json::json!({ "verdict": "rollback" }),
-    )
-    .await;
+    let resp = put(&server, &x_update_path(&id, "x-update-rollback")).await;
     assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
     assert_eq!(
         poll_terminal(&server, &id).await["x-update"]["state"],
         "ROLLED_BACK"
     );
+    // Repeated: accepted, changes nothing; a commit is refused.
+    let resp = put(&server, &x_update_path(&id, "x-update-rollback")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let resp = put(&server, &x_update_path(&id, "x-update-commit")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
 }
 
 #[tokio::test]
-async fn x_update_verdict_rejects_bad_body() {
+async fn x_update_repeated_verdict_is_accepted_and_rollback_after_commit_is_refused() {
     let (server, backend, id) = banked_awaiting_verdict().await;
-    *backend.flash_state.lock() = CoreFlashState::Activated;
 
-    for bad in [
-        serde_json::json!({ "verdict": "maybe" }),
-        serde_json::json!({}),
-    ] {
-        let resp = put_json(&server, &verdict_path(&id), bad.clone()).await;
-        assert_eq!(
-            resp.status(),
-            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
-            "body {bad}"
-        );
-    }
-    // Bad bodies must not have consumed the verdict.
+    *backend.flash_state.lock() = CoreFlashState::Activated;
+    let resp = put(&server, &x_update_path(&id, "x-update-commit")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(
+        poll_terminal(&server, &id).await["x-update"]["state"],
+        "COMMITTED"
+    );
+    // A repeated commit is accepted and changes nothing; a rollback is
+    // refused.
+    let resp = put(&server, &x_update_path(&id, "x-update-commit")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let resp = put(&server, &x_update_path(&id, "x-update-rollback")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
     assert_eq!(
         get_status(&server, &id).await["x-update"]["state"],
-        "EXECUTED"
+        "COMMITTED"
     );
 
-    let resp = put_json(
-        &server,
-        &verdict_path(&id),
-        serde_json::json!({ "verdict": "commit" }),
-    )
-    .await;
-    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
-    assert_eq!(poll_terminal(&server, &id).await["status"], "completed");
+    let url = format!(
+        "{}/vehicle/v1/components/dev1/updates/{id}",
+        server.base_url()
+    );
+    let resp = http().delete(url).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]
@@ -2327,14 +2353,9 @@ async fn x_update_verdicts_rejected_before_execute() {
     let (server, _backend) = spawn_with("banked").await;
     let id = open_update(&server).await;
     upload_part(&server, &id, "manifest", b"x").await;
-    for verdict in ["commit", "rollback"] {
-        let resp = put_json(
-            &server,
-            &verdict_path(&id),
-            serde_json::json!({ "verdict": verdict }),
-        )
-        .await;
-        assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT, "{verdict}");
+    for verb in ["x-update-commit", "x-update-rollback"] {
+        let resp = put(&server, &x_update_path(&id, verb)).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT, "{verb}");
     }
 }
 
@@ -2408,4 +2429,66 @@ async fn component_advertises_x_update_verdict_capability() {
             "{shape}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Backend hooks: the update id and the part id reach the backend
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn register_sends_the_update_id_to_the_backend() {
+    let (server, backend) = spawn_with("banked").await;
+    let resp = register(&server, serde_json::json!({ "id": "pkg-1" })).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+    // The id is noted before the flash session is opened.
+    assert_eq!(
+        *backend.hook_log.lock(),
+        vec!["note:pkg-1".to_string(), "start_flash".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn register_fails_when_the_backend_refuses_the_update_id() {
+    let (server, backend) = spawn_with("banked").await;
+    backend.note_update_id_mode.store(1, Ordering::SeqCst);
+    let resp = register(&server, serde_json::json!({ "id": "pkg-refused" })).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+    // No flash session is opened for a refused id.
+    assert_eq!(
+        *backend.hook_log.lock(),
+        vec!["note:pkg-refused".to_string()]
+    );
+    let (st, body) = get_json(&server, "/vehicle/v1/components/dev1/updates").await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+    assert!(
+        !body.to_string().contains("pkg-refused"),
+        "registration must be removed: {body}"
+    );
+    // The id can be registered again once the backend accepts it.
+    backend.note_update_id_mode.store(0, Ordering::SeqCst);
+    let resp = register(&server, serde_json::json!({ "id": "pkg-refused" })).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn register_succeeds_when_the_backend_does_not_support_update_ids() {
+    let (server, backend) = spawn_with("banked").await;
+    backend.note_update_id_mode.store(2, Ordering::SeqCst);
+    let resp = register(&server, serde_json::json!({ "id": "pkg-ns" })).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+    let (st, _) = get_json(&server, "/vehicle/v1/components/dev1/updates/pkg-ns").await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_part_upload_names_the_part_to_the_backend() {
+    let (server, backend) = spawn_with("banked").await;
+    let id = open_update(&server).await;
+    backend.hook_log.lock().clear();
+    upload_part(&server, &id, "manifest", b"m").await;
+    upload_part(&server, &id, "#firmware", b"fw").await;
+    assert_eq!(
+        *backend.hook_log.lock(),
+        vec!["part:manifest".to_string(), "part:#firmware".to_string()]
+    );
 }
