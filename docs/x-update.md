@@ -21,12 +21,10 @@ The client gives the id in every registration (`POST {entity}/updates`, `id`); a
 without one is refused with 400. The server keeps it verbatim and never assigns, replaces or
 derives an id of its own.
 
-`GET {entity}/updates` lists every update the executor holds, by the client's id, including
-updates registered before a server or executor restart. A client that restarted without local
-state finds its updates there and recognises them by their ids.
-
-SOVDd lists the updates it holds while it runs; keeping them over a server restart is not
-implemented yet.
+`GET {entity}/updates` lists the updates the server holds, by the client's id. A server may
+rebuild that list from its executor after a restart, and may adopt a re-registration whose id the
+executor still holds; neither is required by this contract, and a client that converges from the
+executor's reported state needs neither.
 
 ## Verdicts: `x-update-commit`, `x-update-rollback`
 
@@ -44,23 +42,19 @@ update. No body.
 | 404 | unknown update |
 | 409 `precondition-not-fulfilled` | not in a state the verb is accepted in |
 
-A verdict is valid for every `reset_kind`, `node` included. Updates that one node restart
-activates (`reset_kind` `node`) form one node transaction, and the server keeps it atomic: a
-commit on any of them commits all of them, a rollback on any of them rolls back all of them, and
-the others then report COMMITTED or ROLLED_BACK on their own. A commit is accepted only once
-every update of the transaction reports EXECUTED. So a client may send the commit to every
-update, at once or one after another, and await each one's settled state; the node transaction
-never ends half committed.
+Per-update verdicts are for single-component executors and for `component` (local) resets.
+Updates that one node restart activates (`reset_kind` `node`) form one node transaction, settled
+all or nothing by the node operations below; a per-update verdict on one of them is refused with
+409 `precondition-not-fulfilled`.
 
-Served by this crate; keeping a node transaction atomic is its backend's part (in sumo, the
-embedding machine manager).
+Served by this crate. The refusal on a node transaction is the backend's: this crate forwards the
+verdict to the update's executor and reports what it answers.
 
 ### Per node (operations)
 
 `POST /vehicle/v1/operations/x-update-commit/executions` and `…/x-update-rollback/executions`,
 body `{"nonce"?: string}`, commit or roll back every component in the node's open transaction,
-all or nothing: the same result as the per-update verbs on any one of its updates. The answer is an ISO §7.14
-OperationExecution:
+all or nothing. The answer is an ISO §7.14 OperationExecution:
 
 ```json
 {
@@ -82,24 +76,11 @@ OperationExecution:
 
 Served by the embedding machine manager, not by this crate.
 
-## Delete and executor state
+## Delete
 
 Once an update has settled (COMMITTED, ROLLED_BACK or FAILED), the client removes it with the
 standard `DELETE {entity}/updates/{update_id}`; before `execute`, the same `DELETE` discards a
 prepared update. There is no finish verb.
-
-The executor then cleans up. Its own state is on the component body, `GET {entity}`:
-
-```json
-"x-update": { "state": "IDLE" | "BUSY" }
-```
-
-| state | meaning |
-|---|---|
-| IDLE | the executor holds no update and has finished cleaning up; it takes a new registration |
-| BUSY | it holds an update, or is still cleaning up after a `DELETE` |
-
-The client awaits IDLE after its `DELETE`s, before it considers the rollout done.
 
 ## Status member
 
@@ -176,15 +157,12 @@ restart and the verdict.
 2. Upload the manifest and parts.
 3. `PUT prepare` on each; wait for PREPARED.
 4. `PUT execute` on each; each goes EXECUTING.
-5. The restart named by `reset_kind` happens (a power cycle, or whoever is authorized issues
-   `PUT {entity}/status/restart`). The client does not watch for it; it awaits EXECUTED.
+5. The restart named by `reset_kind` happens: whoever is authorized issues
+   `PUT {entity}/status/restart`, or a power cycle does it. The client awaits EXECUTED.
 6. When the updates report EXECUTED: send each its verdict (`x-update-commit` or
    `x-update-rollback`, or the node operation), and await COMMITTED or ROLLED_BACK. A rollback
    may also be sent while an update is still EXECUTING.
-7. `DELETE` each update; await each executor's IDLE.
-
-A client that restarted lists `GET {entity}/updates`, recognises its ids, and continues from each
-update's state.
+7. `DELETE` each update.
 
 ## Aliases
 
@@ -202,3 +180,6 @@ update's state.
 
 - Executors that need a verdict refusing `automated` with 409.
 - Retiring the x-ota names.
+- Listing held updates after a server or executor restart, and adopting a re-registration the
+  executor still holds.
+- Executor-side recording of the update id (which the listing above needs).
