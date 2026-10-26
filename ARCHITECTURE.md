@@ -457,7 +457,9 @@ no trial: `… → Activated → commit_flash() → Complete`.
   `RequiresEcuReset` to `none`/`component`/`node`. `PUT …/x-update-commit`/`-rollback` reuse the x-ota
   verdict plumbing (the same `watch` channel and precondition checks as `x-ota-commit`/
   `x-ota-rollback`). The node-level verdict operations and `data/x-update-state` are served by the
-  embedding machine manager, not by this crate.
+  embedding machine manager, not by this crate. `GET /updates`, the detail, `status` and
+  `bulk-data` also serve the updates the backend reports from `held_updates` but this server never
+  registered (e.g. after a restart), read-only; bulk-data items carry `present`, matched by part name.
 
 ---
 

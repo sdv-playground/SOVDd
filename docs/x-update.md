@@ -21,10 +21,19 @@ The client gives the id in every registration (`POST {entity}/updates`, `id`); a
 without one is refused with 400. The server keeps it verbatim and never assigns, replaces or
 derives an id of its own.
 
-`GET {entity}/updates` lists the updates the server holds, by the client's id. A server may
-rebuild that list from its executor after a restart, and may adopt a re-registration whose id the
-executor still holds; neither is required by this contract, and a client that converges from the
-executor's reported state needs neither.
+`GET {entity}/updates` lists the updates the server holds, by the client's id. A server rebuilds
+that list from its executor, so a client that lost its state finds its updates by id after a
+server or executor restart; SOVDd does, merging the updates its executor holds into the ones it
+has registered. An update only the executor holds is described (`GET {entity}/updates/{id}`, with
+the id as its name and the size of its held parts), reports its status (the held state, per the
+table under "Status member") and lists its held parts; a verdict, `prepare` or `execute` on it
+answers 404 until it is adopted (see "Not in this version").
+
+`GET {entity}/updates/{update_id}/bulk-data` items carry, beside `part_id`, `size`, `sha256` and
+`href`, a `present` flag: whether the executor already holds the part. It is matched by name (the
+part id is the held part's name or `#` and that name), not by hash: `sha256` is of the uploaded
+part, the executor's digest is of the stored one. A part listed for an update only the executor
+holds is `present`, carries the executor's digest and has no `href`.
 
 ## Verdicts: `x-update-commit`, `x-update-rollback`
 
@@ -182,6 +191,5 @@ restart and the verdict.
 
 - Executors that need a verdict refusing `automated` with 409.
 - Retiring the x-ota names.
-- Listing held updates after a server or executor restart, and adopting a re-registration the
-  executor still holds.
-- Executor-side recording of the update id (which the listing above needs).
+- Adopting a re-registration the executor still holds.
+- Executor-side recording of the update id (which the listing needs).
