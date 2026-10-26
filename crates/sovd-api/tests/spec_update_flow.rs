@@ -22,8 +22,8 @@ use sovd_api::{
 use sovd_client::testing::TestServer;
 use sovd_core::{
     BackendError, BackendResult, Capabilities, DataValue, DiagnosticBackend, EntityInfo,
-    FaultFilter, FaultsResult, FlashProgress, FlashState as CoreFlashState, FlashStatus,
-    OperationExecution, OperationInfo, PackageStream, ParameterInfo,
+    FaultFilter, FaultsResult, FlashProgress, FlashState as CoreFlashState, FlashStatus, HeldPart,
+    HeldState, HeldUpdate, OperationExecution, OperationInfo, PackageStream, ParameterInfo,
 };
 
 // ---------------------------------------------------------------------------
@@ -76,6 +76,10 @@ struct MockBackend {
     hook_log: Mutex<Vec<String>>,
     /// What `note_update_id` answers: 0 = Ok, 1 = Busy, 2 = NotSupported.
     note_update_id_mode: AtomicU64,
+    /// What `held_updates` answers.
+    held: Mutex<Vec<HeldUpdate>>,
+    /// Make `held_updates` fail with a transport error.
+    held_error: AtomicBool,
     /// Optional gateway-style child sub-entity (drives the C-073
     /// gateway-child subscription-resource path).
     child: Option<Arc<MockBackend>>,
@@ -121,6 +125,8 @@ impl MockBackend {
             abort_flash_gate: AsyncGate::default(),
             hook_log: Mutex::new(Vec::new()),
             note_update_id_mode: AtomicU64::new(0),
+            held: Mutex::new(Vec::new()),
+            held_error: AtomicBool::new(false),
             child,
             data_tx: tokio::sync::broadcast::channel(16).0,
         }
@@ -357,6 +363,13 @@ impl DiagnosticBackend for MockBackend {
     async fn abort_flash(&self, _transfer_id: &str) -> BackendResult<()> {
         self.abort_flash_gate.wait_if_enabled().await;
         Ok(())
+    }
+
+    async fn held_updates(&self) -> BackendResult<Vec<HeldUpdate>> {
+        if self.held_error.load(Ordering::SeqCst) {
+            return Err(BackendError::Transport("executor unreachable".into()));
+        }
+        Ok(self.held.lock().clone())
     }
 }
 
@@ -2490,5 +2503,175 @@ async fn a_part_upload_names_the_part_to_the_backend() {
     assert_eq!(
         *backend.hook_log.lock(),
         vec!["part:manifest".to_string(), "part:#firmware".to_string()]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Updates the executor holds
+// ---------------------------------------------------------------------------
+
+fn held(id: &str, state: HeldState, parts: &[(&str, u64)]) -> HeldUpdate {
+    HeldUpdate {
+        id: id.into(),
+        bank: "b".into(),
+        state,
+        parts: parts
+            .iter()
+            .map(|(name, size)| HeldPart {
+                name: (*name).into(),
+                size: *size,
+                sha256: format!("inner-{name}"),
+            })
+            .collect(),
+    }
+}
+
+#[tokio::test]
+async fn listing_merges_held_updates_once() {
+    let (server, backend) = spawn_with("banked").await;
+    let resp = register(&server, serde_json::json!({ "id": "pkg-both" })).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+    *backend.held.lock() = vec![
+        held("pkg-held", HeldState::Prepared, &[]),
+        held("pkg-both", HeldState::Executing, &[]),
+    ];
+    let (st, body) = get_json(
+        &server,
+        "/vehicle/v1/components/dev1/updates?origin=proximity",
+    )
+    .await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+    assert_eq!(body["items"], serde_json::json!(["pkg-both", "pkg-held"]));
+}
+
+#[tokio::test]
+async fn listing_fails_when_the_executor_cannot_report_held_updates() {
+    let (server, backend) = spawn_with("banked").await;
+    backend.held_error.store(true, Ordering::SeqCst);
+    let (st, _) = get_json(
+        &server,
+        "/vehicle/v1/components/dev1/updates?origin=proximity",
+    )
+    .await;
+    assert_eq!(st, reqwest::StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn a_held_only_update_is_described_reported_and_its_parts_listed() {
+    let (server, backend) = spawn_with("banked").await;
+    *backend.held.lock() = vec![held(
+        "pkg-held",
+        HeldState::Executed,
+        &[("kernel", 2048), ("rootfs", 1)],
+    )];
+
+    let (st, body) = get_json(&server, "/vehicle/v1/components/dev1/updates/pkg-held").await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+    assert_eq!(body["id"], "pkg-held");
+    assert_eq!(body["update_name"], "pkg-held");
+    assert_eq!(body["size"], 3);
+    assert_eq!(
+        body["affected_components"],
+        serde_json::json!(["/vehicle/v1/components/dev1"])
+    );
+
+    let body = get_status(&server, "pkg-held").await;
+    assert_eq!(body["phase"], "execute");
+    assert_eq!(body["status"], "inProgress");
+    assert_eq!(
+        body["x-update"],
+        serde_json::json!({ "state": "EXECUTED", "reset_kind": "component" })
+    );
+
+    let (st, body) = get_json(
+        &server,
+        "/vehicle/v1/components/dev1/updates/pkg-held/bulk-data",
+    )
+    .await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+    assert_eq!(
+        body["items"],
+        serde_json::json!([
+            { "part_id": "#kernel", "size": 2048, "sha256": "inner-kernel", "present": true },
+            { "part_id": "#rootfs", "size": 1, "sha256": "inner-rootfs", "present": true },
+        ])
+    );
+
+    // Neither registered nor held → 404.
+    let (st, _) = get_json(&server, "/vehicle/v1/components/dev1/updates/pkg-none").await;
+    assert_eq!(st, reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn held_state_maps_to_phase_status_and_x_update_state() {
+    let (server, backend) = spawn_with("banked").await;
+    for (state, phase, status, x_state) in [
+        (HeldState::Preparing, "prepare", "inProgress", "PREPARING"),
+        (HeldState::Prepared, "prepare", "completed", "PREPARED"),
+        (HeldState::Executing, "execute", "inProgress", "EXECUTING"),
+        (HeldState::Executed, "execute", "inProgress", "EXECUTED"),
+    ] {
+        *backend.held.lock() = vec![held("pkg-held", state, &[])];
+        let body = get_status(&server, "pkg-held").await;
+        assert_eq!(body["phase"], phase, "{body}");
+        assert_eq!(body["status"], status, "{body}");
+        assert_eq!(body["x-update"]["state"], x_state, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn verbs_on_a_held_only_update_are_404() {
+    let (server, backend) = spawn_with("banked").await;
+    *backend.held.lock() = vec![held("pkg-held", HeldState::Executed, &[("kernel", 1)])];
+    for verb in ["x-update-commit", "x-update-rollback", "prepare", "execute"] {
+        let resp = put(&server, &x_update_path("pkg-held", verb)).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND, "{verb}");
+    }
+}
+
+#[tokio::test]
+async fn registered_parts_report_present_by_name() {
+    let (server, backend) = spawn_with("banked").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"m").await;
+    upload_part(&server, &id, "#kernel", b"k").await;
+    let parts = |body: &Value| -> Vec<(String, bool)> {
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| {
+                assert!(i["href"].is_string(), "{i}");
+                (
+                    i["part_id"].as_str().unwrap().to_string(),
+                    i["present"].as_bool().unwrap(),
+                )
+            })
+            .collect()
+    };
+    let path = format!("/vehicle/v1/components/dev1/updates/{id}/bulk-data");
+
+    // Nothing held.
+    let (st, body) = get_json(&server, &path).await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+    assert_eq!(
+        parts(&body),
+        vec![("manifest".into(), false), ("#kernel".into(), false)]
+    );
+
+    // Held under this id: matched by name, the `#` prefix aside.
+    *backend.held.lock() = vec![held(&id, HeldState::Preparing, &[("kernel", 1)])];
+    let (_, body) = get_json(&server, &path).await;
+    assert_eq!(
+        parts(&body),
+        vec![("manifest".into(), false), ("#kernel".into(), true)]
+    );
+
+    // Not held under this id: any part held for the component counts.
+    *backend.held.lock() = vec![held("other", HeldState::Prepared, &[("manifest", 1)])];
+    let (_, body) = get_json(&server, &path).await;
+    assert_eq!(
+        parts(&body),
+        vec![("manifest".into(), true), ("#kernel".into(), false)]
     );
 }
