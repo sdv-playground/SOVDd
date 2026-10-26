@@ -31,7 +31,10 @@ use futures::StreamExt;
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sovd_core::{PackageStream, UpdatePackageContext, UpdatePackageDescriptor, UpdatePartRef};
+use sovd_core::{
+    HeldState, HeldUpdate, PackageStream, UpdatePackageContext, UpdatePackageDescriptor,
+    UpdatePartRef,
+};
 use uuid::Uuid;
 
 use crate::error::ApiError;
@@ -197,7 +200,13 @@ pub struct PartStatusEntry {
     pub part_id: String,
     pub size: u64,
     pub sha256: String,
-    pub href: String,
+    /// Absent for a part the executor holds but this server never received.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+    /// Whether the executor holds this part, matched by name (`name` or
+    /// `#name`), not by hash: the executor's digest is of the stored part,
+    /// `sha256` here is of the uploaded one.
+    pub present: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -481,7 +490,7 @@ pub async fn list_updates(
     Path(component_id): Path<String>,
     Query(query): Query<ListUpdatesQuery>,
 ) -> Result<Json<UpdatesListResponse>, ApiError> {
-    let _ = state.get_backend(&component_id)?;
+    let backend = state.get_backend(&component_id)?;
 
     // SOVDd's `/updates` tracks workshop-pushed (proximity) staging sessions;
     // there is no server-pulled `remote` catalog, so a `remote` query (the
@@ -490,13 +499,18 @@ pub async fn list_updates(
         return Ok(Json(UpdatesListResponse { items: Vec::new() }));
     }
 
-    let store = state.updates.0.lock();
-    let mut items: Vec<String> = store
+    let mut items: Vec<String> = state
+        .updates
+        .0
+        .lock()
         .iter()
         .filter(|(key, _)| key.component_id() == component_id)
         .map(|(key, _)| key.update_id().to_string())
         .collect();
+    // The executor's held updates survive a server restart; list them too.
+    items.extend(held_updates(backend).await?.into_iter().map(|h| h.id));
     items.sort(); // deterministic (HashMap iteration order is not)
+    items.dedup();
     Ok(Json(UpdatesListResponse { items }))
 }
 
@@ -521,12 +535,17 @@ pub async fn get_update(
     // Snapshot what the describer needs, then DROP the lock before the
     // (async, possibly I/O-bound) describe call — never hold a parking_lot
     // guard across `.await`.
-    let (register_body, parts): (Option<serde_json::Value>, Vec<UpdatePart>) = {
-        let store = state.updates.0.lock();
-        let entry = store
-            .get(&UpdateKey::new(&component_id, &update_id))
-            .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
-        (entry.manifest.clone(), entry.parts.clone())
+    let snapshot: Option<(Option<serde_json::Value>, Vec<UpdatePart>)> = state
+        .updates
+        .0
+        .lock()
+        .get(&UpdateKey::new(&component_id, &update_id))
+        .map(|entry| (entry.manifest.clone(), entry.parts.clone()));
+    let Some((register_body, parts)) = snapshot else {
+        // Not registered here, but possibly held by the executor (e.g. after
+        // a server restart): describe it from what the executor reports.
+        let held = held_update(backend, &update_id).await?;
+        return Ok(Json(held_descriptor(&component_id, &held)));
     };
 
     let part_refs: Vec<UpdatePartRef<'_>> = parts
@@ -1464,6 +1483,15 @@ pub async fn get_status(
 ) -> Result<Json<UpdateStatusBody>, ApiError> {
     let backend = state.get_backend(&component_id)?;
     let key = UpdateKey::new(&component_id, &update_id);
+    if !state.updates.0.lock().contains_key(&key) {
+        let held = held_update(backend, &update_id).await?;
+        let reset_kind = backend
+            .get_activation_state()
+            .await
+            .ok()
+            .map(|a| a.reset_kind);
+        return Ok(Json(held_status(&held.state, reset_kind)));
+    }
     let activation = execute_activation(&state, backend, &key, &update_id).await?;
     let store = state.updates.0.lock();
     let entry = store
@@ -1554,14 +1582,62 @@ pub async fn list_bulk_data(
     State(state): State<AppState>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<Json<BulkDataListResponse>, ApiError> {
-    let store = state.updates.0.lock();
-    let entry = store
+    let backend = state.get_backend(&component_id)?;
+    let parts: Option<Vec<UpdatePart>> = state
+        .updates
+        .0
+        .lock()
         .get(&UpdateKey::new(&component_id, &update_id))
-        .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
-    let items: Vec<PartStatusEntry> = entry
-        .parts
+        .map(|entry| entry.parts.clone());
+    let Some(parts) = parts else {
+        // Held only: list the executor's parts themselves.
+        let held = held_update(backend, &update_id).await?;
+        let items = held
+            .parts
+            .into_iter()
+            .map(|p| PartStatusEntry {
+                part_id: if p.name.starts_with('#') {
+                    p.name
+                } else {
+                    format!("#{}", p.name)
+                },
+                size: p.size,
+                sha256: p.sha256,
+                href: None,
+                present: true,
+            })
+            .collect();
+        return Ok(Json(BulkDataListResponse { items }));
+    };
+    // `present` is advisory: an executor that cannot report never fails the
+    // listing of a registered update, whose parts come from the store.
+    let held = held_updates(backend).await.unwrap_or_else(|e| {
+        tracing::warn!(
+            component_id = %component_id,
+            update_id = %update_id,
+            error = ?e,
+            "held updates unavailable; reporting no part present"
+        );
+        Vec::new()
+    });
+    // The held parts of this update; if the executor does not hold it by
+    // this id, any part it holds for this component.
+    let held_names: Vec<String> = match held.iter().find(|h| h.id == update_id) {
+        Some(h) => h.parts.iter().map(|p| p.name.clone()).collect(),
+        None => held
+            .iter()
+            .flat_map(|h| h.parts.iter().map(|p| p.name.clone()))
+            .collect(),
+    };
+    let items: Vec<PartStatusEntry> = parts
         .iter()
-        .map(|p| part_status_entry(&component_id, &update_id, p))
+        .map(|p| {
+            let mut item = part_status_entry(&component_id, &update_id, p);
+            item.present = held_names
+                .iter()
+                .any(|name| held_part_matches(&p.part_id, name));
+            item
+        })
         .collect();
     Ok(Json(BulkDataListResponse { items }))
 }
@@ -1713,12 +1789,86 @@ fn part_status_entry(component_id: &str, update_id: &str, p: &UpdatePart) -> Par
         part_id: p.part_id.clone(),
         size: p.size,
         sha256: p.sha256.clone(),
-        href: format!(
+        href: Some(format!(
             "/vehicle/v1/components/{}/updates/{}/bulk-data/{}",
             component_id,
             enc(update_id),
             enc(&p.part_id)
-        ),
+        )),
+        present: false,
+    }
+}
+
+/// The updates the component's executor holds. An executor that does not
+/// report held updates (`NotSupported`) holds none.
+async fn held_updates(
+    backend: &Arc<dyn sovd_core::DiagnosticBackend>,
+) -> Result<Vec<HeldUpdate>, ApiError> {
+    match backend.held_updates().await {
+        Ok(held) => Ok(held),
+        Err(sovd_core::BackendError::NotSupported(_)) => Ok(Vec::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The held update with this id; 404 when the executor does not hold it.
+async fn held_update(
+    backend: &Arc<dyn sovd_core::DiagnosticBackend>,
+    update_id: &str,
+) -> Result<HeldUpdate, ApiError> {
+    held_updates(backend)
+        .await?
+        .into_iter()
+        .find(|h| h.id == update_id)
+        .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))
+}
+
+/// Whether a registered part id names the held part `name`: the executor
+/// reports the stored name (`kernel`), a client may address it by payload
+/// uri (`#kernel`).
+fn held_part_matches(part_id: &str, name: &str) -> bool {
+    part_id == name || part_id.strip_prefix('#') == Some(name)
+}
+
+/// Table 261 descriptor of a held update: no register body is known, so the
+/// name is the id and the size is that of the held parts.
+fn held_descriptor(component_id: &str, held: &HeldUpdate) -> UpdatePackageDescriptor {
+    let ctx = UpdatePackageContext {
+        id: &held.id,
+        component_id,
+        register_body: None,
+        parts: &[],
+    };
+    let mut descriptor = sovd_core::default_descriptor_from_context(&ctx);
+    descriptor.size = held
+        .parts
+        .iter()
+        .map(|p| p.size)
+        .sum::<u64>()
+        .div_ceil(1024);
+    descriptor
+}
+
+/// Table 270 status of a held update, from the executor's held state.
+fn held_status(state: &HeldState, reset_kind: Option<sovd_core::ResetKind>) -> UpdateStatusBody {
+    let (phase, status, x_state) = match state {
+        HeldState::Preparing => (Phase::Prepare, Status::InProgress, XUpdateState::Preparing),
+        HeldState::Prepared => (Phase::Prepare, Status::Completed, XUpdateState::Prepared),
+        HeldState::Executing => (Phase::Execute, Status::InProgress, XUpdateState::Executing),
+        HeldState::Executed => (Phase::Execute, Status::InProgress, XUpdateState::Executed),
+    };
+    UpdateStatusBody {
+        phase: phase.as_str(),
+        status: status.as_str(),
+        progress: None,
+        step: None,
+        error: None,
+        substate: None,
+        reset_kind,
+        x_update: Some(XUpdateStatus {
+            state: x_state,
+            reset_kind: reset_kind.map(Into::into),
+        }),
     }
 }
 

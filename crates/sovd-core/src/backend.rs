@@ -1357,7 +1357,8 @@ pub enum HeldState {
 /// One staged part of a [`HeldUpdate`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct HeldPart {
-    /// The client's part id.
+    /// The executor's own part name (as it stores the part); a server maps it
+    /// to the client's part id as `name` or `#name`.
     pub name: String,
     /// Size in bytes.
     pub size: u64,
