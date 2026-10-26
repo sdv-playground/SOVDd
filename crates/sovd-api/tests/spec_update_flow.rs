@@ -2562,7 +2562,7 @@ async fn a_held_only_update_is_described_reported_and_its_parts_listed() {
     *backend.held.lock() = vec![held(
         "pkg-held",
         HeldState::Executed,
-        &[("kernel", 2048), ("rootfs", 1)],
+        &[("kernel", 2048), ("#rootfs", 1)],
     )];
 
     let (st, body) = get_json(&server, "/vehicle/v1/components/dev1/updates/pkg-held").await;
@@ -2593,7 +2593,7 @@ async fn a_held_only_update_is_described_reported_and_its_parts_listed() {
         body["items"],
         serde_json::json!([
             { "part_id": "#kernel", "size": 2048, "sha256": "inner-kernel", "present": true },
-            { "part_id": "#rootfs", "size": 1, "sha256": "inner-rootfs", "present": true },
+            { "part_id": "#rootfs", "size": 1, "sha256": "inner-#rootfs", "present": true },
         ])
     );
 
@@ -2673,5 +2673,14 @@ async fn registered_parts_report_present_by_name() {
     assert_eq!(
         parts(&body),
         vec![("manifest".into(), true), ("#kernel".into(), false)]
+    );
+
+    // The executor cannot report: the store's parts, none present.
+    backend.held_error.store(true, Ordering::SeqCst);
+    let (st, body) = get_json(&server, &path).await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+    assert_eq!(
+        parts(&body),
+        vec![("manifest".into(), false), ("#kernel".into(), false)]
     );
 }

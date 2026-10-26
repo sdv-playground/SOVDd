@@ -1589,18 +1589,18 @@ pub async fn list_bulk_data(
         .lock()
         .get(&UpdateKey::new(&component_id, &update_id))
         .map(|entry| entry.parts.clone());
-    let held = held_updates(backend).await?;
     let Some(parts) = parts else {
         // Held only: list the executor's parts themselves.
-        let held = held
-            .into_iter()
-            .find(|h| h.id == update_id)
-            .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+        let held = held_update(backend, &update_id).await?;
         let items = held
             .parts
             .into_iter()
             .map(|p| PartStatusEntry {
-                part_id: format!("#{}", p.name),
+                part_id: if p.name.starts_with('#') {
+                    p.name
+                } else {
+                    format!("#{}", p.name)
+                },
                 size: p.size,
                 sha256: p.sha256,
                 href: None,
@@ -1609,6 +1609,17 @@ pub async fn list_bulk_data(
             .collect();
         return Ok(Json(BulkDataListResponse { items }));
     };
+    // `present` is advisory: an executor that cannot report never fails the
+    // listing of a registered update, whose parts come from the store.
+    let held = held_updates(backend).await.unwrap_or_else(|e| {
+        tracing::warn!(
+            component_id = %component_id,
+            update_id = %update_id,
+            error = ?e,
+            "held updates unavailable; reporting no part present"
+        );
+        Vec::new()
+    });
     // The held parts of this update; if the executor does not hold it by
     // this id, any part it holds for this component.
     let held_names: Vec<String> = match held.iter().find(|h| h.id == update_id) {
