@@ -2293,23 +2293,8 @@ async fn x_update_rollback_from_executed() {
 }
 
 #[tokio::test]
-async fn x_update_delete_after_commit_leaves_the_executor_idle() {
+async fn x_update_repeated_commit_then_delete() {
     let (server, backend, id) = banked_awaiting_verdict().await;
-    let executor = |server: &TestServer| {
-        let server = server.base_url().to_string();
-        async move {
-            let body: Value = http()
-                .get(format!("{server}/vehicle/v1/components/dev1"))
-                .send()
-                .await
-                .unwrap()
-                .json()
-                .await
-                .unwrap();
-            body["x-update"]["state"].as_str().unwrap_or("").to_string()
-        }
-    };
-    assert_eq!(executor(&server).await, "BUSY");
 
     *backend.flash_state.lock() = CoreFlashState::Activated;
     let resp = put(&server, &x_update_path(&id, "x-update-commit")).await;
@@ -2329,15 +2314,12 @@ async fn x_update_delete_after_commit_leaves_the_executor_idle() {
         "COMMITTED"
     );
 
-    assert_eq!(executor(&server).await, "BUSY");
-
     let url = format!(
         "{}/vehicle/v1/components/dev1/updates/{id}",
         server.base_url()
     );
     let resp = http().delete(url).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
-    assert_eq!(executor(&server).await, "IDLE");
 }
 
 #[tokio::test]

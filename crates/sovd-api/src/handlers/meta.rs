@@ -841,7 +841,7 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
                     "POST /vehicle/v1/operations/x-update-commit/executions (served by the embedding machine manager)",
                     "POST /vehicle/v1/operations/x-update-rollback/executions (served by the embedding machine manager)"
                 ],
-                "fields": ["x-update.state", "x-update.reset_kind", "capabilities.x-update.verdict", "component x-update.state (IDLE | BUSY)"],
+                "fields": ["x-update.state", "x-update.reset_kind", "capabilities.x-update.verdict"],
                 "spec":   "docs/x-update.md",
                 "summary": "Aliases of the x-ota verdict surface: explicit \
                             commit and rollback verbs, verb-named \
