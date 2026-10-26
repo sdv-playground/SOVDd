@@ -59,10 +59,9 @@ A verdict is valid for every `reset_kind`, `node` included.
 ### Transactions
 
 Updates whose banks one executor switches together (one boot vector, all or nothing) form a
-transaction, and each of them reports it in `x-update.transaction`. A transaction need not span
-the node: an ECU whose SoCs boot from separate boot vectors has one transaction per vector.
-Updates with different transactions settle independently; keeping them consistent with each
-other is the client's job.
+transaction. A transaction need not span the node: an ECU whose SoCs boot from separate boot
+vectors has one transaction per vector. Updates in different transactions settle independently;
+keeping them consistent with each other is the client's job.
 
 Within a transaction:
 
@@ -78,8 +77,8 @@ Within a transaction:
 So a client may send the verdict to every member, at once or one after another, and await each
 one's settled state; the transaction never ends half committed.
 
-Served by this crate. Keeping a transaction atomic, and naming it, is the backend's part (in
-sumo, the machine manager); not implemented yet.
+Served by this crate. Keeping a transaction atomic is the backend's part (in sumo, the machine
+manager); not implemented yet.
 
 ### Per node (operations)
 
@@ -124,13 +123,11 @@ prepared update. There is no finish verb. An executor still busy answers the nex
 "x-update": {
   "state": "<State>",
   "reset_kind": "none" | "component" | "node",
-  "transaction": "<id>",
   "adopted": true
 }
 ```
 
-`transaction` names the update's transaction (see Transactions); `adopted` is present, and
-true, on an update a registration adopted. The states are named after the verbs that lead to
+`adopted` is present, and true, on an update a registration adopted. The states are named after the verbs that lead to
 them. The state is total, and the standard
 `phase`/`status` in the same body agree with it:
 
