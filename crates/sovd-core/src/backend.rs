@@ -922,6 +922,20 @@ pub trait DiagnosticBackend: Send + Sync {
         self.receive_package(&data).await
     }
 
+    /// A part of the update, named by the client's part id, as
+    /// `receive_package_stream` but addressed. The default forwards to
+    /// `receive_package_stream`; an executor that stages parts by name
+    /// overrides it.
+    async fn receive_package_part(
+        &self,
+        part_id: &str,
+        stream: PackageStream,
+        content_length: Option<u64>,
+    ) -> BackendResult<String> {
+        let _ = part_id;
+        self.receive_package_stream(stream, content_length).await
+    }
+
     /// List all stored packages
     async fn list_packages(&self) -> BackendResult<Vec<PackageInfo>> {
         Err(crate::error::BackendError::NotSupported(
@@ -1142,6 +1156,21 @@ pub trait DiagnosticBackend: Send + Sync {
         ))
     }
 
+    /// The client's id for the update being registered or prepared. An
+    /// executor that keeps the id with the update it stages records it here;
+    /// the default ignores it.
+    async fn note_update_id(&self, update_id: &str) -> BackendResult<()> {
+        let _ = update_id;
+        Ok(())
+    }
+
+    /// The updates this executor holds, from its durable state: staged,
+    /// prepared, armed or running unconfirmed. Settled updates are not held.
+    /// The default holds none.
+    async fn held_updates(&self) -> BackendResult<Vec<HeldUpdate>> {
+        Ok(Vec::new())
+    }
+
     // =========================================================================
     // Mode Control (Session, Security, Link)
     // =========================================================================
@@ -1300,6 +1329,40 @@ pub struct UpdatePackageDescriptor {
     /// Components/apps with changed user-perceived behaviour.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub affected_components: Vec<String>,
+}
+
+/// An update the executor holds, rebuilt from its own durable state.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct HeldUpdate {
+    /// The client's update id, as recorded by `note_update_id`.
+    pub id: String,
+    /// The bank the update is staged in.
+    pub bank: String,
+    /// Where the update stands.
+    pub state: HeldState,
+    /// The parts staged for the update.
+    pub parts: Vec<HeldPart>,
+}
+
+/// State of a [`HeldUpdate`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum HeldState {
+    Preparing,
+    Prepared,
+    Executing,
+    Executed,
+}
+
+/// One staged part of a [`HeldUpdate`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct HeldPart {
+    /// The client's part id.
+    pub name: String,
+    /// Size in bytes.
+    pub size: u64,
+    /// SHA-256 of the part.
+    pub sha256: String,
 }
 
 /// One uploaded bulk-data part, as seen by [`DiagnosticBackend::describe_update_package`].

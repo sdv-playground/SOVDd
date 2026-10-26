@@ -9,7 +9,7 @@
 //! | Wire verb                       | Backend |
 //! |---------------------------------|---------|
 //! | `POST /updates`                 | (none — SOVD-side allocation of update_id) |
-//! | `PUT /bulk-data/{part_id}`      | `receive_package_stream` (returns file_id, recorded per part) |
+//! | `PUT /bulk-data/{part_id}`      | `receive_package_part` (returns file_id, recorded per part) |
 //! | `POST /executions {verify}`     | `verify_package` per part, then `start_flash` (allocates transfer_id) |
 //! | `POST /executions {finalize}`   | `finalize_flash` + `activate` |
 //! | `POST /executions {commit}`     | `commit_flash` |
@@ -353,6 +353,13 @@ pub async fn register_update(
     // simply skip this step. The actual flash session will be opened
     // later when the package is ready (during the /executions wire's
     // `verify` action or at `PUT /prepare`).
+    match backend.note_update_id(&update_id).await {
+        Ok(()) | Err(sovd_core::BackendError::NotSupported(_)) => {}
+        Err(e) => {
+            remove_registration(&state, &key, registration_token);
+            return Err(e.into());
+        }
+    }
     let transfer_id = match backend.start_flash().await {
         Ok(tid) => Some(tid),
         // Backends that don't preallocate (`NotSupported`), or that require an
@@ -1612,7 +1619,7 @@ pub async fn put_bulk_data_part(
     });
     let pkg_stream: PackageStream = Box::pin(data_stream);
     let file_id = match backend
-        .receive_package_stream(pkg_stream, content_length)
+        .receive_package_part(&part_id, pkg_stream, content_length)
         .await
     {
         Ok(file_id) => file_id,

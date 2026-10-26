@@ -204,6 +204,7 @@ pub fn route_capability(method: &Method, path: &str) -> Capability {
         || path.contains("/x-ota-rollback")
         || path.contains("/x-update-commit")
         || path.contains("/x-update-rollback")
+        || path.contains("/x-update-verdict")
     {
         Capability::UpdateVerdict
     } else if path.contains("/operations/x-ota-commit-trials")
@@ -774,6 +775,12 @@ mod tests {
                 Capability::UpdateVerdict
             );
         }
+        // The retired single verdict verb, still served by machine managers
+        // during the alias period.
+        assert_eq!(
+            route_capability(&post, "/vehicle/v1/operations/x-update-verdict/executions"),
+            Capability::UpdateVerdict
+        );
         // The trials branch wins over the generic /operations branch even on GET.
         assert_eq!(
             route_capability(
