@@ -72,6 +72,10 @@ struct MockBackend {
     activation_query_gate: AsyncGate,
     rollback_flash_gate: AsyncGate,
     abort_flash_gate: AsyncGate,
+    /// Hook calls in arrival order: `note:<id>`, `start_flash`, `part:<id>`.
+    hook_log: Mutex<Vec<String>>,
+    /// What `note_update_id` answers: 0 = Ok, 1 = Busy, 2 = NotSupported.
+    note_update_id_mode: AtomicU64,
     /// Optional gateway-style child sub-entity (drives the C-073
     /// gateway-child subscription-resource path).
     child: Option<Arc<MockBackend>>,
@@ -115,6 +119,8 @@ impl MockBackend {
             activation_query_gate: AsyncGate::default(),
             rollback_flash_gate: AsyncGate::default(),
             abort_flash_gate: AsyncGate::default(),
+            hook_log: Mutex::new(Vec::new()),
+            note_update_id_mode: AtomicU64::new(0),
             child,
             data_tx: tokio::sync::broadcast::channel(16).0,
         }
@@ -193,6 +199,25 @@ impl DiagnosticBackend for MockBackend {
         Err(BackendError::OperationNotFound(op_id.into()))
     }
 
+    async fn note_update_id(&self, update_id: &str) -> BackendResult<()> {
+        self.hook_log.lock().push(format!("note:{update_id}"));
+        match self.note_update_id_mode.load(Ordering::SeqCst) {
+            1 => Err(BackendError::Busy("id refused".into())),
+            2 => Err(BackendError::NotSupported("note_update_id".into())),
+            _ => Ok(()),
+        }
+    }
+
+    async fn receive_package_part(
+        &self,
+        part_id: &str,
+        stream: PackageStream,
+        content_length: Option<u64>,
+    ) -> BackendResult<String> {
+        self.hook_log.lock().push(format!("part:{part_id}"));
+        self.receive_package_stream(stream, content_length).await
+    }
+
     async fn receive_package_stream(
         &self,
         mut stream: PackageStream,
@@ -225,6 +250,7 @@ impl DiagnosticBackend for MockBackend {
 
     async fn start_flash(&self) -> BackendResult<String> {
         let call = self.start_flash_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        self.hook_log.lock().push("start_flash".into());
         self.start_flash_gate.wait_if_enabled().await;
         if self.fail_start_flash_call.load(Ordering::SeqCst) == call {
             return Err(BackendError::Internal(format!(
@@ -2403,4 +2429,66 @@ async fn component_advertises_x_update_verdict_capability() {
             "{shape}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Backend hooks: the update id and the part id reach the backend
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn register_sends_the_update_id_to_the_backend() {
+    let (server, backend) = spawn_with("banked").await;
+    let resp = register(&server, serde_json::json!({ "id": "pkg-1" })).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+    // The id is noted before the flash session is opened.
+    assert_eq!(
+        *backend.hook_log.lock(),
+        vec!["note:pkg-1".to_string(), "start_flash".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn register_fails_when_the_backend_refuses_the_update_id() {
+    let (server, backend) = spawn_with("banked").await;
+    backend.note_update_id_mode.store(1, Ordering::SeqCst);
+    let resp = register(&server, serde_json::json!({ "id": "pkg-refused" })).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+    // No flash session is opened for a refused id.
+    assert_eq!(
+        *backend.hook_log.lock(),
+        vec!["note:pkg-refused".to_string()]
+    );
+    let (st, body) = get_json(&server, "/vehicle/v1/components/dev1/updates").await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+    assert!(
+        !body.to_string().contains("pkg-refused"),
+        "registration must be removed: {body}"
+    );
+    // The id can be registered again once the backend accepts it.
+    backend.note_update_id_mode.store(0, Ordering::SeqCst);
+    let resp = register(&server, serde_json::json!({ "id": "pkg-refused" })).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn register_succeeds_when_the_backend_does_not_support_update_ids() {
+    let (server, backend) = spawn_with("banked").await;
+    backend.note_update_id_mode.store(2, Ordering::SeqCst);
+    let resp = register(&server, serde_json::json!({ "id": "pkg-ns" })).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+    let (st, _) = get_json(&server, "/vehicle/v1/components/dev1/updates/pkg-ns").await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_part_upload_names_the_part_to_the_backend() {
+    let (server, backend) = spawn_with("banked").await;
+    let id = open_update(&server).await;
+    backend.hook_log.lock().clear();
+    upload_part(&server, &id, "manifest", b"m").await;
+    upload_part(&server, &id, "#firmware", b"fw").await;
+    assert_eq!(
+        *backend.hook_log.lock(),
+        vec!["part:manifest".to_string(), "part:#firmware".to_string()]
+    );
 }

@@ -1430,3 +1430,90 @@ pub fn default_descriptor_from_context(ctx: &UpdatePackageContext<'_>) -> Update
         affected_components: vec![format!("/vehicle/v1/components/{}", ctx.component_id)],
     }
 }
+
+#[cfg(test)]
+mod held_update_tests {
+    use super::*;
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    /// A backend overriding nothing the hooks cover.
+    struct Plain(EntityInfo, Capabilities);
+
+    #[async_trait::async_trait]
+    impl DiagnosticBackend for Plain {
+        fn entity_info(&self) -> &EntityInfo {
+            &self.0
+        }
+        fn capabilities(&self) -> &Capabilities {
+            &self.1
+        }
+        async fn list_parameters(&self) -> BackendResult<Vec<ParameterInfo>> {
+            Ok(Vec::new())
+        }
+        async fn read_data(&self, _: &[String]) -> BackendResult<Vec<DataValue>> {
+            Ok(Vec::new())
+        }
+        async fn get_faults(&self, _: Option<&FaultFilter>) -> BackendResult<FaultsResult> {
+            Ok(FaultsResult {
+                faults: Vec::new(),
+                status_availability_mask: None,
+            })
+        }
+        async fn list_operations(&self) -> BackendResult<Vec<OperationInfo>> {
+            Ok(Vec::new())
+        }
+        async fn start_operation(&self, op: &str, _: &[u8]) -> BackendResult<OperationExecution> {
+            Err(crate::error::BackendError::OperationNotFound(op.into()))
+        }
+    }
+
+    /// Drive a future that never actually suspends (no runtime in this crate's
+    /// dev-dependencies).
+    fn ready<T>(fut: impl Future<Output = T>) -> T {
+        let mut fut = std::pin::pin!(fut);
+        match fut.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(v) => v,
+            Poll::Pending => panic!("default hook suspended"),
+        }
+    }
+
+    fn plain() -> Plain {
+        Plain(
+            EntityInfo {
+                id: "dev1".into(),
+                name: "dev1".into(),
+                entity_type: "ecu".into(),
+                description: None,
+                href: "/vehicle/v1/components/dev1".into(),
+                status: None,
+            },
+            Capabilities::default(),
+        )
+    }
+
+    #[test]
+    fn held_updates_default_is_empty_and_is_serializable() {
+        let backend = plain();
+        assert!(ready(backend.held_updates()).unwrap().is_empty());
+        // The id hook defaults to accepting anything.
+        assert!(ready(backend.note_update_id("pkg-1")).is_ok());
+
+        let held = HeldUpdate {
+            id: "pkg-1".into(),
+            bank: "B".into(),
+            state: HeldState::Executed,
+            parts: vec![HeldPart {
+                name: "manifest".into(),
+                size: 12,
+                sha256: "ab".repeat(32),
+            }],
+        };
+        let json = serde_json::to_value(&held).unwrap();
+        assert_eq!(json["state"], "EXECUTED");
+        assert_eq!(json["bank"], "B");
+        assert_eq!(json["parts"][0]["name"], "manifest");
+        let back: HeldUpdate = serde_json::from_value(json).unwrap();
+        assert_eq!(back, held);
+    }
+}
