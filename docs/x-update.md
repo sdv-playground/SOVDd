@@ -54,7 +54,7 @@ update. No body.
 | 404 | unknown update |
 | 409 `precondition-not-fulfilled` | not in a state the verb is accepted in |
 
-A verdict is valid for every `reset_kind`, `node` included.
+A verdict is valid for every update, whatever restart activates it.
 
 ### Transactions
 
@@ -122,7 +122,6 @@ prepared update. There is no finish verb. An executor still busy answers the nex
 ```json
 "x-update": {
   "state": "<State>",
-  "reset_kind": "none" | "component" | "node",
   "adopted": true
 }
 ```
@@ -136,24 +135,13 @@ them. The state is total, and the standard
 | READY | prepare | pending | registered; manifest and parts may be uploaded; `prepare` may be sent |
 | PREPARING | prepare | inProgress | verifying and staging |
 | PREPARED | prepare | completed | staged in the inactive bank; `execute` or `DELETE` |
-| EXECUTING | execute | inProgress | armed; the restart named by `reset_kind` has not been observed yet |
+| EXECUTING | execute | inProgress | armed; the new software does not run yet (e.g. a restart is still to come) |
 | EXECUTED | execute | inProgress | the new software runs; a verdict is awaited |
 | COMMITTING | execute | inProgress | commit accepted and running |
 | COMMITTED | execute | completed | permanent |
 | ROLLING_BACK | execute | inProgress | rollback accepted and running (the client's, or the executor's own, e.g. after failed trial boots) |
 | ROLLED_BACK | execute | failed (`error_code` `x-ota-verdict-rollback` today) | the previous software is in effect again |
 | FAILED | prepare or execute | failed | see the standard error object |
-
-`reset_kind`:
-
-| value | meaning |
-|---|---|
-| none | the new software runs without a restart |
-| component | a standard restart of this entity activates it |
-| node | one restart of the node's entity activates every update on the node that reports `node` |
-
-The x-ota member `x-ota-reset-kind` keeps its old vocabulary (`none`, `local`,
-`requires_ecu_reset`) and is served beside it.
 
 ## Capability flag
 
@@ -195,7 +183,7 @@ restart and the verdict.
 2. Upload the manifest and parts.
 3. `PUT prepare` on each; wait for PREPARED.
 4. `PUT execute` on each; each goes EXECUTING.
-5. The restart named by `reset_kind` happens (a power cycle, or whoever is authorized issues
+5. The restart happens (a power cycle, or whoever is authorized issues
    `PUT {entity}/status/restart`); the client awaits EXECUTED.
 6. When the updates report EXECUTED: send each its verdict (`x-update-commit` or
    `x-update-rollback`, or the node operation), and await COMMITTED or ROLLED_BACK. A rollback
@@ -212,7 +200,8 @@ update's state.
 | `x-ota-commit`, `x-ota-rollback` (per update) | `PUT …/updates/{id}/x-update-commit`, `…/x-update-rollback` | this crate |
 | `x-ota-commit-trials`, `x-ota-rollback-trials` | node `x-update-commit`, `x-update-rollback` operations | machine manager |
 | `x-ota-update-state` | `x-update-state` | machine manager |
-| `x-ota-reset-kind`, `x-ota-substate` | `x-update.reset_kind`, `x-update.state` | this crate |
+| `x-ota-reset-kind` | unchanged; not part of x-update | this crate |
+| `x-ota-substate` | `x-update.state` | this crate |
 | `?x-ota-control=orchestrated` | unchanged for now; the executor's `verdict` property replaces it later | this crate |
 | `x-ota-force-rollback` | unchanged (admin operation, not lifecycle) | this crate |
 | `x-ota-pull-update` | unchanged (admin operation, not lifecycle) | machine manager |

@@ -2228,7 +2228,6 @@ async fn x_update_commit_mirrors_x_ota_commit() {
 
     let body = get_status(&server, &id).await;
     assert_eq!(body["x-update"]["state"], "EXECUTING");
-    assert_eq!(body["x-update"]["reset_kind"], "component");
 
     let resp = put(&server, &x_update_path(&id, "x-update-commit")).await;
     assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
@@ -2343,7 +2342,6 @@ async fn x_update_state_through_prepare_on_banked() {
     let body = get_status(&server, &id).await;
     assert_eq!(body["phase"], "prepare");
     assert_eq!(body["x-update"]["state"], "READY");
-    assert_eq!(body["x-update"]["reset_kind"], "component");
 
     let resp = put(
         &server,
