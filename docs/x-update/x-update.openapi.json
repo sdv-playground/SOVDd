@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "SOVD x-update extension",
-    "version": "0.2.0-draft",
-    "description": "The x-update vendor extensions to ISO 17978-3 §7.18 (software update) and §7.19 (entity status and restart), as in `docs/x-update.md`. Paths are relative to `/vehicle/v1`. Standard operations are shown only where x-update adds to them. The node operations and `data/x-update-state` are served by the embedding machine manager.\n\nNot in this version: executors that need a verdict refusing `automated` with 409; retiring the x-ota names; executor-side recording of the update id.\n\nNot implemented yet in SOVDd: adopting (until then a verdict, `prepare` or `execute` on an update only the executor holds answers 404), `x-update-revert`, and keeping a transaction atomic (the backend's part)."
+    "version": "0.3.0-draft",
+    "description": "The x-update vendor extensions to ISO 17978-3 §7.18 (software update) and §7.19 (entity status and restart), as in `docs/x-update.md`. Paths are relative to `/vehicle/v1`. Standard operations are shown only where x-update adds to them. The node operations and `data/x-update-state` are served by the embedding machine manager.\n\nNot in this version: executors that need a verdict refusing `automated` with 409; retiring the x-ota names; executor-side recording of the update id.\n\nNot implemented yet in SOVDd: adopting (until then a verdict, `prepare` or `execute` on an update only the executor holds answers 404) and keeping a transaction atomic (the backend's part)."
   },
   "servers": [
     {
@@ -161,13 +161,23 @@
       },
       "delete": {
         "summary": "Remove an update (§7.18.8)",
-        "description": "Once it has settled (COMMITTED, ROLLED_BACK, REVERTED or FAILED). There is no finish verb; before `execute`, the client reverts first (`x-update-revert`) and awaits REVERTED.",
+        "description": "Accepted in READY and PREPARED, before `execute`, where it discards what the executor staged and the software in use is never touched, and once the update has settled (COMMITTED, ROLLED_BACK or FAILED). Synchronous: 204 once the update is gone. There is no finish verb and no revert verb.",
         "responses": {
           "204": {
             "description": "Removed"
           },
           "404": {
             "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`precondition-not-fulfilled`: PREPARING, EXECUTING, EXECUTED, COMMITTING or ROLLING_BACK",
             "content": {
               "application/json": {
                 "schema": {
@@ -574,65 +584,6 @@
         }
       }
     },
-    "/components/{component_id}/updates/{update_id}/x-update-revert": {
-      "parameters": [
-        {
-          "name": "component_id",
-          "in": "path",
-          "required": true,
-          "schema": {
-            "type": "string"
-          }
-        },
-        {
-          "name": "update_id",
-          "in": "path",
-          "required": true,
-          "description": "The id the client registered.",
-          "schema": {
-            "type": "string",
-            "minLength": 1
-          }
-        }
-      ],
-      "put": {
-        "summary": "Revert this update before execute: discard what was staged",
-        "description": "Accepted in READY, PREPARING, PREPARED, and FAILED before `execute`; again in REVERTED, where it changes nothing. The update moves to REVERTING, then REVERTED; the software in use is not touched. The client awaits REVERTED, then deletes the update.",
-        "responses": {
-          "202": {
-            "description": "Accepted; poll the status resource.",
-            "headers": {
-              "Location": {
-                "description": "`{entity}/updates/{update_id}/status`.",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Unknown update",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GenericError"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "`precondition-not-fulfilled`: `execute` was already sent",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GenericError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/operations/x-update-commit/executions": {
       "post": {
         "summary": "Node commit: every component in the node's open transaction, all or nothing",
@@ -766,8 +717,6 @@
           "READY",
           "PREPARING",
           "PREPARED",
-          "REVERTING",
-          "REVERTED",
           "EXECUTING",
           "EXECUTED",
           "COMMITTING",
@@ -776,7 +725,7 @@
           "ROLLED_BACK",
           "FAILED"
         ],
-        "description": "The update's state, named after the verb that leads to it. Total; the standard `phase`/`status` in the same body agree with it:\n\n| state | phase | status | meaning |\n|---|---|---|---|\n| READY | prepare | pending | registered; manifest and parts may be uploaded; `prepare` may be sent |\n| PREPARING | prepare | inProgress | verifying and staging |\n| PREPARED | prepare | completed | staged in the inactive bank; `execute` or `DELETE` |\n| REVERTING | prepare | inProgress | revert accepted; the executor discards what it staged |\n| REVERTED | prepare | failed | nothing staged any more; the software in use was never touched; `DELETE` |\n| EXECUTING | execute | inProgress | armed; the new software does not run yet (e.g. a restart is still to come) |\n| EXECUTED | execute | inProgress | the new software runs; a verdict is awaited |\n| COMMITTING | execute | inProgress | commit accepted and running |\n| COMMITTED | execute | completed | permanent |\n| ROLLING_BACK | execute | inProgress | rollback accepted and running (the client's, or the executor's own, e.g. after failed trial boots) |\n| ROLLED_BACK | execute | failed | the previous software is in effect again |\n| FAILED | prepare or execute | failed | see the standard error object |"
+        "description": "The update's state, named after the verb that leads to it. Total; the standard `phase`/`status` in the same body agree with it:\n\n| state | phase | status | meaning |\n|---|---|---|---|\n| READY | prepare | pending | registered; manifest and parts may be uploaded; `prepare` or `DELETE` |\n| PREPARING | prepare | inProgress | verifying and staging |\n| PREPARED | prepare | completed | staged in the inactive bank; `execute` or `DELETE` |\n| EXECUTING | execute | inProgress | armed; the new software does not run yet (e.g. a restart is still to come) |\n| EXECUTED | execute | inProgress | the new software runs; a verdict is awaited |\n| COMMITTING | execute | inProgress | commit accepted and running |\n| COMMITTED | execute | completed | permanent; `DELETE` |\n| ROLLING_BACK | execute | inProgress | rollback accepted and running (the client's, or the executor's own, e.g. after failed trial boots) |\n| ROLLED_BACK | execute | failed | the previous software is in effect again; `DELETE` |\n| FAILED | prepare or execute | failed | see the standard error object; `DELETE` |"
       },
       "StatusBody": {
         "type": "object",

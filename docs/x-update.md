@@ -112,26 +112,50 @@ OperationExecution:
 
 Served by the embedding machine manager, not by this crate.
 
-## Revert: `x-update-revert`
+## Delete
 
-`PUT {entity}/updates/{update_id}/x-update-revert`, no body, discards an update before `execute`:
-the executor drops what it staged, and the software in use is never touched. It is accepted in
-READY, PREPARING, PREPARED, and FAILED before `execute`; again in REVERTED, where it changes
-nothing. The update goes through REVERTING to REVERTED, which the client awaits.
+The standard `DELETE {entity}/updates/{update_id}` removes an update. It is accepted in READY and
+PREPARED, before `execute`, where it discards what the executor staged and the software in use is
+never touched, and once the update has settled (COMMITTED, ROLLED_BACK or FAILED). It is
+synchronous: 204 once the update is gone. There is no finish verb and no revert verb: DELETE is
+both.
 
 | answer | when |
 |---|---|
-| 202 + `Location: {entity}/updates/{update_id}/status` | accepted; the update moves to REVERTING |
+| 204 | removed |
 | 404 | unknown update |
-| 409 `precondition-not-fulfilled` | `execute` was already sent |
+| 409 `precondition-not-fulfilled` | PREPARING, EXECUTING, EXECUTED, COMMITTING or ROLLING_BACK: wait, or send the verdict first |
 
-Not implemented yet in SOVDd.
+An executor still busy answers the next `prepare` or `execute` with 409, as the standard does.
 
-## Delete
+## Lifecycle
 
-Once an update has settled (COMMITTED, ROLLED_BACK, REVERTED or FAILED), the client removes it
-with the standard `DELETE {entity}/updates/{update_id}`. There is no finish verb. An executor still busy answers the next `prepare` or
-`execute` with 409, as the standard does.
+| Method | Path | Verb / Notes | From states | To state |
+|---|---|---|---|---|
+| POST | `{entity}/updates` | Register; client gives the id. Re-registering an id the executor holds adopts it (`adopted: true`) | — | READY |
+| GET | `{entity}/updates` | List held updates by the client's id; rebuilt from the executor after a restart | — | — |
+| GET | `{entity}/updates/{id}` | Descriptor | — | — |
+| DELETE | `{entity}/updates/{id}` | Remove an update. Before execute it discards what was staged; the software in use is not touched. Refused (409) while transient or awaiting a verdict | READY, PREPARED, COMMITTED, ROLLED_BACK, FAILED | — |
+| PUT | `{entity}/updates/{id}/bulk-data/{part_id}` | Upload manifest or payload | READY | READY |
+| GET | `{entity}/updates/{id}/bulk-data` | List parts; `present` tells if the executor holds each one | — | — |
+| PUT | `{entity}/updates/{id}/prepare` | §7.18.5 | READY | PREPARING → PREPARED, PREPARING → FAILED |
+| PUT | `{entity}/updates/{id}/execute` | §7.18.6 | PREPARED | EXECUTING → EXECUTED, EXECUTING → ROLLING_BACK → ROLLED_BACK |
+| PUT | `{entity}/updates/{id}/x-update-commit` | Commit the trial; repeated in COMMITTED it changes nothing | EXECUTED | COMMITTING → COMMITTED |
+| PUT | `{entity}/updates/{id}/x-update-rollback` | Roll back the trial; repeated in ROLLED_BACK it changes nothing | EXECUTING, EXECUTED | ROLLING_BACK → ROLLED_BACK |
+| GET | `{entity}` | Component body with `capabilities.x-update.verdict` | — | — |
+
+| State | Transient / Settled | What the client may do |
+|---|---|---|
+| READY | Transient | Upload parts, prepare, DELETE |
+| PREPARING | Transient | Wait |
+| PREPARED | Settled (pre-execute) | execute, DELETE |
+| EXECUTING | Transient | Wait; x-update-rollback accepted |
+| EXECUTED | Settled (awaiting verdict) | x-update-commit, x-update-rollback |
+| COMMITTING | Transient | Wait |
+| COMMITTED | Settled | DELETE |
+| ROLLING_BACK | Transient | Wait |
+| ROLLED_BACK | Settled | DELETE |
+| FAILED | Settled | DELETE |
 
 ## Status member
 
@@ -152,9 +176,7 @@ them. The state is total, and the standard
 |---|---|---|---|
 | READY | prepare | pending | registered; manifest and parts may be uploaded; `prepare` may be sent |
 | PREPARING | prepare | inProgress | verifying and staging |
-| PREPARED | prepare | completed | staged in the inactive bank; `execute` or `x-update-revert` |
-| REVERTING | prepare | inProgress | revert accepted; the executor discards what it staged |
-| REVERTED | prepare | failed | nothing staged any more; the software in use was never touched |
+| PREPARED | prepare | completed | staged in the inactive bank; `execute` or `DELETE` |
 | EXECUTING | execute | inProgress | armed; the new software does not run yet (e.g. a restart is still to come) |
 | EXECUTED | execute | inProgress | the new software runs; a verdict is awaited |
 | COMMITTING | execute | inProgress | commit accepted and running |
@@ -202,7 +224,7 @@ restart and the verdict.
 1. Register one update per component (`POST {entity}/updates`).
 2. Upload the manifest and parts.
 3. `PUT prepare` on each; wait for PREPARED. If any fails, or the client decides not to go on:
-   `x-update-revert` on each update not yet executed, await REVERTED, then `DELETE`.
+   `DELETE` each update not yet executed.
 4. `PUT execute` on each; each goes EXECUTING.
 5. The restart happens (a power cycle, or whoever is authorized issues
    `PUT {entity}/status/restart`); the client awaits EXECUTED.
