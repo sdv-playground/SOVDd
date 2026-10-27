@@ -2267,6 +2267,7 @@ async fn x_update_commit_mirrors_x_ota_commit() {
 
     let body = get_status(&server, &id).await;
     assert_eq!(body["x-update"]["state"], "EXECUTING");
+    assert_eq!(body["x-update"]["reset_kind"], "component");
 
     let resp = put(&server, &x_update_path(&id, "x-update-commit")).await;
     assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
@@ -2331,7 +2332,7 @@ async fn x_update_rollback_from_executed() {
 }
 
 #[tokio::test]
-async fn x_update_repeated_commit_then_delete() {
+async fn x_update_repeated_verdict_is_accepted_and_rollback_after_commit_is_refused() {
     let (server, backend, id) = banked_awaiting_verdict().await;
 
     *backend.flash_state.lock() = CoreFlashState::Activated;
@@ -2381,6 +2382,7 @@ async fn x_update_state_through_prepare_on_banked() {
     let body = get_status(&server, &id).await;
     assert_eq!(body["phase"], "prepare");
     assert_eq!(body["x-update"]["state"], "READY");
+    assert_eq!(body["x-update"]["reset_kind"], "component");
 
     let resp = put(
         &server,
@@ -2576,7 +2578,10 @@ async fn a_held_only_update_is_described_reported_and_its_parts_listed() {
     let body = get_status(&server, "pkg-held").await;
     assert_eq!(body["phase"], "execute");
     assert_eq!(body["status"], "inProgress");
-    assert_eq!(body["x-update"], serde_json::json!({ "state": "EXECUTED" }));
+    assert_eq!(
+        body["x-update"],
+        serde_json::json!({ "state": "EXECUTED", "reset_kind": "component" })
+    );
 
     let (st, body) = get_json(
         &server,

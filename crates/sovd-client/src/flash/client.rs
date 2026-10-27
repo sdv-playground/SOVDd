@@ -158,6 +158,9 @@ pub struct UpdateStatusBody {
 pub struct XUpdateStatus {
     /// e.g. `EXECUTED`, `COMMITTED`, `ROLLED_BACK`.
     pub state: String,
+    /// `none` | `component` | `node`.
+    #[serde(default)]
+    pub reset_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
