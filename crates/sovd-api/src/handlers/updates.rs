@@ -151,8 +151,6 @@ pub struct UpdateStatusBody {
 #[derive(Debug, Clone, Serialize)]
 pub struct XUpdateStatus {
     pub state: XUpdateState,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reset_kind: Option<XUpdateResetKind>,
 }
 
 /// Verb-named lifecycle state carried in `x-update.state`.
@@ -169,25 +167,6 @@ pub enum XUpdateState {
     RollingBack,
     RolledBack,
     Failed,
-}
-
-/// `x-update.reset_kind`: what has to restart for the update to take effect.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum XUpdateResetKind {
-    None,
-    Component,
-    Node,
-}
-
-impl From<sovd_core::ResetKind> for XUpdateResetKind {
-    fn from(kind: sovd_core::ResetKind) -> Self {
-        match kind {
-            sovd_core::ResetKind::None => Self::None,
-            sovd_core::ResetKind::Local => Self::Component,
-            sovd_core::ResetKind::RequiresEcuReset => Self::Node,
-        }
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1511,7 +1490,6 @@ pub async fn get_status(
         reset_kind: entry.reset_kind,
         x_update: Some(XUpdateStatus {
             state: x_update_state(entry, activation),
-            reset_kind: entry.reset_kind.map(Into::into),
         }),
     }))
 }
@@ -1865,10 +1843,7 @@ fn held_status(state: &HeldState, reset_kind: Option<sovd_core::ResetKind>) -> U
         error: None,
         substate: None,
         reset_kind,
-        x_update: Some(XUpdateStatus {
-            state: x_state,
-            reset_kind: reset_kind.map(Into::into),
-        }),
+        x_update: Some(XUpdateStatus { state: x_state }),
     }
 }
 
@@ -1942,25 +1917,16 @@ mod tests {
             reset_kind: None,
             x_update: Some(XUpdateStatus {
                 state: XUpdateState::RolledBack,
-                reset_kind: Some(sovd_core::ResetKind::RequiresEcuReset.into()),
             }),
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(
-            json.contains(r#""x-update":{"state":"ROLLED_BACK","reset_kind":"node"}"#),
+            json.contains(r#""x-update":{"state":"ROLLED_BACK"}"#),
             "{json}"
         );
         assert_eq!(
             serde_json::to_value(XUpdateState::RollingBack).unwrap(),
             "ROLLING_BACK"
-        );
-        assert_eq!(
-            serde_json::to_value(XUpdateResetKind::from(sovd_core::ResetKind::None)).unwrap(),
-            "none"
-        );
-        assert_eq!(
-            serde_json::to_value(XUpdateResetKind::from(sovd_core::ResetKind::Local)).unwrap(),
-            "component"
         );
     }
 

@@ -4,6 +4,8 @@ The contract for the `x-update` vendor extensions to ISO 17978-3 §7.18 (softwar
 §7.19 (entity status and restart). Everything here sits beside the standard members and verbs;
 nothing replaces them.
 
+The same contract as OpenAPI: [`x-update/x-update.openapi.json`](x-update/x-update.openapi.json).
+
 ## Principles
 
 The node reports facts and never vetoes; the client decides the verdict. Whether a verdict is
@@ -27,13 +29,23 @@ server or executor restart; SOVDd does, merging the updates its executor holds i
 has registered. An update only the executor holds is described (`GET {entity}/updates/{id}`, with
 the id as its name and the size of its held parts), reports its status (the held state, per the
 table under "Status member") and lists its held parts; a verdict, `prepare` or `execute` on it
-answers 404 until it is adopted (see "Not in this version").
+answers 404 until it is adopted (below).
 
 `GET {entity}/updates/{update_id}/bulk-data` items carry, beside `part_id`, `size`, `sha256` and
 `href`, a `present` flag: whether the executor already holds the part. It is matched by name (the
 part id is the held part's name or `#` and that name), not by hash: `sha256` is of the uploaded
 part, the executor's digest is of the stored one. A part listed for an update only the executor
 holds is `present`, carries the executor's digest and has no `href`.
+
+A registration with an id the executor still holds adopts that update instead of starting a new
+one: 201, with `x-update.adopted: true` in the details and status bodies. A registration with
+the same id but a different manifest is refused with 409.
+
+How a client recovers is its own choice; recovering from the node's facts instead of by id is
+equally valid. The listing and adopting are required regardless: without them, a client that lost
+its state cannot find and settle its updates, and those recovery cases cannot be tested.
+
+Not implemented yet: SOVDd does not adopt.
 
 ## Verdicts: `x-update-commit`, `x-update-rollback`
 
@@ -51,20 +63,34 @@ update. No body.
 | 404 | unknown update |
 | 409 `precondition-not-fulfilled` | not in a state the verb is accepted in |
 
-Per-update verdicts are for single-component executors and for `component` (local) resets.
-Updates that one node restart activates (`reset_kind` `node`) form one node transaction, settled
-all or nothing by the node operations below. This contract gives a per-update verdict on a member
-of a node transaction no meaning: a client does not send one, and a server may refuse it with 409
-`precondition-not-fulfilled`.
+A verdict is valid for every update, whatever restart activates it.
 
-Served by this crate, which forwards the verdict to the update's executor and reports what it
-answers.
+### Transactions
+
+Updates whose banks one executor switches together (one boot vector, all or nothing) form a
+transaction. A transaction need not span the node: an ECU whose SoCs boot from separate boot
+vectors has one transaction per vector. Updates in different transactions settle independently;
+keeping them consistent with each other is the client's job.
+
+Each update reports its own state, as it actually is; the server does not align the members of
+a transaction. When the executor commits or rolls back, by a verdict or on its own (e.g. the boot
+stage after failed trial boots), each update it commits reports COMMITTING, then COMMITTED, and
+each update it rolls back reports ROLLING_BACK, then ROLLED_BACK.
+
+The server checks nothing across members: a verdict on a member is accepted or refused by that
+member's own state, as above. What to send, and when, is the client's decision; it may send the
+verdict to every member, at once or one after another, and await each one's settled state.
+
+Served by this crate. Keeping a transaction atomic is the backend's part (in sumo, the machine
+manager); not implemented yet.
 
 ### Per node (operations)
 
 `POST /vehicle/v1/operations/x-update-commit/executions` and `…/x-update-rollback/executions`,
 body `{"nonce"?: string}`, commit or roll back every component in the node's open transaction,
-all or nothing. The answer is an ISO §7.14 OperationExecution:
+all or nothing, beside the per-update verbs: the same result as a per-update verdict on any one
+of its updates. The answer is an ISO §7.14
+OperationExecution:
 
 ```json
 {
@@ -86,46 +112,56 @@ all or nothing. The answer is an ISO §7.14 OperationExecution:
 
 Served by the embedding machine manager, not by this crate.
 
+## Revert: `x-update-revert`
+
+`PUT {entity}/updates/{update_id}/x-update-revert`, no body, discards an update before `execute`:
+the executor drops what it staged, and the software in use is never touched. It is accepted in
+READY, PREPARING, PREPARED, and FAILED before `execute`; again in REVERTED, where it changes
+nothing. The update goes through REVERTING to REVERTED, which the client awaits.
+
+| answer | when |
+|---|---|
+| 202 + `Location: {entity}/updates/{update_id}/status` | accepted; the update moves to REVERTING |
+| 404 | unknown update |
+| 409 `precondition-not-fulfilled` | `execute` was already sent |
+
+Not implemented yet in SOVDd.
+
 ## Delete
 
-Once an update has settled (COMMITTED, ROLLED_BACK or FAILED), the client removes it with the
-standard `DELETE {entity}/updates/{update_id}`; before `execute`, the same `DELETE` discards a
-prepared update. There is no finish verb.
+Once an update has settled (COMMITTED, ROLLED_BACK, REVERTED or FAILED), the client removes it
+with the standard `DELETE {entity}/updates/{update_id}`. There is no finish verb. An executor still busy answers the next `prepare` or
+`execute` with 409, as the standard does.
 
 ## Status member
 
 `GET {entity}/updates/{update_id}/status` carries, beside the standard Table 270 members:
 
 ```json
-"x-update": { "state": "<State>", "reset_kind": "none" | "component" | "node" }
+"x-update": {
+  "state": "<State>",
+  "adopted": true
+}
 ```
 
-The states are named after the verbs that lead to them. The state is total, and the standard
+`adopted` is present, and true, on an update a registration adopted. The states are named after the verbs that lead to
+them. The state is total, and the standard
 `phase`/`status` in the same body agree with it:
 
 | state | phase | status | meaning |
 |---|---|---|---|
 | READY | prepare | pending | registered; manifest and parts may be uploaded; `prepare` may be sent |
 | PREPARING | prepare | inProgress | verifying and staging |
-| PREPARED | prepare | completed | staged in the inactive bank; `execute` or `DELETE` |
-| EXECUTING | execute | inProgress | armed; the restart named by `reset_kind` has not been observed yet |
+| PREPARED | prepare | completed | staged in the inactive bank; `execute` or `x-update-revert` |
+| REVERTING | prepare | inProgress | revert accepted; the executor discards what it staged |
+| REVERTED | prepare | failed | nothing staged any more; the software in use was never touched |
+| EXECUTING | execute | inProgress | armed; the new software does not run yet (e.g. a restart is still to come) |
 | EXECUTED | execute | inProgress | the new software runs; a verdict is awaited |
 | COMMITTING | execute | inProgress | commit accepted and running |
 | COMMITTED | execute | completed | permanent |
 | ROLLING_BACK | execute | inProgress | rollback accepted and running (the client's, or the executor's own, e.g. after failed trial boots) |
-| ROLLED_BACK | execute | failed (`error_code` `x-ota-verdict-rollback` today) | the previous software is in effect again |
+| ROLLED_BACK | execute | failed | the previous software is in effect again |
 | FAILED | prepare or execute | failed | see the standard error object |
-
-`reset_kind`:
-
-| value | meaning |
-|---|---|
-| none | the new software runs without a restart |
-| component | a standard restart of this entity activates it |
-| node | one restart of the node's entity activates every update on the node that reports `node` |
-
-The x-ota member `x-ota-reset-kind` keeps its old vocabulary (`none`, `local`,
-`requires_ecu_reset`) and is served beside it.
 
 ## Capability flag
 
@@ -165,15 +201,18 @@ restart and the verdict.
 
 1. Register one update per component (`POST {entity}/updates`).
 2. Upload the manifest and parts.
-3. `PUT prepare` on each; wait for PREPARED.
+3. `PUT prepare` on each; wait for PREPARED. If any fails, or the client decides not to go on:
+   `x-update-revert` on each update not yet executed, await REVERTED, then `DELETE`.
 4. `PUT execute` on each; each goes EXECUTING.
-5. The restart named by `reset_kind` happens: whoever is authorized issues
-   `PUT {entity}/status/restart`, or a power cycle does it. The client awaits EXECUTED.
-6. When the updates report EXECUTED: send the verdict and await COMMITTED or ROLLED_BACK. A
-   single-component or `component` update takes `x-update-commit` / `x-update-rollback` on the
-   update; a node transaction takes the node operation once, for all of its updates. A rollback
+5. The restart happens (a power cycle, or whoever is authorized issues
+   `PUT {entity}/status/restart`); the client awaits EXECUTED.
+6. When the updates report EXECUTED: send each its verdict (`x-update-commit` or
+   `x-update-rollback`, or the node operation), and await COMMITTED or ROLLED_BACK. A rollback
    may also be sent while an update is still EXECUTING.
 7. `DELETE` each update.
+
+A client that restarted lists `GET {entity}/updates`, recognises its ids, and continues from each
+update's state.
 
 ## Aliases
 
@@ -182,7 +221,8 @@ restart and the verdict.
 | `x-ota-commit`, `x-ota-rollback` (per update) | `PUT …/updates/{id}/x-update-commit`, `…/x-update-rollback` | this crate |
 | `x-ota-commit-trials`, `x-ota-rollback-trials` | node `x-update-commit`, `x-update-rollback` operations | machine manager |
 | `x-ota-update-state` | `x-update-state` | machine manager |
-| `x-ota-reset-kind`, `x-ota-substate` | `x-update.reset_kind`, `x-update.state` | this crate |
+| `x-ota-reset-kind` | unchanged; not part of x-update | this crate |
+| `x-ota-substate` | `x-update.state` | this crate |
 | `?x-ota-control=orchestrated` | unchanged for now; the executor's `verdict` property replaces it later | this crate |
 | `x-ota-force-rollback` | unchanged (admin operation, not lifecycle) | this crate |
 | `x-ota-pull-update` | unchanged (admin operation, not lifecycle) | machine manager |
@@ -191,5 +231,4 @@ restart and the verdict.
 
 - Executors that need a verdict refusing `automated` with 409.
 - Retiring the x-ota names.
-- Adopting a re-registration the executor still holds.
 - Executor-side recording of the update id (which the listing needs).
