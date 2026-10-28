@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "SOVD x-update extension",
-    "version": "0.3.0-draft",
-    "description": "The x-update vendor extensions to ISO 17978-3 §7.18 (software update) and §7.19 (entity status and restart), as in `docs/x-update.md`. Paths are relative to `/vehicle/v1`. Standard operations are shown only where x-update adds to them. The node operations and `data/x-update-state` are served by the embedding machine manager.\n\nNot in this version: executors that need a verdict refusing `automated` with 409; retiring the x-ota names; executor-side recording of the update id.\n\nNot implemented yet in SOVDd: adopting (until then a verdict, `prepare` or `execute` on an update only the executor holds answers 404) and keeping a transaction atomic (the backend's part)."
+    "version": "0.4.0-draft",
+    "description": "The x-update vendor extensions to ISO 17978-3 §7.18 (software update) and §7.19 (entity status and restart), as in `docs/x-update.md`. Paths are relative to `/vehicle/v1`. The node is the component and each executor is a subcomponent of it: an executor entity is `/components/{node}/subcomponents/{executor}`, and its updates collection hangs off that entity. A client discovers the executors by listing the node's subcomponents and taking those whose standard capabilities report `software_update`. Standard operations are shown only where x-update adds to them. The node operations and `data/x-update-state` are served by the embedding machine manager.\n\nNot in this version: executors that need a verdict refusing `automated` with 409; retiring the x-ota names; executor-side recording of the update id.\n\nNot implemented yet in SOVDd: adopting (until then a verdict, `prepare` or `execute` on an update only the executor holds answers 404) and keeping a transaction atomic (the backend's part)."
   },
   "servers": [
     {
@@ -11,7 +11,7 @@
     }
   ],
   "paths": {
-    "/components/{component_id}": {
+    "/components/{component_id}/subcomponents/{subcomponent_id}": {
       "parameters": [
         {
           "name": "component_id",
@@ -19,11 +19,21 @@
           "required": true,
           "schema": {
             "type": "string"
+          },
+          "description": "The node component the executor belongs to."
+        },
+        {
+          "name": "subcomponent_id",
+          "in": "path",
+          "required": true,
+          "description": "The executor: a subcomponent of the node component.",
+          "schema": {
+            "type": "string"
           }
         }
       ],
       "get": {
-        "summary": "Component body (§7.6) with the x-update capability flag",
+        "summary": "Executor entity body (§7.6) with the x-update capability flag",
         "responses": {
           "200": {
             "description": "Component",
@@ -35,15 +45,26 @@
               }
             }
           }
-        }
+        },
+        "description": "The executor is a subcomponent of the node component. Beside the standard capabilities (`software_update` marks an update target), `capabilities.x-update.verdict` tells whether `execute` awaits a verdict."
       }
     },
-    "/components/{component_id}/updates": {
+    "/components/{component_id}/subcomponents/{subcomponent_id}/updates": {
       "parameters": [
         {
           "name": "component_id",
           "in": "path",
           "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The node component the executor belongs to."
+        },
+        {
+          "name": "subcomponent_id",
+          "in": "path",
+          "required": true,
+          "description": "The executor: a subcomponent of the node component.",
           "schema": {
             "type": "string"
           }
@@ -112,12 +133,22 @@
         }
       }
     },
-    "/components/{component_id}/updates/{update_id}": {
+    "/components/{component_id}/subcomponents/{subcomponent_id}/updates/{update_id}": {
       "parameters": [
         {
           "name": "component_id",
           "in": "path",
           "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The node component the executor belongs to."
+        },
+        {
+          "name": "subcomponent_id",
+          "in": "path",
+          "required": true,
+          "description": "The executor: a subcomponent of the node component.",
           "schema": {
             "type": "string"
           }
@@ -189,12 +220,22 @@
         }
       }
     },
-    "/components/{component_id}/updates/{update_id}/bulk-data": {
+    "/components/{component_id}/subcomponents/{subcomponent_id}/updates/{update_id}/bulk-data": {
       "parameters": [
         {
           "name": "component_id",
           "in": "path",
           "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The node component the executor belongs to."
+        },
+        {
+          "name": "subcomponent_id",
+          "in": "path",
+          "required": true,
+          "description": "The executor: a subcomponent of the node component.",
           "schema": {
             "type": "string"
           }
@@ -236,12 +277,22 @@
         }
       }
     },
-    "/components/{component_id}/updates/{update_id}/bulk-data/{part_id}": {
+    "/components/{component_id}/subcomponents/{subcomponent_id}/updates/{update_id}/bulk-data/{part_id}": {
       "parameters": [
         {
           "name": "component_id",
           "in": "path",
           "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The node component the executor belongs to."
+        },
+        {
+          "name": "subcomponent_id",
+          "in": "path",
+          "required": true,
+          "description": "The executor: a subcomponent of the node component.",
           "schema": {
             "type": "string"
           }
@@ -302,12 +353,22 @@
         }
       }
     },
-    "/components/{component_id}/updates/{update_id}/prepare": {
+    "/components/{component_id}/subcomponents/{subcomponent_id}/updates/{update_id}/prepare": {
       "parameters": [
         {
           "name": "component_id",
           "in": "path",
           "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The node component the executor belongs to."
+        },
+        {
+          "name": "subcomponent_id",
+          "in": "path",
+          "required": true,
+          "description": "The executor: a subcomponent of the node component.",
           "schema": {
             "type": "string"
           }
@@ -360,12 +421,22 @@
         }
       }
     },
-    "/components/{component_id}/updates/{update_id}/execute": {
+    "/components/{component_id}/subcomponents/{subcomponent_id}/updates/{update_id}/execute": {
       "parameters": [
         {
           "name": "component_id",
           "in": "path",
           "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The node component the executor belongs to."
+        },
+        {
+          "name": "subcomponent_id",
+          "in": "path",
+          "required": true,
+          "description": "The executor: a subcomponent of the node component.",
           "schema": {
             "type": "string"
           }
@@ -419,12 +490,22 @@
         }
       }
     },
-    "/components/{component_id}/updates/{update_id}/status": {
+    "/components/{component_id}/subcomponents/{subcomponent_id}/updates/{update_id}/status": {
       "parameters": [
         {
           "name": "component_id",
           "in": "path",
           "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The node component the executor belongs to."
+        },
+        {
+          "name": "subcomponent_id",
+          "in": "path",
+          "required": true,
+          "description": "The executor: a subcomponent of the node component.",
           "schema": {
             "type": "string"
           }
@@ -466,12 +547,22 @@
         }
       }
     },
-    "/components/{component_id}/updates/{update_id}/x-update-commit": {
+    "/components/{component_id}/subcomponents/{subcomponent_id}/updates/{update_id}/x-update-commit": {
       "parameters": [
         {
           "name": "component_id",
           "in": "path",
           "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The node component the executor belongs to."
+        },
+        {
+          "name": "subcomponent_id",
+          "in": "path",
+          "required": true,
+          "description": "The executor: a subcomponent of the node component.",
           "schema": {
             "type": "string"
           }
@@ -525,12 +616,22 @@
         }
       }
     },
-    "/components/{component_id}/updates/{update_id}/x-update-rollback": {
+    "/components/{component_id}/subcomponents/{subcomponent_id}/updates/{update_id}/x-update-rollback": {
       "parameters": [
         {
           "name": "component_id",
           "in": "path",
           "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The node component the executor belongs to."
+        },
+        {
+          "name": "subcomponent_id",
+          "in": "path",
+          "required": true,
+          "description": "The executor: a subcomponent of the node component.",
           "schema": {
             "type": "string"
           }
@@ -882,7 +983,7 @@
       },
       "Component": {
         "type": "object",
-        "description": "Standard component body; only the x-update capability is shown.",
+        "description": "Standard entity body of an executor subcomponent; only the x-update capability is shown.",
         "properties": {
           "capabilities": {
             "type": "object",

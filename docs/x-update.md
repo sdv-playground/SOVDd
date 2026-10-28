@@ -17,6 +17,15 @@ cycle are all valid. The client owns the update ids. Every verb is explicit and
 addressed to the update's executor. `x-update` is served beside `x-ota` as a set of aliases; the
 `x-ota` names will be deprecated later.
 
+## Entities
+
+The node is the component and each executor is a subcomponent of it. `{entity}` throughout this
+document is an executor entity, `/components/{node}/subcomponents/{executor}`; its updates
+collection is `{entity}/updates`. A client discovers the executors by listing the node's
+subcomponents (`GET /components/{node}/subcomponents`) and taking those whose standard §7.6
+capabilities report `software_update`; an executor entity links its `updates` collection. The
+`apps` executor, where a node has one, is an executor entity like any other.
+
 ## Update ids and listing
 
 The client gives the id in every registration (`POST {entity}/updates`, `id`); a registration
@@ -142,7 +151,7 @@ An executor still busy answers the next `prepare` or `execute` with 409, as the 
 | PUT | `{entity}/updates/{id}/execute` | §7.18.6 | PREPARED | EXECUTING → EXECUTED, EXECUTING → ROLLING_BACK → ROLLED_BACK |
 | PUT | `{entity}/updates/{id}/x-update-commit` | Commit the trial; repeated in COMMITTED it changes nothing | EXECUTED | COMMITTING → COMMITTED |
 | PUT | `{entity}/updates/{id}/x-update-rollback` | Roll back the trial; repeated in ROLLED_BACK it changes nothing | EXECUTING, EXECUTED | ROLLING_BACK → ROLLED_BACK |
-| GET | `{entity}` | Component body with `capabilities.x-update.verdict` | — | — |
+| GET | `{entity}` | Executor entity body: standard capabilities (`software_update`) and `capabilities.x-update.verdict` | — | — |
 
 | State | Transient / Settled | What the client may do |
 |---|---|---|
