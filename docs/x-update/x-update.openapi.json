@@ -1,0 +1,973 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SOVD x-update extension",
+    "version": "0.5.0-draft",
+    "description": "The x-update vendor extensions to ISO 17978-3 §7.18 (software update) and §7.19 (entity status and restart), as in `docs/x-update.md`. Paths are relative to `/vehicle/v1`. The orchestrator addresses updates on the node level: `{entity}` is the node, the collection is `/updates` and every registration names its executor as `target`, one of the node's `x-update.update-targets` (`GET /`). Each executor is an entity of its own — a top-level component, or a subcomponent of the node where the server serves a tree — whose document reports `software_update` and `capabilities.x-update.verdict`. Executors here are said to be IDLE while they hold no update. Standard operations are shown only where x-update adds to them. The node operations and `data/x-update-state` are served by the embedding machine manager.\n\nNot in this version: executors that need a verdict refusing `automated` with 409; retiring the x-ota names; executor-side recording of the update id.\n\nNot implemented yet in SOVDd: adopting (until then a verdict, `prepare` or `execute` on an update only the executor holds answers 404) and keeping a transaction atomic (the backend's part)."
+  },
+  "servers": [
+    {
+      "url": "/vehicle/v1"
+    }
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "summary": "Node capability document (§7.6.3) with the x-update update targets",
+        "description": "The node scope. `updates` links the node-level collection; `x-update.update-targets` lists the executors an update may name as `target`. A node without update executors advertises neither.",
+        "responses": {
+          "200": {
+            "description": "Capability document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeCapabilities"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/components/{component_id}": {
+      "parameters": [
+        {
+          "name": "component_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "The executor: one of the node's `update-targets`."
+        }
+      ],
+      "get": {
+        "summary": "Executor entity body (§7.6): software_update and the x-update capability flag",
+        "responses": {
+          "200": {
+            "description": "Component",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Component"
+                }
+              }
+            }
+          }
+        },
+        "description": "An executor is an entity of its own: a top-level component, or a subcomponent of the node where the server serves an entity tree (then under `/components/{node}/subcomponents/{executor}`). Its standard capabilities report `software_update`; `capabilities.x-update.verdict` tells whether `execute` awaits a verdict."
+      }
+    },
+    "/updates": {
+      "get": {
+        "summary": "List the updates the server holds (§7.18.2)",
+        "description": "By the client's id. The server rebuilds the list from its executor, so a client that lost its state finds its updates by id after a server or executor restart. Required: without listing and adopting, a client that lost its state cannot find and settle its updates.",
+        "responses": {
+          "200": {
+            "description": "Update ids",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateList"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Register an update (§7.18.9)",
+        "description": "The client gives the id; the server keeps it verbatim and never assigns, replaces or derives one. A registration with an id the executor still holds adopts that update instead of starting a new one (201, `x-update.adopted: true`); the same id with a different manifest is refused with 409.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Registration"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistrationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No id, or an invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The id is held with a different manifest",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/updates/{update_id}": {
+      "parameters": [
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "get": {
+        "summary": "Update descriptor (§7.18.3)",
+        "description": "An update only the executor holds is described with the id as its name and the size of its held parts.",
+        "responses": {
+          "200": {
+            "description": "Descriptor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Descriptor"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Remove an update (§7.18.8)",
+        "description": "Accepted in REGISTERED and PREPARED, before `execute`, where it discards what the executor staged and the software in use is never touched, and once the update has settled (COMMITTED, ROLLED_BACK or FAILED). Synchronous: 204 once the update is gone. There is no finish verb and no revert verb.",
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`precondition-not-fulfilled`: PREPARING, EXECUTING, EXECUTED, COMMITTING or ROLLING_BACK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/updates/{update_id}/bulk-data": {
+      "parameters": [
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "get": {
+        "summary": "List the update's parts",
+        "responses": {
+          "200": {
+            "description": "Parts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PartList"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/updates/{update_id}/bulk-data/{part_id}": {
+      "parameters": [
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        {
+          "name": "part_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "summary": "Upload a part (the manifest or a payload)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Part"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/updates/{update_id}/prepare": {
+      "parameters": [
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "put": {
+        "summary": "Prepare (§7.18.5): verify and stage; the update goes PREPARING, then PREPARED",
+        "responses": {
+          "202": {
+            "description": "Accepted; poll the status resource.",
+            "headers": {
+              "Location": {
+                "description": "`{entity}/updates/{update_id}/status`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not in a state `prepare` is accepted in, or the executor is busy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/updates/{update_id}/execute": {
+      "parameters": [
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "put": {
+        "summary": "Execute (§7.18.6): arm the new software; the update goes EXECUTING, then EXECUTED",
+        "description": "The restart that activates the new software happens outside this contract: whoever is authorized issues `PUT {entity}/status/restart` (§7.19), or a power cycle does it. The client awaits EXECUTED.",
+        "responses": {
+          "202": {
+            "description": "Accepted; poll the status resource.",
+            "headers": {
+              "Location": {
+                "description": "`{entity}/updates/{update_id}/status`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not PREPARED, or the executor is busy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/updates/{update_id}/status": {
+      "parameters": [
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "get": {
+        "summary": "Update status (§7.18.7) with the x-update member",
+        "responses": {
+          "200": {
+            "description": "Status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/updates/{update_id}/x-update-commit": {
+      "parameters": [
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "put": {
+        "summary": "Commit this update",
+        "description": "Accepted in EXECUTED; again in COMMITTED, where it changes nothing. The update moves to COMMITTING. Valid for every update. Updates one executor switches together (one boot vector) form a transaction; each update reports its own state as it actually is, and the server checks nothing across members. What to send, and when, is the client's decision.",
+        "responses": {
+          "202": {
+            "description": "Accepted; poll the status resource.",
+            "headers": {
+              "Location": {
+                "description": "`{entity}/updates/{update_id}/status`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`precondition-not-fulfilled`: not in a state the verb is accepted in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/updates/{update_id}/x-update-rollback": {
+      "parameters": [
+        {
+          "name": "update_id",
+          "in": "path",
+          "required": true,
+          "description": "The id the client registered.",
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "put": {
+        "summary": "Roll back this update",
+        "description": "Accepted in EXECUTING and EXECUTED; again in ROLLED_BACK, where it changes nothing. The update moves to ROLLING_BACK. Valid for every update; see `x-update-commit` on transactions.",
+        "responses": {
+          "202": {
+            "description": "Accepted; poll the status resource.",
+            "headers": {
+              "Location": {
+                "description": "`{entity}/updates/{update_id}/status`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`precondition-not-fulfilled`: not in a state the verb is accepted in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/operations/x-update-commit/executions": {
+      "post": {
+        "summary": "Node commit: every component in the node's open transaction, all or nothing",
+        "description": "Beside the per-update verbs, with the same result as a per-update verdict on any one of its updates. Served by the embedding machine manager, not by SOVDd.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "nonce": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The verdict was applied; `result.committed` lists the components",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationExecution"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Every refusal was \"busy\" (retry later)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Any other refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/operations/x-update-rollback/executions": {
+      "post": {
+        "summary": "Node rollback: every component in the node's open transaction, all or nothing",
+        "description": "Beside the per-update verbs, with the same result as a per-update verdict on any one of its updates. Served by the embedding machine manager, not by SOVDd.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "nonce": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The verdict was applied; `result.rolled_back` lists the components",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationExecution"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Every refusal was \"busy\" (retry later)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Any other refusal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/data/x-update-state": {
+      "get": {
+        "summary": "Node update state",
+        "description": "Served by the embedding machine manager, not by SOVDd. The same body as `x-ota-update-state`, plus `node_boot_id`.",
+        "responses": {
+          "200": {
+            "description": "Node state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeState"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "XUpdateState": {
+        "type": "string",
+        "enum": [
+          "IDLE",
+          "REGISTERED",
+          "PREPARING",
+          "PREPARED",
+          "EXECUTING",
+          "EXECUTED",
+          "COMMITTING",
+          "COMMITTED",
+          "ROLLING_BACK",
+          "ROLLED_BACK",
+          "FAILED"
+        ],
+        "description": "The update's state, named after the verb that leads to it (REGISTERED after registration). Total; the standard `phase`/`status` in the same body agree with it:\n\n| state | phase | status | meaning |\n|---|---|---|---|\n| IDLE | — | — | the entity holds no update; not an update's state, but the one its entity reports; `POST` registers one |\n| REGISTERED | prepare | pending | registered; manifest and parts may be uploaded; `prepare` or `DELETE` |\n| PREPARING | prepare | inProgress | verifying and staging |\n| PREPARED | prepare | completed | staged in the inactive bank; `execute` or `DELETE` |\n| EXECUTING | execute | inProgress | armed; the new software does not run yet (e.g. a restart is still to come) |\n| EXECUTED | execute | inProgress | the new software runs; a verdict is awaited |\n| COMMITTING | execute | inProgress | commit accepted and running |\n| COMMITTED | execute | completed | permanent; `DELETE` |\n| ROLLING_BACK | execute | inProgress | rollback accepted and running (the client's, or the executor's own, e.g. after failed trial boots) |\n| ROLLED_BACK | execute | failed | the previous software is in effect again; `DELETE` |\n| FAILED | prepare or execute | failed | see the standard error object; `DELETE` |"
+      },
+      "StatusBody": {
+        "type": "object",
+        "required": [
+          "phase",
+          "status",
+          "x-update"
+        ],
+        "properties": {
+          "phase": {
+            "type": "string",
+            "enum": [
+              "prepare",
+              "execute"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "inProgress",
+              "completed",
+              "failed"
+            ]
+          },
+          "progress": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "step": {
+            "type": "string"
+          },
+          "error": {
+            "$ref": "#/components/schemas/GenericError"
+          },
+          "x-update": {
+            "type": "object",
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "$ref": "#/components/schemas/XUpdateState"
+              },
+              "adopted": {
+                "type": "boolean",
+                "description": "Present, and true, on an update a registration adopted."
+              }
+            }
+          }
+        }
+      },
+      "UpdateList": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Registration": {
+        "type": "object",
+        "required": [
+          "id",
+          "target"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Chosen by the client; kept verbatim."
+          },
+          "target": {
+            "type": "string",
+            "description": "The executor the update is for: one of the node's `update-targets`. On an entity-level collection it must name that entity."
+          },
+          "manifest": {
+            "type": "object",
+            "description": "Pass-through registration document (§7.18.9)."
+          }
+        }
+      },
+      "RegistrationResponse": {
+        "type": "object",
+        "properties": {
+          "update_id": {
+            "type": "string"
+          },
+          "href": {
+            "type": "string"
+          },
+          "bulk_data_href": {
+            "type": "string"
+          },
+          "executions_href": {
+            "type": "string"
+          }
+        }
+      },
+      "Descriptor": {
+        "type": "object",
+        "description": "Standard §7.18.3 descriptor.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "update_name": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer"
+          }
+        }
+      },
+      "Part": {
+        "type": "object",
+        "properties": {
+          "part_id": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer"
+          },
+          "sha256": {
+            "type": "string",
+            "description": "Of the uploaded part; for a part only the executor holds, the executor's digest."
+          },
+          "href": {
+            "type": "string",
+            "description": "Absent for a part only the executor holds."
+          },
+          "present": {
+            "type": "boolean",
+            "description": "Whether the executor already holds the part, matched by name (`name` or `#name`), not by hash."
+          }
+        }
+      },
+      "PartList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Part"
+            }
+          }
+        }
+      },
+      "Component": {
+        "type": "object",
+        "description": "Standard entity body of an executor subcomponent; only the x-update capability is shown.",
+        "properties": {
+          "capabilities": {
+            "type": "object",
+            "properties": {
+              "x-update": {
+                "type": "object",
+                "properties": {
+                  "verdict": {
+                    "type": "boolean",
+                    "description": "true: `execute` stops at EXECUTED and a verdict is required. false: `execute` commits on its own. Absent: the server cannot tell. There is no request option for it; `automated` asks the executor to decide for itself."
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "OperationExecution": {
+        "type": "object",
+        "description": "ISO §7.14 OperationExecution.",
+        "properties": {
+          "execution_id": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "nonce": {
+            "type": "string",
+            "description": "Echoed if sent."
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "committed": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "rolled_back": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "skipped": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "NodeState": {
+        "type": "object",
+        "properties": {
+          "phase": {
+            "type": "string",
+            "enum": [
+              "Idle",
+              "Staging",
+              "RebootPending",
+              "Trial"
+            ]
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "reboot_owed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "rebooted_since_arming": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "node_boot_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "GenericError": {
+        "type": "object",
+        "description": "ISO 17978-3 §5.8.3 GenericError.",
+        "required": [
+          "error_code",
+          "message"
+        ],
+        "properties": {
+          "error_code": {
+            "type": "string"
+          },
+          "vendor_code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "NodeCapabilities": {
+        "type": "object",
+        "properties": {
+          "updates": {
+            "type": "string",
+            "description": "The node-level updates collection (`/updates`). Absent on a node without update executors."
+          },
+          "x-update": {
+            "type": "object",
+            "properties": {
+              "update-targets": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The executors of the node; a registration's `target` is one of them."
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
