@@ -19,12 +19,16 @@ addressed to the update's executor. `x-update` is served beside `x-ota` as a set
 
 ## Entities
 
-The node is the component and each executor is a subcomponent of it. `{entity}` throughout this
-document is an executor entity, `/components/{node}/subcomponents/{executor}`; its updates
-collection is `{entity}/updates`. A client discovers the executors by listing the node's
-subcomponents (`GET /components/{node}/subcomponents`) and taking those whose standard §7.6
-capabilities report `software_update`; an executor entity links its `updates` collection. The
-`apps` executor, where a node has one, is an executor entity like any other.
+The orchestrator addresses updates on the node level. `{entity}` in this document is the node — the
+server's root scope — so the collection is `/updates`, and every registration names the executor
+the update is for as `target`, one of the executors the node lists as `x-update.update-targets`
+in its capability document (`GET /`, beside the `updates` link). A node without update executors
+advertises neither. Each executor is an entity of its own — a top-level component, or a
+subcomponent of the node where the server serves an entity tree — whose document reports the
+standard `software_update` capability and `capabilities.x-update.verdict`; the `apps` executor,
+where a node has one, is an update target like any other. A server may also offer an executor's
+own collection, `{executor}/updates`, for entity-level updates; the lifecycle below is the same
+there, with `target` naming that entity. An executor is IDLE while it holds no update.
 
 ## Update ids and listing
 
@@ -123,7 +127,7 @@ Served by the embedding machine manager, not by this crate.
 
 ## Delete
 
-The standard `DELETE {entity}/updates/{update_id}` removes an update. It is accepted in READY and
+The standard `DELETE {entity}/updates/{update_id}` removes an update. It is accepted in REGISTERED and
 PREPARED, before `execute`, where it discards what the executor staged and the software in use is
 never touched, and once the update has settled (COMMITTED, ROLLED_BACK or FAILED). It is
 synchronous: 204 once the update is gone. There is no finish verb and no revert verb: DELETE is
@@ -141,21 +145,22 @@ An executor still busy answers the next `prepare` or `execute` with 409, as the 
 
 | Method | Path | Verb / Notes | From states | To state |
 |---|---|---|---|---|
-| POST | `{entity}/updates` | Register; client gives the id. Re-registering an id the executor holds adopts it (`adopted: true`) | — | READY |
+| POST | `{entity}/updates` | Register; client gives the id. Re-registering an id the executor holds adopts it (`adopted: true`) | IDLE | REGISTERED |
 | GET | `{entity}/updates` | List held updates by the client's id; rebuilt from the executor after a restart | — | — |
 | GET | `{entity}/updates/{id}` | Descriptor | — | — |
-| DELETE | `{entity}/updates/{id}` | Remove an update. Before execute it discards what was staged; the software in use is not touched. Refused (409) while transient or awaiting a verdict | READY, PREPARED, COMMITTED, ROLLED_BACK, FAILED | — |
-| PUT | `{entity}/updates/{id}/bulk-data/{part_id}` | Upload manifest or payload | READY | READY |
+| DELETE | `{entity}/updates/{id}` | Remove an update. Before execute it discards what was staged; the software in use is not touched. Refused (409) while transient or awaiting a verdict | REGISTERED, PREPARED, COMMITTED, ROLLED_BACK, FAILED | — |
+| PUT | `{entity}/updates/{id}/bulk-data/{part_id}` | Upload manifest or payload | REGISTERED | REGISTERED |
 | GET | `{entity}/updates/{id}/bulk-data` | List parts; `present` tells if the executor holds each one | — | — |
-| PUT | `{entity}/updates/{id}/prepare` | §7.18.5 | READY | PREPARING → PREPARED, PREPARING → FAILED |
+| PUT | `{entity}/updates/{id}/prepare` | §7.18.5 | REGISTERED | PREPARING → PREPARED, PREPARING → FAILED |
 | PUT | `{entity}/updates/{id}/execute` | §7.18.6 | PREPARED | EXECUTING → EXECUTED, EXECUTING → ROLLING_BACK → ROLLED_BACK |
-| PUT | `{entity}/updates/{id}/x-update-commit` | Commit the trial; repeated in COMMITTED it changes nothing | EXECUTED | COMMITTING → COMMITTED |
-| PUT | `{entity}/updates/{id}/x-update-rollback` | Roll back the trial; repeated in ROLLED_BACK it changes nothing | EXECUTING, EXECUTED | ROLLING_BACK → ROLLED_BACK |
-| GET | `{entity}` | Executor entity body: standard capabilities (`software_update`) and `capabilities.x-update.verdict` | — | — |
+| PUT | `{entity}/updates/{id}/x-update-commit` | Commit the trial | EXECUTED | COMMITTING → COMMITTED |
+| PUT | `{entity}/updates/{id}/x-update-rollback` | Roll back the trial | EXECUTING, EXECUTED | ROLLING_BACK → ROLLED_BACK |
+| GET | `{entity}` | Component body with `capabilities.x-update.verdict` | — | — |
 
 | State | Transient / Settled | What the client may do |
 |---|---|---|
-| READY | Transient | Upload parts, prepare, DELETE |
+| IDLE | Settled | updates |
+| REGISTERED | Settled | Upload parts, prepare, DELETE |
 | PREPARING | Transient | Wait |
 | PREPARED | Settled (pre-execute) | execute, DELETE |
 | EXECUTING | Transient | Wait; x-update-rollback accepted |
@@ -183,7 +188,8 @@ them. The state is total, and the standard
 
 | state | phase | status | meaning |
 |---|---|---|---|
-| READY | prepare | pending | registered; manifest and parts may be uploaded; `prepare` may be sent |
+| IDLE | — | — | the entity holds no update: not an update's state, but the one its entity reports; `POST` registers one |
+| REGISTERED | prepare | pending | registered; manifest and parts may be uploaded; `prepare` may be sent |
 | PREPARING | prepare | inProgress | verifying and staging |
 | PREPARED | prepare | completed | staged in the inactive bank; `execute` or `DELETE` |
 | EXECUTING | execute | inProgress | armed; the new software does not run yet (e.g. a restart is still to come) |
@@ -230,7 +236,7 @@ restart and the verdict.
 
 ## Orchestrator sequence
 
-1. Register one update per component (`POST {entity}/updates`).
+1. Register one update per executor on the node's collection (`POST /updates`, `target` naming the executor).
 2. Upload the manifest and parts.
 3. `PUT prepare` on each; wait for PREPARED. If any fails, or the client decides not to go on:
    `DELETE` each update not yet executed.
