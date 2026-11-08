@@ -170,6 +170,13 @@ fn api_routes(tree: Tree) -> Router<AppState> {
             &format!("{}{}", tree.base(), "/docs"),
             get(handlers::meta::capability_description),
         )
+        // §7.6.3 Table 53 — the SOVD server's own capability document,
+        // served on both `{base}/` and `{base}`.
+        .route(
+            &format!("{}{}", tree.base(), "/"),
+            get(handlers::root::get_root),
+        )
+        .route(tree.base(), get(handlers::root::get_root))
         // Component routes
         .route(
             &format!("{}{}", tree.base(), "/components"),

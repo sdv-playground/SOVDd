@@ -3,7 +3,7 @@
 use reqwest::Method;
 use sovd_api::Tree;
 
-use crate::common::{get, json};
+use crate::common::{auth_server, get, json};
 use crate::{header, send, server, OTA};
 
 /// `MAJOR.MINOR.PATCH` with numeric parts, optionally followed by a SemVer
@@ -60,9 +60,10 @@ async fn components_collection_items() {
 }
 
 /// ISO 17978-3 §7.6.3 Table 53: `GET {base}/` returns the SOVD server's
-/// capability document with `id`, `name` and references to its collections.
+/// capability document with `id`, `name` and references to its collections —
+/// only those the server itself serves at root level (C1: entity collections
+/// are not aggregated), plus the vendor `x-update.update-targets` list.
 #[tokio::test]
-#[ignore = "F8: §7.6.3 Table 53 — no root capability document at GET {base}/"]
 async fn root_capability_document() {
     let server = server().await;
     for tree in Tree::ALL {
@@ -73,6 +74,21 @@ async fn root_capability_document() {
         assert!(body["id"].is_string(), "{base}: {body}");
         assert!(body["name"].is_string(), "{base}: {body}");
         assert_eq!(body["components"], format!("{base}/components"), "{body}");
+        assert_eq!(
+            body["x-update"]["update-targets"],
+            serde_json::json!([OTA]),
+            "{base}: {body}"
+        );
+        for key in ["data", "faults", "operations"] {
+            assert!(body.get(key).is_none(), "{base}: root has `{key}`: {body}");
+        }
+    }
+
+    // §5.4.4: the root document is a protected resource.
+    let server = auth_server().await;
+    for tree in Tree::ALL {
+        let (status, _) = get(&server, &format!("{}/", tree.base()), None).await;
+        assert_eq!(status, 401, "{}/", tree.base());
     }
 }
 

@@ -26,6 +26,7 @@ pub mod meta;
 pub mod modes;
 pub mod operations;
 pub mod reset;
+pub mod root;
 pub mod software;
 pub mod stubs;
 pub mod sub_entity;

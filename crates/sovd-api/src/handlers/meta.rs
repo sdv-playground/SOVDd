@@ -215,6 +215,12 @@ const PATHS: &[PathEntry] = &[
         path: "/docs",
         summary: "OpenAPI capability description (§7.5).",
     },
+    // SOVDServer entity (§7.6.3)
+    PathEntry {
+        method: "GET",
+        path: "/",
+        summary: "Read the SOVD server's capabilities (§7.6.3).",
+    },
     // components / entities
     PathEntry {
         method: "GET",
