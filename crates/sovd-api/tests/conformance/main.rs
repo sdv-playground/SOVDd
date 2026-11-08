@@ -12,6 +12,7 @@ mod auth;
 mod bulk_data;
 mod discovery;
 mod errors;
+mod node_updates;
 mod operations;
 mod updates;
 

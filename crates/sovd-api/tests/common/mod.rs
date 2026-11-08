@@ -121,7 +121,8 @@ impl DiagnosticBackend for MockBackend {
 }
 
 /// A test authorizer with the built-in component-scope decision: the bearer
-/// value is looked up in a fixed token→scopes table, then a component-addressed
+/// value is looked up in a fixed token→scopes table (`token-a`: `ecu_a` only,
+/// `token-all`: every component), then a component-addressed
 /// route needs the matching `component:<id>` scope.
 pub struct ScopedAuthorizer;
 
@@ -130,6 +131,7 @@ impl Authorizer for ScopedAuthorizer {
     async fn authorize(&self, req: &AccessRequest<'_>) -> Result<ClientContext, AuthError> {
         let scopes = match req.bearer {
             Some("Bearer token-a") => vec!["component:ecu_a".to_string()],
+            Some("Bearer token-all") => vec!["component:*".to_string()],
             Some(_) => return Err("invalid token".into()),
             None => return Err("missing Authorization header".into()),
         };
