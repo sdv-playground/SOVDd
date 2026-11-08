@@ -86,8 +86,10 @@ fn enc(segment: &str) -> String {
 #[derive(Debug, Deserialize, Default)]
 pub struct RegisterUpdateRequest {
     /// Client-declared stable package id (§7.18 Table 261 `id`). When present
-    /// it becomes the catalog key / URL id; absent → the server mints a UUID.
-    /// The reserved id `autonomous` is refused (400, §7.18.1.5).
+    /// it becomes the catalog key / URL id. Absent (or null): under `/v1` the
+    /// server mints a UUID (§7.18.9); the legacy tree refuses it (400). An
+    /// empty string and the reserved id `autonomous` (§7.18.1.5) are refused
+    /// (400) on both trees.
     #[serde(default)]
     pub id: Option<String>,
     /// Optional component id the manifest is addressed to.  When
@@ -287,9 +289,11 @@ pub async fn register_update(
         }
     }
 
-    // The client owns the package id (Table 261 `id`): it becomes the catalog
-    // key verbatim, and the server never makes one up. `autonomous` is
-    // reserved (§7.18.1.5) and cannot be registered as an installable package.
+    // A requested package id (Table 261 `id`) becomes the catalog key
+    // verbatim. Without one, `/v1` mints a UUID (§7.18.9: the server creates
+    // the id); the legacy tree keeps refusing it. An empty id is malformed on
+    // both trees. `autonomous` is reserved (§7.18.1.5) and cannot be
+    // registered as an installable package.
     let update_id = match req.id.as_deref() {
         Some(AUTONOMOUS_PACKAGE_ID) => {
             return Err(ApiError::BadRequest(
@@ -299,6 +303,7 @@ pub async fn register_update(
             ));
         }
         Some(id) if !id.is_empty() => id.to_string(),
+        None if tree == Tree::V1 => Uuid::new_v4().to_string(),
         _ => {
             return Err(ApiError::BadRequest(
                 "a registration carries the client's update id".into(),

@@ -107,18 +107,23 @@ async fn registration_body_carries_id() {
 }
 
 /// ISO 17978-3 §7.18.9: the id in the registration response is created by
-/// the server, so a registration body without an id is accepted.
+/// the server, so a registration body without an id is accepted under `/v1`;
+/// the legacy tree keeps refusing it (400).
 #[tokio::test]
-#[ignore = "F3: §7.18.9 — POST /updates without an id is refused (400)"]
 async fn registration_without_id_gets_server_id() {
     for tree in Tree::ALL {
         let server = server().await;
         let resp = register(&server, tree, json!({})).await;
+        if tree == Tree::Legacy {
+            assert_eq!(resp.status().as_u16(), 400, "{tree:?}");
+            continue;
+        }
         assert_eq!(resp.status().as_u16(), 201, "{tree:?}");
         let location = header(&resp, "location").expect("Location header");
         let body: Value = resp.json().await.expect("register body");
         let id = body["id"].as_str().expect("server-created id");
         assert!(!id.is_empty());
+        assert_eq!(body["update_id"], id, "{tree:?}: {body}");
         assert_eq!(location, update_url(tree, id));
     }
 }

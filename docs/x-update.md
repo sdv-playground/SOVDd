@@ -17,9 +17,10 @@ addressed to the update's executor. `x-update` is served beside `x-ota` as a set
 
 ## Update ids and listing
 
-The client gives the id in every registration (`POST {entity}/updates`, `id`); a registration
-without one is refused with 400. The server keeps it verbatim and never assigns, replaces or
-derives an id of its own.
+The client gives the id in a registration (`POST {entity}/updates`, `id`); the server keeps it
+verbatim and never replaces or derives an id from it. Under `/v1`, a registration without `id`
+gets a server-created UUID (ISO 17978-3 §7.18.9), returned in `Location`, `id` and `update_id`;
+`/vehicle/v1` refuses it with 400. An empty `id` is refused with 400 on both trees.
 
 `GET {entity}/updates` lists the updates the server holds, by the client's id. A server rebuilds
 that list from its executor, so a client that lost its state finds its updates by id after a
