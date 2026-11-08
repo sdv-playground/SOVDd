@@ -5,7 +5,8 @@
 //!   `POST /vehicle/v1/components/{id}/operations/{op_id}/executions`
 //!     body: `{parameters?: "<hex>" | <io-control-object>}`
 //!     → `202 Accepted` + `Location: .../executions/{exec_id}` +
-//!       placeholder `OperationExecution { status: running }` body.
+//!       placeholder `OperationExecution { status: running }` body, plus
+//!       the Table 184/189 `id` and `capability` members.
 //!       The backend call runs in a tokio task; clients poll
 //!       `GET .../executions/{exec_id}` until terminal.
 //!
@@ -121,6 +122,31 @@ impl From<&OperationInfo> for OperationInfoResponse {
             security_level: op.security_level,
             href: op.href.clone(),
             ..default_operation_response()
+        }
+    }
+}
+
+/// An [`OperationExecution`] as served by `POST .../executions` (ISO 17978-3
+/// §7.14.6 Table 184) and `GET .../executions/{exec_id}` (§7.14.7 Table 189):
+/// the spec's `id` and `capability` beside the existing members, which stay
+/// (clients read `execution_id`).
+#[derive(Serialize)]
+pub struct ExecutionResponse {
+    /// Table 184 `id` — the execution id, equal to `execution_id`.
+    pub id: String,
+    /// Table 189 `capability` — always `execute`: this server offers no
+    /// `PUT .../executions/{exec_id}` capability change (§7.14.9).
+    pub capability: &'static str,
+    #[serde(flatten)]
+    pub execution: OperationExecution,
+}
+
+impl From<OperationExecution> for ExecutionResponse {
+    fn from(execution: OperationExecution) -> Self {
+        Self {
+            id: execution.execution_id.clone(),
+            capability: "execute",
+            execution,
         }
     }
 }
@@ -416,7 +442,7 @@ pub async fn start_operation_execution(
     Ok((
         StatusCode::ACCEPTED,
         headers,
-        Json(OperationExecution {
+        Json(ExecutionResponse::from(OperationExecution {
             execution_id: exec_id,
             operation_id,
             status: OperationStatus::Running,
@@ -424,7 +450,7 @@ pub async fn start_operation_execution(
             started_at: now,
             completed_at: None,
             error: None,
-        }),
+        })),
     ))
 }
 
@@ -437,7 +463,7 @@ pub async fn get_operation_execution(
     State(state): State<AppState>,
     Path((component_id, operation_id, exec_id)): Path<(String, String, String)>,
     Query(query): Query<ExecutionQuery>,
-) -> Result<Json<OperationExecution>, ApiError> {
+) -> Result<Json<ExecutionResponse>, ApiError> {
     // Validate the component exists before checking the cache.
     let backend = state.get_backend(&component_id)?;
 
@@ -447,14 +473,14 @@ pub async fn get_operation_execution(
             .operation_executions
             .get(&component_id, &operation_id, &exec_id)
         {
-            return Ok(Json(cached));
+            return Ok(Json(cached.into()));
         }
     }
 
     // Either `?refresh=true` or no cache hit — re-poll the backend.
     let mut execution = backend.get_operation_status(&operation_id).await?;
     execution.execution_id = exec_id;
-    Ok(Json(execution))
+    Ok(Json(execution.into()))
 }
 
 /// Parse the structured `parameters` object for an IO control op.

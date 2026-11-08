@@ -9,7 +9,6 @@ use crate::{header, send, server};
 /// answers 202 with body `{id, status}`, and reading the execution returns
 /// its `capability`.
 #[tokio::test]
-#[ignore = "F5: §7.14 Table 184/189 — 202 body is not {id, status}; execution lacks capability"]
 async fn execution_start_and_status_shape() {
     let server = server().await;
     for tree in Tree::ALL {
@@ -27,6 +26,8 @@ async fn execution_start_and_status_shape() {
         let body: serde_json::Value = resp.json().await.expect("202 body");
         assert!(body["id"].is_string(), "{path}: {body}");
         assert!(body["status"].is_string(), "{path}: {body}");
+        // `execution_id` stays beside the spec `id` (client dependency).
+        assert_eq!(body["id"], body["execution_id"], "{path}: {body}");
 
         let resp = send(&server, Method::GET, &location, &[], None).await;
         assert_eq!(resp.status().as_u16(), 200, "{location}");
