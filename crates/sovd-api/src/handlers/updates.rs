@@ -268,11 +268,27 @@ pub struct BulkDataListResponse {
     pub items: Vec<PartStatusEntry>,
 }
 
+/// One part of `GET /updates/{id}/bulk-data`. Under `/v1` it also carries
+/// the §7.20 Table 298 `BulkDataDescriptor` members (`id`, `mimetype`,
+/// `size`, `hash`, `hash_algorithm`); the legacy tree keeps the pre-Table-298
+/// shape.
 #[derive(Debug, Serialize)]
 pub struct PartStatusEntry {
+    /// Table 298 `id`: the part name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Table 298 `mimetype`: the upload's `Content-Type`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mimetype: Option<String>,
     pub part_id: String,
     pub size: u64,
     pub sha256: String,
+    /// Table 298 `hash` (same value as `sha256`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
+    /// Table 298 `hash_algorithm` of `hash`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash_algorithm: Option<&'static str>,
     /// Absent for a part the executor holds but this server never received.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub href: Option<String>,
@@ -1887,16 +1903,25 @@ async fn bulk_data_list(
         let items = held
             .parts
             .into_iter()
-            .map(|p| PartStatusEntry {
-                part_id: if p.name.starts_with('#') {
+            .map(|p| {
+                let part_id = if p.name.starts_with('#') {
                     p.name
                 } else {
                     format!("#{}", p.name)
-                },
-                size: p.size,
-                sha256: p.sha256,
-                href: None,
-                present: true,
+                };
+                let mut item = PartStatusEntry {
+                    id: None,
+                    mimetype: None,
+                    part_id,
+                    size: p.size,
+                    sha256: p.sha256,
+                    hash: None,
+                    hash_algorithm: None,
+                    href: None,
+                    present: true,
+                };
+                describe_part(tree, &mut item, None);
+                item
             })
             .collect();
         return Ok(Json(BulkDataListResponse { items }));
@@ -2603,10 +2628,14 @@ fn part_status_entry(
     update_id: &str,
     p: &UpdatePart,
 ) -> PartStatusEntry {
-    PartStatusEntry {
+    let mut item = PartStatusEntry {
+        id: None,
+        mimetype: None,
         part_id: p.part_id.clone(),
         size: p.size,
         sha256: p.sha256.clone(),
+        hash: None,
+        hash_algorithm: None,
         href: Some(format!(
             "{}/{}/bulk-data/{}",
             at.collection(tree, component_id),
@@ -2614,7 +2643,21 @@ fn part_status_entry(
             enc(&p.part_id)
         )),
         present: false,
+    };
+    describe_part(tree, &mut item, p.mimetype.as_deref());
+    item
+}
+
+/// Fill the Table 298 members of a listed part under `/v1`; the legacy
+/// tree's listing keeps its pre-Table-298 shape.
+fn describe_part(tree: Tree, item: &mut PartStatusEntry, mimetype: Option<&str>) {
+    if tree != Tree::V1 {
+        return;
     }
+    item.id = Some(item.part_id.clone());
+    item.mimetype = Some(mimetype.unwrap_or(DEFAULT_PART_MIMETYPE).to_string());
+    item.hash = Some(item.sha256.clone());
+    item.hash_algorithm = Some("sha256");
 }
 
 /// The updates the component's executor holds. An executor that does not

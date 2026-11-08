@@ -30,11 +30,37 @@ the id as its name and the size of its held parts), reports its status (the held
 table under "Status member") and lists its held parts; a verdict, `prepare` or `execute` on it
 answers 404 until it is adopted (see "Not in this version").
 
+## Bulk data
+
+An update's parts are uploaded to its bulk-data collection, `{entity}/updates/{update_id}/bulk-data`
+(also served under the node-level collection). The collection is a documented extension: ISO
+17978-3 §7.20 places bulk-data on entities, not on an update package; its upload and descriptor
+forms are used here unchanged.
+
+- `POST {entity}/updates/{update_id}/bulk-data` is the upload (§7.20, Tables 301-303). The body is
+  the part's bytes, streamed as is (not parsed as multipart). `Content-Disposition` is required
+  and names the part: its `filename` parameter, else its `name`
+  (`form-data; name="manifest"; filename="manifest"`). The name is the part's URL segment: not
+  empty, no `/`, not `.` or `..`. A missing header or an unusable name answers 400
+  `incomplete-request`. `Content-Type` is recorded as the part's mimetype (default
+  `application/octet-stream`). The answer is 201 with `Location:
+  {entity}/updates/{update_id}/bulk-data/{part}`, an `ETag` of the part's SHA-256 and the body
+  `{"id": "<part>"}`. Uploading a part of the same name again replaces it (201 again, same
+  `Location`). Parts are accepted while the update is registered or uploading (409 otherwise).
+- `PUT {entity}/updates/{update_id}/bulk-data/{part_id}` is the legacy alias of the `POST`, the
+  part named by the path; it records no mimetype and answers 201, the `ETag` and
+  `{part_id, size, sha256, href}`. It is scheduled for deprecation.
+
 `GET {entity}/updates/{update_id}/bulk-data` items carry, beside `part_id`, `size`, `sha256` and
 `href`, a `present` flag: whether the executor already holds the part. It is matched by name (the
 part id is the held part's name or `#` and that name), not by hash: `sha256` is of the uploaded
 part, the executor's digest is of the stored one. A part listed for an update only the executor
-holds is `present`, carries the executor's digest and has no `href`.
+holds is `present`, carries the executor's digest and has no `href`. Under `/v1` each item also
+carries the §7.20 Table 298 `BulkDataDescriptor` members `id` (the part name), `mimetype` (the
+recorded `Content-Type`; `application/octet-stream` for a `PUT` part or a held one), `size`,
+`hash` (the `sha256` value) and `hash_algorithm` (`sha256`). The part metadata is kept in the
+server's update store, so after a server restart a held part is listed with the executor's
+digest and the default mimetype.
 
 ## Node-level collection
 
