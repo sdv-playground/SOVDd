@@ -5,169 +5,20 @@
 //!
 //! Two mock components over one shared `AppState`: `node_member`
 //! (`VerdictScope::Node`) and `solo` (the default, `VerdictScope::Update`).
-//! Same in-process `TestServer` pattern as `spec_update_flow.rs`.
+//! Same in-process `TestServer` pattern as `spec_update_flow.rs`; the mock
+//! lives in `common`.
+
+mod common;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use parking_lot::Mutex;
+use common::BankedBackend;
 use serde_json::Value;
 use sovd_api::{create_router, AppState};
 use sovd_client::testing::TestServer;
-use sovd_core::{
-    BackendError, BackendResult, Capabilities, DataValue, DiagnosticBackend, EntityInfo,
-    FaultFilter, FaultsResult, FlashProgress, FlashState, FlashStatus, OperationExecution,
-    OperationInfo, PackageStream, ParameterInfo, VerdictScope,
-};
-
-// ---------------------------------------------------------------------------
-// Mock backend: a banked executor whose `activate` lands straight in the live
-// trial (`Activated`), so commit is accepted from awaiting-verdict without a
-// simulated reboot
-// ---------------------------------------------------------------------------
-
-struct MockBackend {
-    info: EntityInfo,
-    capabilities: Capabilities,
-    scope: VerdictScope,
-    flash_state: Mutex<FlashState>,
-    next_id: Mutex<u64>,
-}
-
-impl MockBackend {
-    fn new(id: &str, scope: VerdictScope) -> Self {
-        Self {
-            info: EntityInfo {
-                id: id.into(),
-                name: format!("{id} mock"),
-                entity_type: "ecu".into(),
-                description: None,
-                href: format!("/vehicle/v1/components/{id}"),
-                status: Some("online".into()),
-            },
-            capabilities: Capabilities {
-                software_update: true,
-                ..Default::default()
-            },
-            scope,
-            flash_state: Mutex::new(FlashState::Transferring),
-            next_id: Mutex::new(0),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl DiagnosticBackend for MockBackend {
-    fn entity_info(&self) -> &EntityInfo {
-        &self.info
-    }
-    fn capabilities(&self) -> &Capabilities {
-        &self.capabilities
-    }
-    fn update_shape(&self) -> &'static str {
-        "banked"
-    }
-    fn verdict_scope(&self) -> VerdictScope {
-        self.scope
-    }
-    async fn list_parameters(&self) -> BackendResult<Vec<ParameterInfo>> {
-        Ok(Vec::new())
-    }
-    async fn read_data(&self, _: &[String]) -> BackendResult<Vec<DataValue>> {
-        Ok(Vec::new())
-    }
-    async fn get_faults(&self, _: Option<&FaultFilter>) -> BackendResult<FaultsResult> {
-        Ok(FaultsResult {
-            faults: Vec::new(),
-            status_availability_mask: None,
-        })
-    }
-    async fn list_operations(&self) -> BackendResult<Vec<OperationInfo>> {
-        Ok(Vec::new())
-    }
-    async fn start_operation(&self, op_id: &str, _: &[u8]) -> BackendResult<OperationExecution> {
-        Err(BackendError::OperationNotFound(op_id.into()))
-    }
-    async fn receive_package_part(
-        &self,
-        _part_id: &str,
-        stream: PackageStream,
-        content_length: Option<u64>,
-    ) -> BackendResult<String> {
-        self.receive_package_stream(stream, content_length).await
-    }
-    async fn receive_package_stream(
-        &self,
-        mut stream: PackageStream,
-        _content_length: Option<u64>,
-    ) -> BackendResult<String> {
-        use futures::StreamExt;
-        while let Some(chunk) = stream.next().await {
-            chunk.map_err(|e| BackendError::Internal(format!("stream: {e}")))?;
-        }
-        let mut counter = self.next_id.lock();
-        *counter += 1;
-        *self.flash_state.lock() = FlashState::AwaitingActivation;
-        Ok(format!("pkg-{}", *counter))
-    }
-    async fn verify_part(&self, _file_id: &str, _expected_sha256: &str) -> BackendResult<()> {
-        Ok(())
-    }
-    async fn start_flash(&self) -> BackendResult<String> {
-        let mut counter = self.next_id.lock();
-        *counter += 1;
-        *self.flash_state.lock() = FlashState::Transferring;
-        Ok(format!("xfer-{}", *counter))
-    }
-    async fn get_flash_status(&self, transfer_id: &str) -> BackendResult<FlashStatus> {
-        Ok(FlashStatus {
-            transfer_id: transfer_id.to_string(),
-            package_id: "pkg".into(),
-            state: *self.flash_state.lock(),
-            progress: Some(FlashProgress {
-                bytes_transferred: 100,
-                bytes_total: 100,
-                blocks_transferred: 1,
-                blocks_total: 1,
-                percent: 100.0,
-            }),
-            error: None,
-        })
-    }
-    async fn get_activation_state(&self) -> BackendResult<sovd_core::ActivationState> {
-        Ok(sovd_core::ActivationState {
-            supports_rollback: true,
-            state: *self.flash_state.lock(),
-            active_version: None,
-            previous_version: None,
-            reset_kind: sovd_core::ResetKind::Local,
-        })
-    }
-    async fn finalize_flash(&self) -> BackendResult<()> {
-        *self.flash_state.lock() = FlashState::AwaitingReboot;
-        Ok(())
-    }
-    async fn validate(&self) -> BackendResult<()> {
-        *self.flash_state.lock() = FlashState::Validated;
-        Ok(())
-    }
-    async fn activate(&self) -> BackendResult<()> {
-        *self.flash_state.lock() = FlashState::Activated;
-        Ok(())
-    }
-    async fn commit_flash(&self) -> BackendResult<()> {
-        *self.flash_state.lock() = FlashState::Committed;
-        Ok(())
-    }
-    async fn rollback_flash(&self) -> BackendResult<()> {
-        *self.flash_state.lock() = FlashState::RolledBack;
-        Ok(())
-    }
-    async fn abort_flash(&self, _transfer_id: &str) -> BackendResult<()> {
-        Ok(())
-    }
-}
+use sovd_core::{DiagnosticBackend, FlashState, VerdictScope};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -175,12 +26,12 @@ impl DiagnosticBackend for MockBackend {
 
 struct Fixture {
     server: TestServer,
-    node_member: Arc<MockBackend>,
+    node_member: Arc<BankedBackend>,
 }
 
 async fn spawn() -> Fixture {
-    let node_member = Arc::new(MockBackend::new("node_member", VerdictScope::Node));
-    let solo = Arc::new(MockBackend::new("solo", VerdictScope::Update));
+    let node_member = Arc::new(BankedBackend::new("node_member", VerdictScope::Node));
+    let solo = Arc::new(BankedBackend::new("solo", VerdictScope::Update));
     let mut backends = HashMap::new();
     backends.insert(
         "node_member".to_string(),
