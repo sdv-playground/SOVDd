@@ -18,8 +18,9 @@ use serde_json::Value;
 use sovd_api::{create_router, AccessRequest, AppState, Authorizer, ClientContext, Tree};
 use sovd_client::testing::TestServer;
 use sovd_core::{
-    BackendError, BackendResult, Capabilities, DataValue, DiagnosticBackend, EntityInfo,
-    FaultFilter, FaultsResult, OperationExecution, OperationInfo, PackageStream, ParameterInfo,
+    BackendError, BackendResult, Capabilities, DataValue, DiagnosticBackend, EntityInfo, Fault,
+    FaultFilter, FaultSeverity, FaultsResult, OperationExecution, OperationInfo, PackageStream,
+    ParameterInfo,
 };
 
 const BASES: [&str; 2] = ["/v1", "/vehicle/v1"];
@@ -75,8 +76,21 @@ impl DiagnosticBackend for MockBackend {
             .collect())
     }
     async fn get_faults(&self, _filter: Option<&FaultFilter>) -> BackendResult<FaultsResult> {
+        // A deliberately wrong backend href: the API must rebuild it.
         Ok(FaultsResult {
-            faults: vec![],
+            faults: vec![Fault {
+                id: "f1".to_string(),
+                code: "P0101".to_string(),
+                severity: FaultSeverity::default(),
+                message: "Mass air flow".to_string(),
+                category: None,
+                first_occurrence: None,
+                last_occurrence: None,
+                occurrence_count: None,
+                active: true,
+                status: None,
+                href: "/bogus/x".to_string(),
+            }],
             status_availability_mask: None,
         })
     }
@@ -88,7 +102,7 @@ impl DiagnosticBackend for MockBackend {
             parameters: vec![],
             requires_security: false,
             security_level: 0,
-            href: String::new(),
+            href: "/bogus/x".to_string(),
         }])
     }
     async fn start_operation(&self, op: &str, _params: &[u8]) -> BackendResult<OperationExecution> {
@@ -500,6 +514,31 @@ async fn locations_use_request_base() {
         );
         let (status, _) = get(&server, &loc, None).await;
         assert_eq!(status, 200, "{base}: GET {loc}");
+    }
+}
+
+/// Backend-supplied hrefs (here `/bogus/x`) never reach the wire: fault and
+/// operation hrefs are rebuilt under the request's tree.
+#[tokio::test]
+async fn backend_hrefs_rebuilt_under_request_base() {
+    let server = open_server().await;
+    for tree in Tree::ALL {
+        let component = tree.component("ecu_a");
+        for rel in ["faults", "operations", "faults/f1"] {
+            let (status, body) = get(&server, &format!("{component}/{rel}"), None).await;
+            assert_eq!(status, 200, "{component}/{rel}");
+            let mut found = Vec::new();
+            urls(&json(&body), &mut found);
+            assert!(!found.is_empty(), "{component}/{rel}: no hrefs");
+            for url in found {
+                assert!(
+                    url.starts_with(&format!("{component}/")),
+                    "{component}/{rel}: {url}"
+                );
+            }
+        }
+        let (_, body) = get(&server, &format!("{component}/faults/f1"), None).await;
+        assert_eq!(json(&body)["href"], format!("{component}/faults/f1"));
     }
 }
 
