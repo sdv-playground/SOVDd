@@ -327,7 +327,8 @@ pub async fn register_update(
 }
 
 /// Register `req` on `component_id`. On the node-level collection (`at`) the
-/// id must be free on every component, not only on this one.
+/// id must also be free on every other component; on `component_id` itself
+/// the component collection's rule applies.
 async fn register(
     state: AppState,
     tree: Tree,
@@ -384,7 +385,10 @@ async fn register(
     let prior = {
         let mut store = state.updates.0.lock();
         if at == UpdatePath::Node {
-            if let Some(owner) = store.keys().find(|k| k.update_id() == update_id) {
+            if let Some(owner) = store
+                .keys()
+                .find(|k| k.update_id() == update_id && k.component_id() != component_id)
+            {
                 return Err(duplicate_node_id(&update_id, owner.component_id()));
             }
         }
@@ -2082,7 +2086,8 @@ async fn bulk_data_part(
 
 /// `POST {base}/updates` — register on the component named by `target`, one
 /// of the root document's `x-update.update-targets`. The id must be free on
-/// every component (409 otherwise).
+/// every other component (409 otherwise); on `target` itself the answer is
+/// that of `POST {base}/components/{target}/updates`.
 pub async fn register_node_update(
     State(state): State<AppState>,
     Extension(tree): Extension<Tree>,
@@ -2105,11 +2110,11 @@ pub async fn register_node_update(
         Some(target) => target.to_string(),
     };
     authorize_component(tree, client.as_deref(), &target)?;
-    // Ids the executors hold count as taken; the store is checked under its
-    // lock at insertion.
+    // Ids other components' executors hold count as taken; the store is
+    // checked under its lock at insertion.
     if let Some(id) = req.id.as_deref() {
         for (owner, backend) in update_targets(&state) {
-            if held_updates(backend).await?.iter().any(|h| h.id == id) {
+            if owner != target && held_updates(backend).await?.iter().any(|h| h.id == id) {
                 return Err(duplicate_node_id(id, owner));
             }
         }
@@ -2378,7 +2383,7 @@ fn authorize_component(
 fn duplicate_node_id(update_id: &str, owner: &str) -> ApiError {
     ApiError::UpdateInProgress(format!(
         "update package {update_id:?} is already registered on {owner:?}; \
-         ids are unique across the node-level collection"
+         an id is registered on one component only in the node-level collection"
     ))
 }
 

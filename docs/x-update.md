@@ -45,9 +45,10 @@ updates.
 
 - `POST {base}/updates`, body `{"id"?, "target", "manifest"?}`, registers on the component
   `target`, which is required and must be one of the root document's `x-update.update-targets`
-  (400 otherwise). The id rules are those of the component collection. The id must be free on
-  every component, registered or held by an executor: a taken id answers 409
-  `update-process-in-progress`, even where the component collection would replace it.
+  (400 otherwise). The id rules are those of the component collection. An id registered on, or
+  held by the executor of, another component answers 409 `update-process-in-progress`; on
+  `target` itself the answer is that of `POST {base}/components/{target}/updates` (a settled or
+  untouched registration is replaced, one in progress answers 409).
 - Every per-update verb (`GET`, `DELETE`, `bulk-data`, `prepare`, `execute`, `automated`,
   `status`, the verdicts) is served at `{base}/updates/{update_id}/…` and acts on the component
   the update is registered on, or, when none has it registered, the one whose executor holds it.

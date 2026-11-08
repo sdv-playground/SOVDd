@@ -12,7 +12,9 @@ use sovd_client::testing::TestServer;
 use sovd_core::{DiagnosticBackend, VerdictScope};
 
 use crate::common::{BankedBackend, MockBackend, ScopedAuthorizer};
-use crate::{header, poll_until, register, send, server, status, terminal, OTA};
+use crate::{
+    header, poll_until, register, send, server, status, terminal, upload_and_prepare, OTA,
+};
 
 /// A second update-capable component.
 const OTA2: &str = "ota2";
@@ -216,9 +218,11 @@ async fn node_lifecycle() {
     }
 }
 
-/// Ids are unique across the node-level collection: a node registration of
-/// an id taken on any component is 409. An id registered on two components
-/// through their own collections is ambiguous at node level (409).
+/// An id belongs to one component in the node-level collection: a node
+/// registration of an id taken on another component is 409, while on its own
+/// component it gets the component collection's answer (an untouched
+/// registration is replaced, one in progress is 409). An id registered on
+/// two components through their own collections is ambiguous (409).
 #[tokio::test]
 async fn node_ids_unique_and_ambiguity() {
     for tree in Tree::ALL {
@@ -227,6 +231,18 @@ async fn node_ids_unique_and_ambiguity() {
         let resp = register(&server, tree, json!({ "id": "u-dup" })).await;
         assert_eq!(resp.status().as_u16(), 201, "{base}");
 
+        // Untouched on `ota`: replaced, as the component POST would.
+        let resp = register_node(&server, tree, json!({ "id": "u-dup", "target": OTA })).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            201,
+            "{base}: node re-register on {OTA}"
+        );
+
+        // Prepared on `ota`: in progress, 409 as the component POST would.
+        upload_and_prepare(&server, &node_url(tree, "u-dup")).await;
+        let resp = register(&server, tree, json!({ "id": "u-dup" })).await;
+        assert_eq!(resp.status().as_u16(), 409, "{base}: component re-register");
         for target in [OTA, OTA2] {
             let resp =
                 register_node(&server, tree, json!({ "id": "u-dup", "target": target })).await;
