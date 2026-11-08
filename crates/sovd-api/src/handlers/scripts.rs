@@ -16,12 +16,13 @@
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
-use axum::Json;
+use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 use sovd_core::{ScriptExecution, ScriptStatus, ScriptVerdict};
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::Tree;
 
 #[derive(Debug, Serialize)]
 pub struct ScriptsResponse {
@@ -48,11 +49,12 @@ pub struct ScriptsQuery {
 /// GET /vehicle/v1/components/:component_id/scripts
 pub async fn list_scripts(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
     Query(query): Query<ScriptsQuery>,
 ) -> Result<Json<ScriptsResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
-    let base = format!("/vehicle/v1/components/{component_id}/scripts");
+    let base = format!("{}/scripts", tree.component(&component_id));
     let items = backend
         .list_scripts()
         .await?
@@ -77,10 +79,11 @@ pub async fn list_scripts(
 /// per-script read yet; a `logs/entries`-style linkage).
 pub async fn read_script(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, script_id)): Path<(String, String)>,
 ) -> Result<Json<ScriptRef>, ApiError> {
     let backend = state.get_backend(&component_id)?;
-    let base = format!("/vehicle/v1/components/{component_id}/scripts");
+    let base = format!("{}/scripts", tree.component(&component_id));
     backend
         .list_scripts()
         .await?
@@ -174,10 +177,11 @@ pub struct ScriptExecutionRef {
 /// for its duration (bounded by the entry's `timeout_ms` in the agent).
 pub async fn execute_script(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, script_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let backend = state.get_backend(&component_id)?;
-    let base = format!("/vehicle/v1/components/{component_id}/scripts");
+    let base = format!("{}/scripts", tree.component(&component_id));
     let exec = backend.start_script(&script_id).await?;
     let resp = ScriptExecutionResponse::from_core(exec, &base);
 
@@ -194,10 +198,11 @@ pub async fn execute_script(
 /// §7.15 executions.query — the execution ids recorded for a script.
 pub async fn list_executions(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, script_id)): Path<(String, String)>,
 ) -> Result<Json<ScriptExecutionsResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
-    let base = format!("/vehicle/v1/components/{component_id}/scripts");
+    let base = format!("{}/scripts", tree.component(&component_id));
     let items = backend
         .list_script_executions(&script_id)
         .await?
@@ -214,10 +219,11 @@ pub async fn list_executions(
 /// §7.15 execution.status — one execution's status + result envelope.
 pub async fn get_execution(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, script_id, exec_id)): Path<(String, String, String)>,
 ) -> Result<Json<ScriptExecutionResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
-    let base = format!("/vehicle/v1/components/{component_id}/scripts");
+    let base = format!("{}/scripts", tree.component(&component_id));
     let exec = backend.get_script_execution(&script_id, &exec_id).await?;
     Ok(Json(ScriptExecutionResponse::from_core(exec, &base)))
 }
@@ -282,7 +288,7 @@ mod tests {
                     name: "vm1".into(),
                     entity_type: "component".into(),
                     description: None,
-                    href: "/vehicle/v1/components/vm1".into(),
+                    href: Tree::Legacy.component("vm1"),
                     status: Some("online".into()),
                 },
                 caps: Capabilities::default(),
@@ -358,6 +364,7 @@ mod tests {
     async fn lists_scripts_with_href() {
         let r = list_scripts(
             State(state()),
+            Extension(Tree::Legacy),
             Path("vm1".into()),
             Query(ScriptsQuery::default()),
         )
@@ -375,6 +382,7 @@ mod tests {
     async fn tags_filter_selects() {
         let r = list_scripts(
             State(state()),
+            Extension(Tree::Legacy),
             Path("vm1".into()),
             Query(ScriptsQuery {
                 tags: Some("smoke".into()),
@@ -391,15 +399,20 @@ mod tests {
     async fn read_one_and_404() {
         let ok = read_script(
             State(state()),
+            Extension(Tree::Legacy),
             Path(("vm1".into(), "guest-hal.slow".into())),
         )
         .await
         .unwrap()
         .0;
         assert_eq!(ok.id, "guest-hal.slow");
-        let err = read_script(State(state()), Path(("vm1".into(), "nope".into())))
-            .await
-            .expect_err("unknown script");
+        let err = read_script(
+            State(state()),
+            Extension(Tree::Legacy),
+            Path(("vm1".into(), "nope".into())),
+        )
+        .await
+        .expect_err("unknown script");
         assert!(matches!(err, ApiError::NotFound(_)));
     }
 
@@ -408,6 +421,7 @@ mod tests {
         use axum::http::{header, StatusCode};
         let resp = execute_script(
             State(state()),
+            Extension(Tree::Legacy),
             Path(("vm1".into(), "guest-hal.smoke".into())),
         )
         .await
@@ -431,6 +445,7 @@ mod tests {
     async fn get_execution_carries_verdict_and_bracket() {
         let r = get_execution(
             State(state()),
+            Extension(Tree::Legacy),
             Path((
                 "vm1".into(),
                 "guest-hal.smoke".into(),
@@ -449,6 +464,7 @@ mod tests {
         // Unknown exec id → 404.
         let err = get_execution(
             State(state()),
+            Extension(Tree::Legacy),
             Path(("vm1".into(), "guest-hal.smoke".into(), "nope".into())),
         )
         .await
@@ -460,6 +476,7 @@ mod tests {
     async fn list_executions_returns_ids() {
         let r = list_executions(
             State(state()),
+            Extension(Tree::Legacy),
             Path(("vm1".into(), "guest-hal.smoke".into())),
         )
         .await

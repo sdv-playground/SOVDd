@@ -15,11 +15,12 @@
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
+use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::Tree;
 
 #[derive(Debug, Serialize)]
 pub struct LogEntriesResponse {
@@ -97,10 +98,11 @@ fn default_min_severity() -> u8 {
 /// error) when the backend exposes no `logs` category.
 pub async fn list_log_entries(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
 ) -> Result<Json<LogEntriesResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
-    let base = format!("/vehicle/v1/components/{component_id}/bulk-data/logs");
+    let base = format!("{}/bulk-data/logs", tree.component(&component_id));
     // list_bulk_data defaults to EntityNotFound for an unknown category; a
     // backend without a `logs` category (or without bulk-data at all) simply has
     // no entries — degrade to empty rather than surfacing a 404 on /logs/entries.
@@ -128,10 +130,11 @@ pub async fn list_log_entries(
 /// when the backend models no sources.
 pub async fn list_log_sources(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
 ) -> Result<Json<LogSourcesResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
-    let base = format!("/vehicle/v1/components/{component_id}/logs/sources");
+    let base = format!("{}/logs/sources", tree.component(&component_id));
     let items = backend
         .list_log_sources()
         .await
@@ -224,7 +227,7 @@ mod tests {
                     name: id.to_string(),
                     entity_type: "ecu".to_string(),
                     description: None,
-                    href: format!("/vehicle/v1/components/{id}"),
+                    href: Tree::Legacy.component(id),
                     status: Some("online".to_string()),
                 },
                 caps: Capabilities::default(),

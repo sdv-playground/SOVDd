@@ -32,7 +32,7 @@ use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
-use axum::Json;
+use axum::{Extension, Json};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -46,6 +46,7 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::Tree;
 
 /// Manager for per-component cyclic subscriptions.
 #[derive(Debug, Default)]
@@ -323,6 +324,7 @@ async fn validate_subscription_resource(
 /// POST /vehicle/v1/components/:component_id/cyclic-subscriptions
 pub async fn create_cyclic_subscription(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
     Json(mut request): Json<CyclicSubscriptionRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -347,8 +349,9 @@ pub async fn create_cyclic_subscription(
         .await;
 
     let resource_path = format!(
-        "/vehicle/v1/components/{}/cyclic-subscriptions/{}",
-        component_id, subscription.subscription_id
+        "{}/cyclic-subscriptions/{}",
+        tree.component(&component_id),
+        subscription.subscription_id
     );
 
     // Spec §7.10.3 / C-072: `Location` points at the created temporary

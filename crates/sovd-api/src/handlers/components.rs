@@ -9,6 +9,7 @@ use sovd_core::Capabilities;
 use crate::auth::ClientContext;
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::Tree;
 
 #[derive(Serialize)]
 pub struct ComponentsResponse {
@@ -109,6 +110,7 @@ impl From<&Capabilities> for CapabilitiesResponse {
 /// disabled ⇒ list everything).
 pub async fn list_components(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     client: Option<Extension<ClientContext>>,
 ) -> Json<ComponentsResponse> {
     let client = client.map(|Extension(c)| c);
@@ -126,7 +128,7 @@ pub async fn list_components(
                 name: info.name.clone(),
                 description: info.description.clone(),
                 entity_type: info.entity_type.clone(),
-                href: format!("/vehicle/v1/components/{}", id),
+                href: tree.component(id),
             }
         })
         .collect();
@@ -138,6 +140,7 @@ pub async fn list_components(
 /// Get detailed information about a component
 pub async fn get_component(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
 ) -> Result<Json<ComponentDetailResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
@@ -150,22 +153,23 @@ pub async fn get_component(
         _ => None,
     };
 
+    let base = tree.component(&component_id);
     let response = ComponentDetailResponse {
         id: component_id.clone(),
         name: info.name.clone(),
         description: info.description.clone(),
         entity_type: info.entity_type.clone(),
         capabilities,
-        data: format!("/vehicle/v1/components/{}/data", component_id),
-        faults: format!("/vehicle/v1/components/{}/faults", component_id),
-        operations: format!("/vehicle/v1/components/{}/operations", component_id),
+        data: format!("{base}/data"),
+        faults: format!("{base}/faults"),
+        operations: format!("{base}/operations"),
         logs: if caps.logs {
-            Some(format!("/vehicle/v1/components/{}/logs", component_id))
+            Some(format!("{base}/logs"))
         } else {
             None
         },
         apps: if caps.sub_entities {
-            Some(format!("/vehicle/v1/components/{}/apps", component_id))
+            Some(format!("{base}/apps"))
         } else {
             None
         },

@@ -4,7 +4,9 @@
 //! Covers: `/version-info` advertises `/v1` first; the two bases return the
 //! same bodies; the capability docs are public under both; the component-scope
 //! authorization decision is identical under both (the security property); and
-//! unknown paths / wrong methods get the `GenericError` body under both.
+//! unknown paths / wrong methods get the `GenericError` body under both; every
+//! URL a response emits (hrefs, `Location`, capability-doc `servers`/`paths`)
+//! uses the base the request came in on; legacy responses are unchanged.
 //!
 //! Same in-process `TestServer` + mock backend pattern as `authorizer_seam.rs`.
 
@@ -17,7 +19,7 @@ use sovd_api::{create_router, AccessRequest, AppState, Authorizer, ClientContext
 use sovd_client::testing::TestServer;
 use sovd_core::{
     BackendError, BackendResult, Capabilities, DataValue, DiagnosticBackend, EntityInfo,
-    FaultFilter, FaultsResult, OperationExecution, OperationInfo, ParameterInfo,
+    FaultFilter, FaultsResult, OperationExecution, OperationInfo, PackageStream, ParameterInfo,
 };
 
 const BASES: [&str; 2] = ["/v1", "/vehicle/v1"];
@@ -79,10 +81,29 @@ impl DiagnosticBackend for MockBackend {
         })
     }
     async fn list_operations(&self) -> BackendResult<Vec<OperationInfo>> {
-        Ok(vec![])
+        Ok(vec![OperationInfo {
+            id: "selftest".to_string(),
+            name: "Self test".to_string(),
+            description: None,
+            parameters: vec![],
+            requires_security: false,
+            security_level: 0,
+            href: String::new(),
+        }])
     }
     async fn start_operation(&self, op: &str, _params: &[u8]) -> BackendResult<OperationExecution> {
-        Err(BackendError::OperationNotFound(op.to_string()))
+        match op {
+            "selftest" => Ok(OperationExecution::running("backend-exec", op)),
+            _ => Err(BackendError::OperationNotFound(op.to_string())),
+        }
+    }
+    async fn receive_package_part(
+        &self,
+        part_id: &str,
+        _stream: PackageStream,
+        _content_length: Option<u64>,
+    ) -> BackendResult<String> {
+        Ok(format!("file-{part_id}"))
     }
 }
 
@@ -161,6 +182,59 @@ fn json(body: &[u8]) -> Value {
     serde_json::from_slice(body).expect("JSON body")
 }
 
+/// `body` with every `/vehicle/v1` replaced by `/v1` — a legacy body mapped
+/// onto the `/v1` tree.
+fn as_v1(body: &[u8]) -> String {
+    String::from_utf8(body.to_vec())
+        .expect("UTF-8 body")
+        .replace("/vehicle/v1", "/v1")
+}
+
+/// Send `method path` with an optional JSON body; returns the response.
+async fn request(
+    server: &TestServer,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+) -> reqwest::Response {
+    let mut req = reqwest::Client::new().request(method, format!("{}{path}", server.base_url()));
+    if let Some(body) = body {
+        req = req.json(&body);
+    }
+    req.send().await.expect("request")
+}
+
+/// The `Location` header of `resp`, checking its status first.
+fn location(resp: &reqwest::Response, status: u16) -> String {
+    assert_eq!(resp.status().as_u16(), status, "{}", resp.url());
+    resp.headers()
+        .get(reqwest::header::LOCATION)
+        .expect("Location header")
+        .to_str()
+        .expect("ASCII Location")
+        .to_string()
+}
+
+/// Every URL `value` emits: string members keyed `href` / `*_href`, plus any
+/// other string member that is an absolute path.
+fn urls(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, member) in map {
+                match member {
+                    Value::String(s) if key == "href" || key.ends_with("_href") => {
+                        out.push(s.clone())
+                    }
+                    Value::String(s) if s.starts_with('/') => out.push(s.clone()),
+                    _ => urls(member, out),
+                }
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|item| urls(item, out)),
+        _ => {}
+    }
+}
+
 // ---------------------------------------------------------------------------
 // a. version-info
 // ---------------------------------------------------------------------------
@@ -195,7 +269,11 @@ async fn both_bases_serve_identical_bodies() {
         let (s1, b1) = get(&server, &format!("/v1{rel}"), None).await;
         let (s2, b2) = get(&server, &format!("/vehicle/v1{rel}"), None).await;
         assert_eq!((s1, s2), (200, 200), "{rel}");
-        assert_eq!(b1, b2, "{rel}: bodies differ between bases");
+        assert_eq!(
+            String::from_utf8(b1).unwrap(),
+            as_v1(&b2),
+            "{rel}: bodies differ between bases beyond the base"
+        );
     }
 }
 
@@ -231,7 +309,10 @@ async fn docs_are_public_under_both_bases() {
         assert_eq!(json(&body)["openapi"], "3.1.0");
         globals.push(body);
     }
-    assert_eq!(globals[0], globals[1]);
+    assert_eq!(
+        String::from_utf8(globals[0].clone()).unwrap(),
+        as_v1(&globals[1])
+    );
 
     // Entity-scoped docs (router fallback) — public, and scoped the same way
     // under both bases.
@@ -244,9 +325,9 @@ async fn docs_are_public_under_both_bases() {
             !body["paths"].as_object().expect("paths").is_empty(),
             "{base}: scoped doc has no paths"
         );
-        scoped.push(body);
+        scoped.push(body.to_string());
     }
-    assert_eq!(scoped[0], scoped[1]);
+    assert_eq!(scoped[0], scoped[1].replace("/vehicle/v1", "/v1"));
 }
 
 // ---------------------------------------------------------------------------
@@ -313,3 +394,192 @@ async fn unknown_path_and_wrong_method_give_generic_error() {
     assert_eq!(body["vendor_code"], "method-not-allowed", "{body}");
     assert!(body["message"].is_string(), "{body}");
 }
+
+// ---------------------------------------------------------------------------
+// f. every emitted URL uses the request's base
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn component_list_hrefs_use_request_base() {
+    let server = open_server().await;
+    for base in BASES {
+        let (status, body) = get(&server, &format!("{base}/components"), None).await;
+        assert_eq!(status, 200, "{base}");
+        let body = json(&body);
+        let items = body["items"].as_array().expect("items");
+        assert_eq!(items.len(), 2, "{base}: {body}");
+        for item in items {
+            let href = item["href"].as_str().expect("href");
+            assert!(
+                href.starts_with(&format!("{base}/components/")),
+                "{base}: {href}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn component_urls_use_request_base() {
+    let server = open_server().await;
+    for base in BASES {
+        let (status, body) = get(&server, &format!("{base}/components/ecu_a"), None).await;
+        assert_eq!(status, 200, "{base}");
+        let mut found = Vec::new();
+        urls(&json(&body), &mut found);
+        assert!(!found.is_empty(), "{base}: component emits no URLs");
+        for url in found {
+            assert!(url.starts_with(&format!("{base}/")), "{base}: {url}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn locations_use_request_base() {
+    let server = open_server().await;
+    for (base, id) in BASES.into_iter().zip(["ecu_a", "ecu_b"]) {
+        let component = format!("{base}/components/{id}");
+
+        // Register an update: 201 + Location under the request's base.
+        let resp = request(
+            &server,
+            reqwest::Method::POST,
+            &format!("{component}/updates"),
+            Some(serde_json::json!({ "id": "u1" })),
+        )
+        .await;
+        let loc = location(&resp, 201);
+        assert_eq!(loc, format!("{component}/updates/u1"), "{base}");
+        let mut found = Vec::new();
+        urls(&resp.json().await.expect("register body"), &mut found);
+        assert!(!found.is_empty());
+        for url in found {
+            assert!(
+                url.starts_with(&format!("{component}/updates/")),
+                "{base}: {url}"
+            );
+        }
+
+        // Upload a part: its href, and the bulk-data listing's, are under the base.
+        let resp = reqwest::Client::new()
+            .put(format!(
+                "{}{component}/updates/u1/bulk-data/p1",
+                server.base_url()
+            ))
+            .body("bytes")
+            .send()
+            .await
+            .expect("part upload");
+        assert_eq!(resp.status().as_u16(), 201, "{base}");
+        let body: Value = resp.json().await.expect("part body");
+        assert_eq!(body["href"], format!("{component}/updates/u1/bulk-data/p1"));
+        let (status, body) = get(&server, &format!("{component}/updates/u1/bulk-data"), None).await;
+        assert_eq!(status, 200, "{base}");
+        let mut found = Vec::new();
+        urls(&json(&body), &mut found);
+        assert!(!found.is_empty());
+        for url in found {
+            assert!(
+                url.starts_with(&format!("{component}/updates/u1/bulk-data/")),
+                "{base}: {url}"
+            );
+        }
+
+        // Start an operation execution: 202 + Location under the base, and
+        // GET-able there.
+        let resp = request(
+            &server,
+            reqwest::Method::POST,
+            &format!("{component}/operations/selftest/executions"),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        let loc = location(&resp, 202);
+        assert!(
+            loc.starts_with(&format!("{component}/operations/selftest/executions/")),
+            "{base}: {loc}"
+        );
+        let (status, _) = get(&server, &loc, None).await;
+        assert_eq!(status, 200, "{base}: GET {loc}");
+    }
+}
+
+#[tokio::test]
+async fn capability_docs_use_request_base() {
+    let server = open_server().await;
+    let mut scoped = Vec::new();
+    for base in BASES {
+        let (status, body) = get(&server, &format!("{base}/docs"), None).await;
+        assert_eq!(status, 200, "{base}/docs");
+        let doc = json(&body);
+        assert_eq!(doc["servers"][0]["url"], base);
+        let paths = doc["paths"].as_object().expect("paths");
+        assert!(!paths.is_empty());
+        for key in paths.keys() {
+            // `/health` and `/version-info` are root-level: served off no base.
+            if key == "/health" || key == "/version-info" {
+                continue;
+            }
+            assert!(key.starts_with(&format!("{base}/")), "{base}/docs: {key}");
+        }
+
+        let (status, body) = get(&server, &format!("{base}/components/ecu_a/docs"), None).await;
+        assert_eq!(status, 200, "{base}/components/ecu_a/docs");
+        let doc = json(&body);
+        assert_eq!(doc["servers"][0]["url"], base);
+        let paths = doc["paths"].as_object().expect("paths");
+        assert!(!paths.is_empty(), "{base}: scoped doc has no paths");
+        for key in paths.keys() {
+            assert!(
+                key.starts_with(&format!("{base}/components/ecu_a")),
+                "{base} scoped: {key}"
+            );
+        }
+        scoped.push(body);
+    }
+    assert_eq!(
+        String::from_utf8(scoped[0].clone()).unwrap(),
+        as_v1(&scoped[1])
+    );
+}
+
+// ---------------------------------------------------------------------------
+// g. legacy responses unchanged
+// ---------------------------------------------------------------------------
+
+/// Byte snapshots of legacy responses, recorded by running these requests on
+/// the commit before tree-aware URL rendering. `/components` is compared with
+/// its items sorted by id (the listing walks a `HashMap`, so its order is
+/// per-process); the docs fixture holds `@@VERSION@@` for the crate version.
+#[tokio::test]
+async fn legacy_responses_unchanged() {
+    let server = open_server().await;
+
+    let (status, body) = get(&server, "/vehicle/v1/components", None).await;
+    assert_eq!(status, 200);
+    let mut body = json(&body);
+    body["items"]
+        .as_array_mut()
+        .unwrap()
+        .sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    assert_eq!(body.to_string(), LEGACY_COMPONENTS);
+
+    let (status, body) = get(&server, "/vehicle/v1/components/ecu_a/docs", None).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        String::from_utf8(body).unwrap(),
+        include_str!("fixtures/dual_base_legacy_component_docs.json")
+            .replace("@@VERSION@@", env!("CARGO_PKG_VERSION"))
+    );
+
+    let resp = request(
+        &server,
+        reqwest::Method::POST,
+        "/vehicle/v1/components/ecu_a/updates",
+        Some(serde_json::json!({ "id": "u1" })),
+    )
+    .await;
+    assert_eq!(location(&resp, 201), LEGACY_REGISTER_LOCATION);
+}
+
+const LEGACY_COMPONENTS: &str = r#"{"items":[{"href":"/vehicle/v1/components/ecu_a","id":"ecu_a","name":"ecu_a ecu","type":"ecu"},{"href":"/vehicle/v1/components/ecu_b","id":"ecu_b","name":"ecu_b ecu","type":"ecu"}]}"#;
+const LEGACY_REGISTER_LOCATION: &str = "/vehicle/v1/components/ecu_a/updates/u1";

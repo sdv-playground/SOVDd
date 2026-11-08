@@ -59,6 +59,17 @@ impl Tree {
         }
     }
 
+    /// `{base}/components/{id}` — a component's URL under this tree.
+    pub fn component(self, id: &str) -> String {
+        format!("{}/components/{id}", self.base())
+    }
+
+    /// `{base}/components/{component_id}/apps/{app_id}` — a sub-entity's URL
+    /// under this tree.
+    pub fn app(self, component_id: &str, app_id: &str) -> String {
+        format!("{}/apps/{app_id}", self.component(component_id))
+    }
+
     /// Longest-match: returns the tree and the remainder (starting with '/')
     /// for a path under a base. `None` for the bare base and other paths.
     pub fn split_path(path: &str) -> Option<(Tree, &str)> {

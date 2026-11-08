@@ -16,12 +16,13 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
+use axum::{Extension, Json};
 use chrono::Utc;
 use sovd_core::DiagnosticBackend;
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::Tree;
 
 // Re-use response types from sibling handler modules.
 use super::data::{DidInfoResponse, DidListResponse, DidResponse, ReadQuery};
@@ -71,6 +72,7 @@ pub(super) async fn resolve(
 /// PUT .../apps/:app_id/status/restart — sub-entity reset (spec §7.19).
 pub async fn status_restart(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, app_id)): Path<(String, String)>,
     Json(request): Json<super::reset::EcuResetRequest>,
 ) -> Result<axum::response::Response, ApiError> {
@@ -112,8 +114,9 @@ pub async fn status_restart(
 
     let exec_id = Uuid::new_v4().to_string();
     let href = format!(
-        "/vehicle/v1/components/{}/apps/{}/status/restart/{}",
-        component_id, app_id, exec_id
+        "{}/status/restart/{}",
+        tree.app(&component_id, &app_id),
+        exec_id
     );
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -251,14 +254,12 @@ pub async fn put_security_mode(
 /// GET .../apps/:app_id/data
 pub async fn list_sub_entity_parameters(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, app_id)): Path<(String, String)>,
 ) -> Result<Json<DidListResponse>, ApiError> {
     let backend = resolve(&state, &component_id, &app_id).await?;
     let sub_entity_id = backend.entity_info().id.clone();
-    let base = format!(
-        "/vehicle/v1/components/{}/apps/{}/data",
-        component_id, app_id
-    );
+    let base = format!("{}/data", tree.app(&component_id, &app_id));
 
     // Use DidStore only when there are component-specific definitions (not just globals).
     // Proxy backends should fall through to list_parameters() for upstream resolution.
@@ -456,6 +457,7 @@ pub async fn write_sub_entity_parameter(
 /// GET .../apps/:app_id/faults
 pub async fn list_sub_entity_faults(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, app_id)): Path<(String, String)>,
     Query(query): Query<FaultFilterQuery>,
 ) -> Result<Json<FaultsResponse>, ApiError> {
@@ -474,10 +476,7 @@ pub async fn list_sub_entity_faults(
         .await
         .map_err(ApiError::from)?;
 
-    let base = format!(
-        "/vehicle/v1/components/{}/apps/{}/faults",
-        component_id, app_id
-    );
+    let base = format!("{}/faults", tree.app(&component_id, &app_id));
     let items: Vec<FaultInfoResponse> = result
         .faults
         .iter()
@@ -502,6 +501,7 @@ pub async fn list_sub_entity_faults(
 /// GET .../apps/:app_id/faults/:fault_id
 pub async fn get_sub_entity_fault(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, app_id, fault_id)): Path<(String, String, String)>,
 ) -> Result<Json<FaultInfoResponse>, ApiError> {
     let backend = resolve(&state, &component_id, &app_id).await?;
@@ -510,10 +510,7 @@ pub async fn get_sub_entity_fault(
         .await
         .map_err(ApiError::from)?;
 
-    let base = format!(
-        "/vehicle/v1/components/{}/apps/{}/faults",
-        component_id, app_id
-    );
+    let base = format!("{}/faults", tree.app(&component_id, &app_id));
     Ok(Json(FaultInfoResponse {
         code: fault.code.clone(),
         fault_name: fault.message.clone(),
@@ -545,15 +542,13 @@ pub async fn clear_sub_entity_faults(
 /// GET .../apps/:app_id/operations
 pub async fn list_sub_entity_operations(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, app_id)): Path<(String, String)>,
 ) -> Result<Json<OperationsResponse>, ApiError> {
     let backend = resolve(&state, &component_id, &app_id).await?;
     let operations = backend.list_operations().await.map_err(ApiError::from)?;
 
-    let base = format!(
-        "/vehicle/v1/components/{}/apps/{}/operations",
-        component_id, app_id
-    );
+    let base = format!("{}/operations", tree.app(&component_id, &app_id));
     let items: Vec<OperationInfoResponse> = operations
         .iter()
         .map(OperationInfoResponse::from)
@@ -573,6 +568,7 @@ pub async fn list_sub_entity_operations(
 /// single-op-at-a-time `exec_id` contract.
 pub async fn start_sub_entity_operation(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, app_id, operation_id)): Path<(String, String, String)>,
     Json(request): Json<super::operations::StartExecutionRequest>,
 ) -> Result<axum::response::Response, ApiError> {
@@ -608,8 +604,10 @@ pub async fn start_sub_entity_operation(
         .record(&component_id, &cache_op_id, execution.clone());
 
     let href = format!(
-        "/vehicle/v1/components/{}/apps/{}/operations/{}/executions/{}",
-        component_id, app_id, operation_id, exec_id
+        "{}/operations/{}/executions/{}",
+        tree.app(&component_id, &app_id),
+        operation_id,
+        exec_id
     );
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(

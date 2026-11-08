@@ -247,6 +247,7 @@ impl ExecuteQuery {
 /// POST /vehicle/v1/components/{component_id}/updates
 pub async fn register_update(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
     body: Option<Json<RegisterUpdateRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -422,8 +423,8 @@ pub async fn register_update(
     }
 
     let base = format!(
-        "/vehicle/v1/components/{}/updates/{}",
-        component_id,
+        "{}/updates/{}",
+        tree.component(&component_id),
         enc(&update_id)
     );
     let resp = RegisterUpdateResponse {
@@ -604,12 +605,13 @@ pub async fn delete_update(
 
 /// Common 202-response shape for all three lifecycle PUTs.
 fn accepted_with_status_location(
+    tree: Tree,
     component_id: &str,
     update_id: &str,
 ) -> Result<(StatusCode, HeaderMap), ApiError> {
     let location = format!(
-        "/vehicle/v1/components/{}/updates/{}/status",
-        component_id,
+        "{}/updates/{}/status",
+        tree.component(component_id),
         enc(update_id)
     );
     let mut headers = HeaderMap::new();
@@ -650,13 +652,15 @@ where
 /// `202 Accepted` + `Location: .../status`.
 pub async fn put_prepare(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    put_prepare_inner(state, component_id, update_id, None).await
+    put_prepare_inner(state, tree, component_id, update_id, None).await
 }
 
 async fn put_prepare_inner(
     state: AppState,
+    tree: Tree,
     component_id: String,
     update_id: String,
     expected_token: Option<Uuid>,
@@ -833,7 +837,7 @@ async fn put_prepare_inner(
         }
     }
 
-    let (status, headers) = accepted_with_status_location(&component_id, &update_id)?;
+    let (status, headers) = accepted_with_status_location(tree, &component_id, &update_id)?;
     Ok((status, headers))
 }
 
@@ -844,14 +848,16 @@ async fn put_prepare_inner(
 /// for orchestrator-driven trial verdict on banked components.
 pub async fn put_execute(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
     Query(query): Query<ExecuteQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    put_execute_inner(state, component_id, update_id, query, None).await
+    put_execute_inner(state, tree, component_id, update_id, query, None).await
 }
 
 async fn put_execute_inner(
     state: AppState,
+    tree: Tree,
     component_id: String,
     update_id: String,
     query: ExecuteQuery,
@@ -1174,7 +1180,7 @@ async fn put_execute_inner(
         }
     }
 
-    let (status, headers) = accepted_with_status_location(&component_id, &update_id)?;
+    let (status, headers) = accepted_with_status_location(tree, &component_id, &update_id)?;
     Ok((status, headers))
 }
 
@@ -1185,6 +1191,7 @@ async fn put_execute_inner(
 /// `automated`.
 pub async fn put_automated(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let key = UpdateKey::new(&component_id, &update_id);
@@ -1216,6 +1223,7 @@ pub async fn put_automated(
     // same task machinery so both phases drive the same wire fields.
     let prepare_resp = put_prepare_inner(
         state.clone(),
+        tree,
         component_id.clone(),
         update_id.clone(),
         Some(registration_token),
@@ -1259,6 +1267,7 @@ pub async fn put_automated(
         // (empty query → not orchestrated).
         let _ = put_execute_inner(
             task_state,
+            tree,
             task_component_id,
             task_update_id,
             ExecuteQuery::default(),
@@ -1267,7 +1276,7 @@ pub async fn put_automated(
         .await;
     });
 
-    let (status, headers) = accepted_with_status_location(&component_id, &update_id)?;
+    let (status, headers) = accepted_with_status_location(tree, &component_id, &update_id)?;
     Ok((status, headers).into_response())
 }
 
@@ -1284,7 +1293,7 @@ pub async fn put_x_ota_commit(
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     refuse_node_verdict(&state, tree, &component_id, Some(&update_id))?;
-    verdict_commit(&state, &component_id, &update_id).await
+    verdict_commit(&state, tree, &component_id, &update_id).await
 }
 
 /// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-ota-rollback`
@@ -1296,7 +1305,7 @@ pub async fn put_x_ota_rollback(
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     refuse_node_verdict(&state, tree, &component_id, Some(&update_id))?;
-    verdict_rollback(&state, &component_id, &update_id)
+    verdict_rollback(&state, tree, &component_id, &update_id)
 }
 
 /// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-update-commit`
@@ -1311,9 +1320,9 @@ pub async fn put_x_update_commit(
 ) -> Result<impl IntoResponse, ApiError> {
     refuse_node_verdict(&state, tree, &component_id, Some(&update_id))?;
     if settled_as(&state, &component_id, &update_id, XUpdateState::Committed).await? {
-        return accepted_with_status_location(&component_id, &update_id);
+        return accepted_with_status_location(tree, &component_id, &update_id);
     }
-    verdict_commit(&state, &component_id, &update_id).await
+    verdict_commit(&state, tree, &component_id, &update_id).await
 }
 
 /// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-update-rollback`
@@ -1328,9 +1337,9 @@ pub async fn put_x_update_rollback(
 ) -> Result<impl IntoResponse, ApiError> {
     refuse_node_verdict(&state, tree, &component_id, Some(&update_id))?;
     if settled_as(&state, &component_id, &update_id, XUpdateState::RolledBack).await? {
-        return accepted_with_status_location(&component_id, &update_id);
+        return accepted_with_status_location(tree, &component_id, &update_id);
     }
-    verdict_rollback(&state, &component_id, &update_id)
+    verdict_rollback(&state, tree, &component_id, &update_id)
 }
 
 /// Under `/v1`, refuse a per-update verdict (or a force-rollback, `update_id`
@@ -1382,6 +1391,7 @@ async fn settled_as(
 /// live) before the verdict is claimed.
 async fn verdict_commit(
     state: &AppState,
+    tree: Tree,
     component_id: &str,
     update_id: &str,
 ) -> Result<(StatusCode, HeaderMap), ApiError> {
@@ -1402,13 +1412,14 @@ async fn verdict_commit(
         registration_token,
         crate::state::Verdict::Commit,
     )?;
-    accepted_with_status_location(component_id, update_id)
+    accepted_with_status_location(tree, component_id, update_id)
 }
 
 /// Rollback verdict: no activation check — rolling back is always allowed
 /// from `awaiting-verdict`.
 fn verdict_rollback(
     state: &AppState,
+    tree: Tree,
     component_id: &str,
     update_id: &str,
 ) -> Result<(StatusCode, HeaderMap), ApiError> {
@@ -1420,7 +1431,7 @@ fn verdict_rollback(
         registration_token,
         crate::state::Verdict::Rollback,
     )?;
-    accepted_with_status_location(component_id, update_id)
+    accepted_with_status_location(tree, component_id, update_id)
 }
 
 /// `PUT /vehicle/v1/components/{component_id}/x-ota-force-rollback`
@@ -1616,6 +1627,7 @@ pub(crate) fn x_update_state(
 /// GET /vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data
 pub async fn list_bulk_data(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<Json<BulkDataListResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
@@ -1668,7 +1680,7 @@ pub async fn list_bulk_data(
     let items: Vec<PartStatusEntry> = parts
         .iter()
         .map(|p| {
-            let mut item = part_status_entry(&component_id, &update_id, p);
+            let mut item = part_status_entry(tree, &component_id, &update_id, p);
             item.present = held_names
                 .iter()
                 .any(|name| held_part_matches(&p.part_id, name));
@@ -1681,6 +1693,7 @@ pub async fn list_bulk_data(
 /// PUT /vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data/{part_id}
 pub async fn put_bulk_data_part(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id, part_id)): Path<(String, String, String)>,
     headers: HeaderMap,
     body: Body,
@@ -1786,8 +1799,8 @@ pub async fn put_bulk_data_part(
     }
 
     let href = format!(
-        "/vehicle/v1/components/{}/updates/{}/bulk-data/{}",
-        component_id,
+        "{}/updates/{}/bulk-data/{}",
+        tree.component(&component_id),
         enc(&update_id),
         enc(&part_id)
     );
@@ -1820,14 +1833,19 @@ fn remove_registration(state: &AppState, key: &UpdateKey, registration_token: Uu
     }
 }
 
-fn part_status_entry(component_id: &str, update_id: &str, p: &UpdatePart) -> PartStatusEntry {
+fn part_status_entry(
+    tree: Tree,
+    component_id: &str,
+    update_id: &str,
+    p: &UpdatePart,
+) -> PartStatusEntry {
     PartStatusEntry {
         part_id: p.part_id.clone(),
         size: p.size,
         sha256: p.sha256.clone(),
         href: Some(format!(
-            "/vehicle/v1/components/{}/updates/{}/bulk-data/{}",
-            component_id,
+            "{}/updates/{}/bulk-data/{}",
+            tree.component(component_id),
             enc(update_id),
             enc(&p.part_id)
         )),

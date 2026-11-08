@@ -21,13 +21,14 @@
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
-use axum::Json;
+use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 use sovd_core::{IoControlAction, OperationExecution, OperationInfo, OperationStatus};
 use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::Tree;
 
 #[derive(Serialize)]
 pub struct OperationsResponse {
@@ -153,13 +154,14 @@ pub struct ExecutionQuery {
 /// here so a single GET enumerates both classes.
 pub async fn list_operations(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
 ) -> Result<Json<OperationsResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
     let routines = backend.list_operations().await?;
     let outputs = backend.list_outputs().await.unwrap_or_default();
 
-    let base = format!("/vehicle/v1/components/{}/operations", component_id);
+    let base = format!("{}/operations", tree.component(&component_id));
     let mut items: Vec<OperationInfoResponse> = routines
         .iter()
         .map(|op| OperationInfoResponse {
@@ -195,10 +197,11 @@ pub async fn list_operations(
 /// frozen) so clients don't need a second round-trip.
 pub async fn get_operation(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, operation_id)): Path<(String, String)>,
 ) -> Result<Json<OperationInfoResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
-    let base = format!("/vehicle/v1/components/{}/operations", component_id);
+    let base = format!("{}/operations", tree.component(&component_id));
     let href = format!("{}/{}/executions", base, operation_id);
 
     // RoutineControl path: pluck from list_operations.
@@ -274,6 +277,7 @@ pub async fn get_operation(
 /// re-poll the backend live).
 pub async fn start_operation_execution(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, operation_id)): Path<(String, String)>,
     Json(request): Json<StartExecutionRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -394,8 +398,10 @@ pub async fn start_operation_execution(
     });
 
     let href = format!(
-        "/vehicle/v1/components/{}/operations/{}/executions/{}",
-        component_id, operation_id, exec_id
+        "{}/operations/{}/executions/{}",
+        tree.component(&component_id),
+        operation_id,
+        exec_id
     );
     let mut headers = HeaderMap::new();
     headers.insert(

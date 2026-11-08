@@ -15,13 +15,14 @@ use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{Extension, Json};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sovd_core::{BulkDataDownload, BulkDataFilter};
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::Tree;
 
 /// `GET /{entity}/bulk-data` — the category list.
 #[derive(Debug, Serialize)]
@@ -83,10 +84,11 @@ fn require_bulk_data(
 /// GET /vehicle/v1/components/:component_id/bulk-data
 pub async fn list_categories(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
 ) -> Result<Json<CategoriesResponse>, ApiError> {
     let backend = require_bulk_data(&state, &component_id)?;
-    let base = format!("/vehicle/v1/components/{component_id}/bulk-data");
+    let base = format!("{}/bulk-data", tree.component(&component_id));
     let items = backend
         .list_bulk_data_categories()
         .await?
@@ -102,6 +104,7 @@ pub async fn list_categories(
 /// GET /vehicle/v1/components/:component_id/bulk-data/:category
 pub async fn list_items(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, category)): Path<(String, String)>,
     Query(query): Query<ItemsQuery>,
 ) -> Result<Json<ItemsResponse>, ApiError> {
@@ -110,7 +113,7 @@ pub async fn list_items(
         created_before: query.created_before,
         created_after: query.created_after,
     };
-    let base = format!("/vehicle/v1/components/{component_id}/bulk-data/{category}");
+    let base = format!("{}/bulk-data/{category}", tree.component(&component_id));
     let items = backend
         .list_bulk_data(&category, &filter)
         .await?
@@ -189,7 +192,7 @@ mod tests {
                     name: "vm1".into(),
                     entity_type: "component".into(),
                     description: None,
-                    href: "/vehicle/v1/components/vm1".into(),
+                    href: Tree::Legacy.component("vm1"),
                     status: Some("online".into()),
                 },
                 caps,
@@ -267,16 +270,21 @@ mod tests {
     #[tokio::test]
     async fn categories_then_items_then_download() {
         let st = state();
-        let cats = list_categories(State(st.clone()), Path("vm1".into()))
-            .await
-            .expect("categories")
-            .0;
+        let cats = list_categories(
+            State(st.clone()),
+            Extension(Tree::Legacy),
+            Path("vm1".into()),
+        )
+        .await
+        .expect("categories")
+        .0;
         assert_eq!(cats.items.len(), 1);
         assert_eq!(cats.items[0].id, "logs");
         assert!(cats.items[0].href.ends_with("/bulk-data/logs"));
 
         let items = list_items(
             State(st.clone()),
+            Extension(Tree::Legacy),
             Path(("vm1".into(), "logs".into())),
             Query(ItemsQuery::default()),
         )
@@ -304,6 +312,7 @@ mod tests {
         let st = state();
         let err = list_items(
             State(st),
+            Extension(Tree::Legacy),
             Path(("vm1".into(), "nope".into())),
             Query(ItemsQuery::default()),
         )
@@ -321,7 +330,7 @@ mod tests {
         be.caps.bulk_data = false;
         b.insert("vm1".into(), Arc::new(be));
         let st = AppState::new(b);
-        let err = list_categories(State(st), Path("vm1".into()))
+        let err = list_categories(State(st), Extension(Tree::Legacy), Path("vm1".into()))
             .await
             .expect_err("no bulk-data cap");
         assert!(matches!(err, ApiError::NotImplemented(_)), "got {err:?}");
