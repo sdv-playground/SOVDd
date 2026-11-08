@@ -621,20 +621,25 @@ pub async fn start_sub_entity_operation(
         _ => StatusCode::OK,
     };
 
-    Ok((status_code, headers, Json(execution)).into_response())
+    Ok((
+        status_code,
+        headers,
+        Json(super::operations::ExecutionResponse::from(execution)),
+    )
+        .into_response())
 }
 
 /// GET .../apps/:app_id/operations/:operation_id/executions/:exec_id
 pub async fn get_sub_entity_operation_execution(
     State(state): State<AppState>,
     Path((component_id, app_id, operation_id, exec_id)): Path<(String, String, String, String)>,
-) -> Result<Json<sovd_core::OperationExecution>, ApiError> {
+) -> Result<Json<super::operations::ExecutionResponse>, ApiError> {
     let cache_op_id = format!("apps/{}/{}", app_id, operation_id);
     if let Some(cached) = state
         .operation_executions
         .get(&component_id, &cache_op_id, &exec_id)
     {
-        return Ok(Json(cached));
+        return Ok(Json(cached.into()));
     }
 
     let backend = resolve(&state, &component_id, &app_id).await?;
@@ -643,7 +648,7 @@ pub async fn get_sub_entity_operation_execution(
         .await
         .map_err(ApiError::from)?;
     execution.execution_id = exec_id;
-    Ok(Json(execution))
+    Ok(Json(execution.into()))
 }
 
 /// DELETE .../apps/:app_id/operations/:operation_id/executions/:exec_id

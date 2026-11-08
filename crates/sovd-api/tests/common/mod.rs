@@ -103,6 +103,13 @@ impl DiagnosticBackend for MockBackend {
             _ => Err(BackendError::OperationNotFound(op.to_string())),
         }
     }
+    /// One sub-entity, `app_a`: a plain mock with the same `selftest` op.
+    async fn get_sub_entity(&self, id: &str) -> BackendResult<Arc<dyn DiagnosticBackend>> {
+        match id {
+            "app_a" => Ok(Arc::new(MockBackend::new(id))),
+            _ => Err(BackendError::EntityNotFound(id.to_string())),
+        }
+    }
     async fn receive_package_part(
         &self,
         part_id: &str,
