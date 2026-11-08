@@ -26,19 +26,20 @@ use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
-use axum::Json;
+use axum::{Extension, Json};
 use futures::StreamExt;
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sovd_core::{
     HeldState, HeldUpdate, PackageStream, UpdatePackageContext, UpdatePackageDescriptor,
-    UpdatePartRef,
+    UpdatePartRef, VerdictScope,
 };
 use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::state::{AppState, Phase, Status, UpdateKey, UpdatePart, UpdateState, UpdatesEntry};
+use crate::Tree;
 
 /// Reserved update-package id (§7.18.1.5). On servers that self-select,
 /// `GET /updates/autonomous` resolves to a concrete installable id; SOVDd
@@ -1279,8 +1280,10 @@ pub async fn put_automated(
 /// `awaiting-verdict`.  Returns `202 + Location: .../status`.
 pub async fn put_x_ota_commit(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
+    refuse_node_verdict(&state, tree, &component_id, Some(&update_id))?;
     verdict_commit(&state, &component_id, &update_id).await
 }
 
@@ -1289,8 +1292,10 @@ pub async fn put_x_ota_commit(
 /// Symmetric to `x-ota-commit`; sends a `Rollback` verdict.
 pub async fn put_x_ota_rollback(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
+    refuse_node_verdict(&state, tree, &component_id, Some(&update_id))?;
     verdict_rollback(&state, &component_id, &update_id)
 }
 
@@ -1301,8 +1306,10 @@ pub async fn put_x_ota_rollback(
 /// update it is accepted and changes nothing.
 pub async fn put_x_update_commit(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
+    refuse_node_verdict(&state, tree, &component_id, Some(&update_id))?;
     if settled_as(&state, &component_id, &update_id, XUpdateState::Committed).await? {
         return accepted_with_status_location(&component_id, &update_id);
     }
@@ -1316,12 +1323,39 @@ pub async fn put_x_update_commit(
 /// nothing. `202 + Location: .../status`.
 pub async fn put_x_update_rollback(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
+    refuse_node_verdict(&state, tree, &component_id, Some(&update_id))?;
     if settled_as(&state, &component_id, &update_id, XUpdateState::RolledBack).await? {
         return accepted_with_status_location(&component_id, &update_id);
     }
     verdict_rollback(&state, &component_id, &update_id)
+}
+
+/// Under `/v1`, refuse a per-update verdict (or a force-rollback, `update_id`
+/// `None`) on a component whose updates are settled by the node operation.
+/// Runs before any state check so the client learns the settle path first.
+/// `/vehicle/v1` keeps accepting them for existing clients.
+fn refuse_node_verdict(
+    state: &AppState,
+    tree: Tree,
+    component_id: &str,
+    update_id: Option<&str>,
+) -> Result<(), ApiError> {
+    if tree != Tree::V1 || state.get_backend(component_id)?.verdict_scope() != VerdictScope::Node {
+        return Ok(());
+    }
+    let subject = match update_id {
+        Some(update_id) => format!("update '{update_id}' on '{component_id}'"),
+        None => format!("component '{component_id}'"),
+    };
+    let base = tree.base();
+    Err(ApiError::PreconditionFailed(format!(
+        "{subject} belongs to a node transaction; settle it with \
+         POST {base}/operations/x-update-commit/executions or \
+         POST {base}/operations/x-update-rollback/executions"
+    )))
 }
 
 /// Whether the update already settled the way a repeated verdict asks for: a
@@ -1405,8 +1439,10 @@ fn verdict_rollback(
 /// because by definition there may be no in-flight update_id.
 pub async fn put_x_ota_force_rollback(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    refuse_node_verdict(&state, tree, &component_id, None)?;
     let backend = state.get_backend(&component_id)?;
     backend.rollback_flash().await?;
     Ok(StatusCode::NO_CONTENT)

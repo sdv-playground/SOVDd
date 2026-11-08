@@ -57,6 +57,12 @@ all or nothing by the node operations below. This contract gives a per-update ve
 of a node transaction no meaning: a client does not send one, and a server may refuse it with 409
 `precondition-not-fulfilled`.
 
+This crate refuses them under `/v1`: on a component whose backend reports its updates as members
+of a node transaction, `x-update-commit`, `x-update-rollback`, `x-ota-commit`, `x-ota-rollback`
+and `x-ota-force-rollback` answer 409 `precondition-not-fulfilled` before any state check, with a
+message naming the node operations as the settle path. Under `/vehicle/v1` they are accepted as
+before, for existing clients.
+
 Served by this crate, which forwards the verdict to the update's executor and reports what it
 answers.
 
