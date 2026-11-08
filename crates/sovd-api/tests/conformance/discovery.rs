@@ -93,9 +93,9 @@ async fn root_capability_document() {
 }
 
 /// ISO 17978-3 §7.6.3 Table 53 (C1): a component's capability document
-/// references the `updates` and `bulk-data` collections it supports.
+/// references the `updates` and `bulk-data` collections it supports, and
+/// omits them when it does not.
 #[tokio::test]
-#[ignore = "F9: §7.6.3 Table 53 — component body lacks updates / bulk-data references"]
 async fn component_lists_updates_and_bulk_data() {
     let server = server().await;
     for tree in Tree::ALL {
@@ -109,6 +109,14 @@ async fn component_lists_updates_and_bulk_data() {
             format!("{component}/bulk-data"),
             "{body}"
         );
+
+        let component = tree.component("ecu_a");
+        let (status, body) = get(&server, &component, None).await;
+        assert_eq!(status, 200, "{component}");
+        let body = json(&body);
+        for key in ["updates", "bulk-data"] {
+            assert!(body.get(key).is_none(), "{component} has `{key}`: {body}");
+        }
     }
 }
 

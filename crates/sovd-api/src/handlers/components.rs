@@ -43,6 +43,13 @@ pub struct ComponentDetailResponse {
     pub logs: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub apps: Option<String>,
+    /// §7.6.3 Table 53 (C1): present only when the component supports it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updates: Option<String>,
+    #[serde(rename = "bulk-data", skip_serializing_if = "Option::is_none")]
+    pub bulk_data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configurations: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -173,6 +180,11 @@ pub async fn get_component(
         } else {
             None
         },
+        updates: caps.software_update.then(|| format!("{base}/updates")),
+        bulk_data: caps.bulk_data.then(|| format!("{base}/bulk-data")),
+        configurations: caps
+            .configurations
+            .then(|| format!("{base}/configurations")),
     };
 
     Ok(Json(response))
