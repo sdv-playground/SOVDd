@@ -179,13 +179,37 @@ pub struct AccessRequest<'a> {
     pub capability: Capability,
 }
 
+/// Why an [`Authorizer`] denied a request (ISO 17978-3 §5.4.4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AuthError {
+    /// No bearer, or one that does not verify — surfaced as 401.
+    Unauthenticated(String),
+    /// A valid bearer whose scopes do not cover the addressed component or the
+    /// required capability — surfaced as 403 on `/v1`, 401 on the legacy tree.
+    Forbidden(String),
+}
+
+/// A bare reason is an authentication failure, so `?` on the `String`/`&str`
+/// errors of token parsing and verification keeps working in authorizers.
+impl From<String> for AuthError {
+    fn from(reason: String) -> Self {
+        AuthError::Unauthenticated(reason)
+    }
+}
+
+impl From<&str> for AuthError {
+    fn from(reason: &str) -> Self {
+        AuthError::Unauthenticated(reason.to_string())
+    }
+}
+
 /// The injected authorization decision point. SOVDd calls this once per
 /// protected request; the implementation verifies the bearer and decides
 /// whether it may perform `req.capability`, returning the caller identity or a
-/// denial reason (surfaced as 401).
+/// denial reason ([`AuthError`]).
 #[async_trait]
 pub trait Authorizer: Send + Sync {
-    async fn authorize(&self, req: &AccessRequest<'_>) -> Result<ClientContext, String>;
+    async fn authorize(&self, req: &AccessRequest<'_>) -> Result<ClientContext, AuthError>;
 
     /// True when the surface is unauthenticated — the middleware short-circuits
     /// before building an [`AccessRequest`]. Defaults to closed.
@@ -420,7 +444,7 @@ impl AuthContext {
 /// inject their own [`Authorizer`].
 #[async_trait]
 impl Authorizer for AuthContext {
-    async fn authorize(&self, req: &AccessRequest<'_>) -> Result<ClientContext, String> {
+    async fn authorize(&self, req: &AccessRequest<'_>) -> Result<ClientContext, AuthError> {
         let ctx = self.authenticate(req.bearer).await?;
         // Spec-level authorization (C-030 / C-031): a component-addressed route
         // needs the matching `component:<id>` scope; the server-admin surface
@@ -428,12 +452,14 @@ impl Authorizer for AuthContext {
         // concern, not the built-in one.
         if let Some(component_id) = req.component {
             if !ctx.can_access_component(component_id) {
-                return Err(format!(
+                return Err(AuthError::Forbidden(format!(
                     "client not authorized for component '{component_id}'"
-                ));
+                )));
             }
         } else if req.capability == Capability::Admin && !ctx.can_admin() {
-            return Err("client not authorized for /admin (requires an admin scope)".to_string());
+            return Err(AuthError::Forbidden(
+                "client not authorized for /admin (requires an admin scope)".to_string(),
+            ));
         }
         Ok(ctx)
     }
@@ -658,10 +684,19 @@ pub async fn require_auth(
         component: component_in_path(&path),
         capability: route_capability(&method, &path),
     };
-    let ctx = auth
-        .authorize(&access)
-        .await
-        .map_err(ApiError::Unauthorized)?;
+    // §5.4.4: a valid token lacking the scope is 403 on `/v1`; the legacy
+    // tree keeps its historical 401.
+    let ctx = match auth.authorize(&access).await {
+        Ok(ctx) => ctx,
+        Err(AuthError::Forbidden(msg))
+            if matches!(Tree::split_path(&path), Some((Tree::V1, _))) =>
+        {
+            return Err(ApiError::Forbidden(msg))
+        }
+        Err(AuthError::Forbidden(msg) | AuthError::Unauthenticated(msg)) => {
+            return Err(ApiError::Unauthorized(msg))
+        }
+    };
 
     req.extensions_mut().insert(ctx);
     Ok(next.run(req).await)

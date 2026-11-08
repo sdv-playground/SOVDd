@@ -9,7 +9,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde_json::Value;
-use sovd_api::{create_router, AccessRequest, AppState, Authorizer, ClientContext};
+use sovd_api::{create_router, AccessRequest, AppState, AuthError, Authorizer, ClientContext};
 use sovd_client::testing::TestServer;
 use sovd_core::{
     BackendError, BackendResult, Capabilities, DataValue, DiagnosticBackend, EntityInfo, Fault,
@@ -120,11 +120,11 @@ pub struct ScopedAuthorizer;
 
 #[async_trait::async_trait]
 impl Authorizer for ScopedAuthorizer {
-    async fn authorize(&self, req: &AccessRequest<'_>) -> Result<ClientContext, String> {
+    async fn authorize(&self, req: &AccessRequest<'_>) -> Result<ClientContext, AuthError> {
         let scopes = match req.bearer {
             Some("Bearer token-a") => vec!["component:ecu_a".to_string()],
-            Some(_) => return Err("invalid token".to_string()),
-            None => return Err("missing Authorization header".to_string()),
+            Some(_) => return Err("invalid token".into()),
+            None => return Err("missing Authorization header".into()),
         };
         let ctx = ClientContext {
             subject: "tester".to_string(),
@@ -132,7 +132,9 @@ impl Authorizer for ScopedAuthorizer {
         };
         if let Some(component) = req.component {
             if !ctx.can_access_component(component) {
-                return Err(format!("client not authorized for component '{component}'"));
+                return Err(AuthError::Forbidden(format!(
+                    "client not authorized for component '{component}'"
+                )));
             }
         }
         Ok(ctx)

@@ -123,7 +123,7 @@ async fn docs_are_public_under_both_bases() {
 }
 
 // ---------------------------------------------------------------------------
-// d. component-scope authorization identical under both bases
+// d. component-scope authorization under both bases (403 vs 401, same body)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -140,7 +140,9 @@ async fn component_scope_enforced_identically_under_both_bases() {
         let v1 = get(&server, &format!("/v1{rel}"), token).await;
         let legacy = get(&server, &format!("/vehicle/v1{rel}"), token).await;
         assert_eq!(legacy.0, 401, "{rel}: legacy base must refuse ecu_b");
-        assert_eq!(v1.0, legacy.0, "{rel}: status differs between bases");
+        // ISO 17978-3 §5.4.4: `/v1` answers a valid-but-insufficient token
+        // with 403; the legacy tree keeps 401. The body is the same.
+        assert_eq!(v1.0, 403, "{rel}: /v1 must forbid ecu_b");
         assert_eq!(v1.1, legacy.1, "{rel}: error body differs between bases");
     }
 

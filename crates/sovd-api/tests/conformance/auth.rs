@@ -24,15 +24,24 @@ async fn docs_public_protected_resource_refused() {
 }
 
 /// ISO 17978-3 §5.4.4 / Table 16 status codes: an authenticated client whose
-/// token does not grant the addressed component is refused with 403.
+/// token does not grant the addressed component is refused with 403 and a
+/// GenericError body. The legacy tree keeps its historical 401.
 #[tokio::test]
-#[ignore = "F4: §5.4.4 — out-of-scope component answers 401, not 403"]
 async fn out_of_scope_component_is_forbidden() {
     let server = auth_server().await;
     for tree in Tree::ALL {
         let component = tree.component("ecu_b");
-        let (status, _) = get(&server, &component, Some("token-a")).await;
-        assert_eq!(status, 403, "{component}");
+        let (status, body) = get(&server, &component, Some("token-a")).await;
+        let expected = match tree {
+            Tree::V1 => 403,
+            Tree::Legacy => 401,
+        };
+        assert_eq!(status, expected, "{component}");
+        assert_eq!(
+            json(&body)["error_code"],
+            "insufficient-access-rights",
+            "{component}"
+        );
     }
 }
 
