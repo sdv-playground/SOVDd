@@ -89,7 +89,6 @@ async fn delete_during_execute_is_405() {
 /// ISO 17978-3 §7.18.9 Table 277: the registration response body carries the
 /// `id` of the update package.
 #[tokio::test]
-#[ignore = "F2: §7.18.9 Table 277 — 201 body has update_id, not id"]
 async fn registration_body_carries_id() {
     for tree in Tree::ALL {
         let server = server().await;

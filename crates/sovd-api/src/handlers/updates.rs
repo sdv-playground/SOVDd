@@ -105,6 +105,9 @@ pub struct RegisterUpdateRequest {
 
 #[derive(Debug, Serialize)]
 pub struct RegisterUpdateResponse {
+    /// §7.18.9 Table 277 `id`; same value as `update_id`.
+    pub id: String,
+    /// Pre-Table-277 name of `id`, kept for existing clients.
     pub update_id: String,
     pub href: String,
     pub bulk_data_href: String,
@@ -428,6 +431,7 @@ pub async fn register_update(
         enc(&update_id)
     );
     let resp = RegisterUpdateResponse {
+        id: update_id.clone(),
         update_id: update_id.clone(),
         href: base.clone(),
         bulk_data_href: format!("{base}/bulk-data"),
