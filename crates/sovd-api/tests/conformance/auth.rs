@@ -46,9 +46,9 @@ async fn out_of_scope_component_is_forbidden() {
 }
 
 /// ISO 17978-3 §5.4.4 (RFC 9110 §15.5.2): a 401 response carries a
-/// `WWW-Authenticate` challenge.
+/// `WWW-Authenticate` challenge; a presented but invalid token is flagged
+/// `invalid_token` (RFC 6750 §3.1).
 #[tokio::test]
-#[ignore = "F4: §5.4.4 — 401 responses carry no WWW-Authenticate"]
 async fn unauthorized_carries_www_authenticate() {
     let server = auth_server().await;
     for tree in Tree::ALL {
@@ -57,9 +57,23 @@ async fn unauthorized_carries_www_authenticate() {
             .await
             .expect("request");
         assert_eq!(resp.status().as_u16(), 401, "{component}");
-        assert!(
-            header(&resp, "www-authenticate").is_some(),
-            "{component}: no WWW-Authenticate"
+        assert_eq!(
+            header(&resp, "www-authenticate").as_deref(),
+            Some(r#"Bearer realm="sovd""#),
+            "{component}: no token"
+        );
+
+        let resp = reqwest::Client::new()
+            .get(format!("{}{component}", server.base_url()))
+            .bearer_auth("bogus")
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(resp.status().as_u16(), 401, "{component}");
+        assert_eq!(
+            header(&resp, "www-authenticate").as_deref(),
+            Some(r#"Bearer realm="sovd", error="invalid_token""#),
+            "{component}: invalid token"
         );
     }
 }

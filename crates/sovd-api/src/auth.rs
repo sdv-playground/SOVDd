@@ -16,14 +16,17 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::extract::{Request, State};
-use axum::http::{header::AUTHORIZATION, Method};
+use axum::http::{
+    header::{AUTHORIZATION, WWW_AUTHENTICATE},
+    HeaderValue, Method,
+};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
-use crate::error::ApiError;
+use crate::error::{ApiError, INVALID_TOKEN_CHALLENGE};
 use crate::state::AppState;
 use crate::Tree;
 
@@ -693,9 +696,18 @@ pub async fn require_auth(
         {
             return Err(ApiError::Forbidden(msg))
         }
-        Err(AuthError::Forbidden(msg) | AuthError::Unauthenticated(msg)) => {
-            return Err(ApiError::Unauthorized(msg))
+        Err(AuthError::Forbidden(msg)) => return Err(ApiError::Unauthorized(msg)),
+        // RFC 6750 §3.1: a presented token that failed verification is
+        // `invalid_token`; the plain challenge comes with every 401.
+        Err(AuthError::Unauthenticated(msg)) if header.is_some() => {
+            let mut resp = ApiError::Unauthorized(msg).into_response();
+            resp.headers_mut().insert(
+                WWW_AUTHENTICATE,
+                HeaderValue::from_static(INVALID_TOKEN_CHALLENGE),
+            );
+            return Ok(resp);
         }
+        Err(AuthError::Unauthenticated(msg)) => return Err(ApiError::Unauthorized(msg)),
     };
 
     req.extensions_mut().insert(ctx);

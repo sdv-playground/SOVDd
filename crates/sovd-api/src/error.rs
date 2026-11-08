@@ -8,7 +8,7 @@
 //! with a `vendor_code` and surface the underlying HTTP status via
 //! `parameters.http_code`.
 
-use axum::http::StatusCode;
+use axum::http::{header::WWW_AUTHENTICATE, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use sovd_core::error::nrc_to_status;
@@ -23,6 +23,12 @@ use sovd_core::{error_code, BackendError, GenericError};
 pub fn nrc_status(nrc: u8) -> StatusCode {
     StatusCode::from_u16(nrc_to_status(nrc)).unwrap_or(StatusCode::CONFLICT)
 }
+
+/// The `WWW-Authenticate` challenge every 401 carries (ISO 17978-3 §5.4.4,
+/// RFC 9110 §11.6.1 / RFC 6750 §3).
+const BEARER_CHALLENGE: &str = r#"Bearer realm="sovd""#;
+/// [`BEARER_CHALLENGE`] for a request whose bearer token failed verification.
+pub(crate) const INVALID_TOKEN_CHALLENGE: &str = r#"Bearer realm="sovd", error="invalid_token""#;
 
 /// API error type that converts to HTTP responses.
 ///
@@ -193,7 +199,12 @@ impl IntoResponse for ApiError {
             );
         }
 
-        (status, Json(body)).into_response()
+        let mut resp = (status, Json(body)).into_response();
+        if status == StatusCode::UNAUTHORIZED {
+            resp.headers_mut()
+                .insert(WWW_AUTHENTICATE, HeaderValue::from_static(BEARER_CHALLENGE));
+        }
+        resp
     }
 }
 
