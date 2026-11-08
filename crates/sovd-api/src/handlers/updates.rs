@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use futures::StreamExt;
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
@@ -589,12 +589,37 @@ pub async fn get_update(
 }
 
 /// DELETE /vehicle/v1/components/{component_id}/updates/{update_id}
+///
+/// Under `/v1`, §7.18.8 Table 275: an update still running in phase execute
+/// (EXECUTING, EXECUTED, COMMITTING, ROLLING_BACK) is not deletable → 405.
+/// The legacy tree deletes it (aborting the task) as before.
 pub async fn delete_update(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Response, ApiError> {
     let backend = state.get_backend(&component_id)?;
     let key = UpdateKey::new(&component_id, &update_id);
+    if tree == Tree::V1 {
+        let activation = execute_activation(&state, backend, &key, &update_id).await?;
+        let store = state.updates.0.lock();
+        let entry = store
+            .get(&key)
+            .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+        if matches!(
+            x_update_state(entry, activation),
+            XUpdateState::Executing
+                | XUpdateState::Executed
+                | XUpdateState::Committing
+                | XUpdateState::RollingBack
+        ) {
+            let err = sovd_core::GenericError::vendor(
+                "method-not-allowed",
+                format!("update {update_id} is in phase execute and cannot be deleted (§7.18.8)"),
+            );
+            return Ok((StatusCode::METHOD_NOT_ALLOWED, Json(err)).into_response());
+        }
+    }
     let (registration_token, transfer_id, abort_handle) = {
         let store = state.updates.0.lock();
         let entry = store
@@ -613,7 +638,7 @@ pub async fn delete_update(
         let _ = backend.abort_flash(&tid).await;
     }
     remove_registration(&state, &key, registration_token);
-    Ok(StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 // ---------------------------------------------------------------------------

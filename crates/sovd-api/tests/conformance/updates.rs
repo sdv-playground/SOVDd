@@ -56,9 +56,8 @@ async fn lifecycle_happy_path() {
 }
 
 /// ISO 17978-3 §7.18.8 Table 275: deleting an update package that is in
-/// phase execute answers 405.
+/// phase execute answers 405 under `/v1`; the legacy tree keeps 204.
 #[tokio::test]
-#[ignore = "F1: §7.18.8 — DELETE during the execute phase is accepted (204), not 405"]
 async fn delete_during_execute_is_405() {
     for tree in Tree::ALL {
         let server = server().await;
@@ -82,7 +81,15 @@ async fn delete_during_execute_is_405() {
         assert_eq!(body["phase"], "execute", "{update}: {body}");
 
         let resp = send(&server, Method::DELETE, &update, &[], None).await;
-        assert_eq!(resp.status().as_u16(), 405, "DELETE {update} in execute");
+        let expected = match tree {
+            Tree::V1 => 405,
+            Tree::Legacy => 204,
+        };
+        assert_eq!(
+            resp.status().as_u16(),
+            expected,
+            "DELETE {update} in execute"
+        );
     }
 }
 

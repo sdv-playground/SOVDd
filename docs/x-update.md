@@ -96,7 +96,9 @@ Served by the embedding machine manager, not by this crate.
 
 Once an update has settled (COMMITTED, ROLLED_BACK or FAILED), the client removes it with the
 standard `DELETE {entity}/updates/{update_id}`; before `execute`, the same `DELETE` discards a
-prepared update. There is no finish verb.
+prepared update. There is no finish verb. Under `/v1`, a `DELETE` while the update is still
+running in phase execute (EXECUTING, EXECUTED, COMMITTING, ROLLING_BACK) answers 405
+(ISO 17978-3 §7.18.8); `/vehicle/v1` deletes it, aborting the running step.
 
 ## Status member
 
