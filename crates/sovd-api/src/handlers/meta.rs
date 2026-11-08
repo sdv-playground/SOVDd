@@ -358,6 +358,38 @@ const PATHS: &[PathEntry] = &[
         path: "/components/{component_id}/updates/{update_id}/bulk-data/{part_id}",
         summary: "Upload a part (manifest or detached payload). 201 + ETag.",
     },
+    // Node-level updates (§7.18.1.1) — alias of the per-component collection;
+    // a registration names its component in `target`.
+    PathEntry {
+        method: "GET",
+        path: "/updates",
+        summary: "List available SW updates (§7.13).",
+    },
+    PathEntry {
+        method: "POST",
+        path: "/updates",
+        summary: "Register a new SW update — 201 + Location.",
+    },
+    PathEntry {
+        method: "GET",
+        path: "/updates/{update_id}",
+        summary: "Update status (state, parts, manifest).",
+    },
+    PathEntry {
+        method: "DELETE",
+        path: "/updates/{update_id}",
+        summary: "Abort update and discard staging — 204.",
+    },
+    PathEntry {
+        method: "GET",
+        path: "/updates/{update_id}/bulk-data",
+        summary: "List uploaded parts.",
+    },
+    PathEntry {
+        method: "PUT",
+        path: "/updates/{update_id}/bulk-data/{part_id}",
+        summary: "Upload a part (manifest or detached payload). 201 + ETag.",
+    },
     // logs (§7.21)
     PathEntry {
         method: "GET",

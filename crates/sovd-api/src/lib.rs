@@ -643,6 +643,59 @@ fn api_routes(tree: Tree) -> Router<AppState> {
             &format!("{}{}", tree.base(), "/components/{component_id}/x-ota-force-rollback"),
             put(handlers::updates::put_x_ota_force_rollback),
         )
+        // Node-level `/updates` collection — ISO 17978-3 §7.18.1.1 names the
+        // server root its primary location. Aliases the per-component
+        // collections above (registration names its component in `target`);
+        // no `x-ota-force-rollback`, which is component-rooted. See
+        // docs/x-update.md "Node-level collection".
+        .route(
+            &format!("{}{}", tree.base(), "/updates"),
+            post(handlers::updates::register_node_update).get(handlers::updates::list_node_updates),
+        )
+        .route(
+            &format!("{}{}", tree.base(), "/updates/{update_id}"),
+            get(handlers::updates::get_node_update).delete(handlers::updates::delete_node_update),
+        )
+        .route(
+            &format!("{}{}", tree.base(), "/updates/{update_id}/bulk-data"),
+            get(handlers::updates::list_node_bulk_data),
+        )
+        .route(
+            &format!("{}{}", tree.base(), "/updates/{update_id}/bulk-data/{part_id}"),
+            put(handlers::updates::put_node_bulk_data_part),
+        )
+        .route(
+            &format!("{}{}", tree.base(), "/updates/{update_id}/prepare"),
+            put(handlers::updates::put_node_prepare),
+        )
+        .route(
+            &format!("{}{}", tree.base(), "/updates/{update_id}/execute"),
+            put(handlers::updates::put_node_execute),
+        )
+        .route(
+            &format!("{}{}", tree.base(), "/updates/{update_id}/automated"),
+            put(handlers::updates::put_node_automated),
+        )
+        .route(
+            &format!("{}{}", tree.base(), "/updates/{update_id}/status"),
+            get(handlers::updates::get_node_status),
+        )
+        .route(
+            &format!("{}{}", tree.base(), "/updates/{update_id}/x-ota-commit"),
+            put(handlers::updates::put_node_x_ota_commit),
+        )
+        .route(
+            &format!("{}{}", tree.base(), "/updates/{update_id}/x-ota-rollback"),
+            put(handlers::updates::put_node_x_ota_rollback),
+        )
+        .route(
+            &format!("{}{}", tree.base(), "/updates/{update_id}/x-update-commit"),
+            put(handlers::updates::put_node_x_update_commit),
+        )
+        .route(
+            &format!("{}{}", tree.base(), "/updates/{update_id}/x-update-rollback"),
+            put(handlers::updates::put_node_x_update_rollback),
+        )
         .layer(axum::Extension(tree))
 }
 

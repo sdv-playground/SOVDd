@@ -19,8 +19,10 @@ pub struct RootCapabilityResponse {
     /// C4: present only when the components collection is not empty.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub components: Option<String>,
-    // A1: `updates: "{base}/updates"` goes here once a root-level updates
-    // collection exists.
+    /// §7.18.1.1: the server-root `updates` collection, present when at
+    /// least one component accepts software updates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updates: Option<String>,
     /// Vendor extension: the components that accept software updates.
     #[serde(rename = "x-update")]
     pub x_update: XUpdateRoot,
@@ -45,6 +47,10 @@ pub async fn get_root(
 ) -> Json<RootCapabilityResponse> {
     let client = client.map(|Extension(c)| c);
     let backends = state.backends();
+    let updates = backends
+        .values()
+        .any(|backend| backend.capabilities().software_update)
+        .then(|| format!("{}/updates", tree.base()));
     let mut update_targets: Vec<String> = backends
         .iter()
         .filter(|(id, backend)| {
@@ -61,6 +67,7 @@ pub async fn get_root(
         id: "sovd-server".to_string(),
         name: "SOVDd".to_string(),
         components: (!backends.is_empty()).then(|| format!("{}/components", tree.base())),
+        updates,
         x_update: XUpdateRoot { update_targets },
     })
 }

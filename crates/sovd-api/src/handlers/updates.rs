@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use futures::StreamExt;
@@ -37,6 +37,7 @@ use sovd_core::{
 };
 use uuid::Uuid;
 
+use crate::auth::ClientContext;
 use crate::error::ApiError;
 use crate::state::{AppState, Phase, Status, UpdateKey, UpdatePart, UpdateState, UpdatesEntry};
 use crate::Tree;
@@ -68,6 +69,27 @@ fn enc(segment: &str) -> String {
     utf8_percent_encode(segment, ID_SEGMENT_ENCODE).to_string()
 }
 
+/// The `/updates` collection a request came in on. The hrefs and Locations a
+/// handler emits are rooted at it, so a client can follow them on the
+/// collection it uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdatePath {
+    /// `{base}/components/{component_id}/updates`.
+    Component,
+    /// `{base}/updates`, the node-level alias (see [`register_node_update`]).
+    Node,
+}
+
+impl UpdatePath {
+    /// The collection's URL for an update on `component_id` under `tree`.
+    fn collection(self, tree: Tree, component_id: &str) -> String {
+        match self {
+            Self::Component => format!("{}/updates", tree.component(component_id)),
+            Self::Node => format!("{}/updates", tree.base()),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Wire types
 // ---------------------------------------------------------------------------
@@ -95,7 +117,9 @@ pub struct RegisterUpdateRequest {
     /// Optional component id the manifest is addressed to.  When
     /// present, MUST match the path's `{component_id}` — otherwise the
     /// server returns 415 Unsupported Media Type before allocating an
-    /// update_id.  Absent means "trust the path" (F.D2 behaviour).
+    /// update_id.  Absent means "trust the path" (F.D2 behaviour).  On the
+    /// node-level collection (`POST {base}/updates`) it is required and
+    /// names the component to register on.
     #[serde(default)]
     pub target: Option<String>,
     /// Pass-through register document.  The §7.18.3 descriptor default impl
@@ -159,6 +183,33 @@ pub struct XUpdateStatus {
     pub state: XUpdateState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reset_kind: Option<XUpdateResetKind>,
+    /// The component the update is registered on (`/v1` only, see
+    /// [`x_update_target`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+/// Body of `GET /updates/{id}`: the §7.18.3 Table 261 descriptor plus, under
+/// `/v1`, the `x-update` vendor member naming the update's component.
+#[derive(Debug, Serialize)]
+pub struct UpdateDetail {
+    #[serde(flatten)]
+    pub descriptor: UpdatePackageDescriptor,
+    #[serde(rename = "x-update", skip_serializing_if = "Option::is_none")]
+    pub x_update: Option<XUpdateTarget>,
+}
+
+/// `x-update` member of [`UpdateDetail`].
+#[derive(Debug, Serialize)]
+pub struct XUpdateTarget {
+    pub target: String,
+}
+
+/// `x-update.target`: the component an update is registered on, which a
+/// node-level client cannot read from the URL. Served under `/v1` only; the
+/// legacy tree keeps its bodies as they were.
+fn x_update_target(tree: Tree, component_id: &str) -> Option<String> {
+    (tree == Tree::V1).then(|| component_id.to_string())
 }
 
 /// Verb-named lifecycle state carried in `x-update.state`.
@@ -271,10 +322,21 @@ pub async fn register_update(
     Path(component_id): Path<String>,
     body: Option<Json<RegisterUpdateRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    register(state, tree, component_id, req, UpdatePath::Component).await
+}
+
+/// Register `req` on `component_id`. On the node-level collection (`at`) the
+/// id must be free on every component, not only on this one.
+async fn register(
+    state: AppState,
+    tree: Tree,
+    component_id: String,
+    req: RegisterUpdateRequest,
+    at: UpdatePath,
+) -> Result<(StatusCode, HeaderMap, Json<RegisterUpdateResponse>), ApiError> {
     // Verify the component exists before allocating an id.
     let backend = state.get_backend(&component_id)?;
-
-    let req = body.map(|Json(b)| b).unwrap_or_default();
 
     // F.D3 dispatcher target validation.  If the manifest carries an
     // explicit `target`, it MUST match the addressed component.  We
@@ -321,6 +383,11 @@ pub async fn register_update(
     // holding the same lock so a concurrent registration sees the reservation.
     let prior = {
         let mut store = state.updates.0.lock();
+        if at == UpdatePath::Node {
+            if let Some(owner) = store.keys().find(|k| k.update_id() == update_id) {
+                return Err(duplicate_node_id(&update_id, owner.component_id()));
+            }
+        }
         let prior = if let Some(entry) = store.get(&key) {
             let terminal = matches!(
                 entry.state,
@@ -445,11 +512,7 @@ pub async fn register_update(
         )));
     }
 
-    let base = format!(
-        "{}/updates/{}",
-        tree.component(&component_id),
-        enc(&update_id)
-    );
+    let base = format!("{}/{}", at.collection(tree, &component_id), enc(&update_id));
     let resp = RegisterUpdateResponse {
         id: update_id.clone(),
         update_id: update_id.clone(),
@@ -544,8 +607,9 @@ pub async fn list_updates(
 /// Table 261 detail body, resolved via the backend's package describer.
 pub async fn get_update(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
-) -> Result<Json<UpdatePackageDescriptor>, ApiError> {
+) -> Result<Json<UpdateDetail>, ApiError> {
     let backend = state.get_backend(&component_id)?;
 
     // §7.18.1.5: `autonomous` is a read-only indirection to a concrete id on
@@ -571,7 +635,10 @@ pub async fn get_update(
         // Not registered here, but possibly held by the executor (e.g. after
         // a server restart): describe it from what the executor reports.
         let held = held_update(backend, &update_id).await?;
-        return Ok(Json(held_descriptor(&component_id, &held)));
+        return Ok(Json(UpdateDetail {
+            descriptor: held_descriptor(&component_id, &held),
+            x_update: x_update_target(tree, &component_id).map(|target| XUpdateTarget { target }),
+        }));
     };
 
     let part_refs: Vec<UpdatePartRef<'_>> = parts
@@ -590,7 +657,10 @@ pub async fn get_update(
         parts: &part_refs,
     };
     let descriptor = backend.describe_update_package(&ctx).await?;
-    Ok(Json(descriptor))
+    Ok(Json(UpdateDetail {
+        descriptor,
+        x_update: x_update_target(tree, &component_id).map(|target| XUpdateTarget { target }),
+    }))
 }
 
 /// DELETE /vehicle/v1/components/{component_id}/updates/{update_id}
@@ -655,12 +725,13 @@ pub async fn delete_update(
 /// Common 202-response shape for all three lifecycle PUTs.
 fn accepted_with_status_location(
     tree: Tree,
+    at: UpdatePath,
     component_id: &str,
     update_id: &str,
 ) -> Result<(StatusCode, HeaderMap), ApiError> {
     let location = format!(
-        "{}/updates/{}/status",
-        tree.component(component_id),
+        "{}/{}/status",
+        at.collection(tree, component_id),
         enc(update_id)
     );
     let mut headers = HeaderMap::new();
@@ -704,12 +775,21 @@ pub async fn put_prepare(
     Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    put_prepare_inner(state, tree, component_id, update_id, None).await
+    put_prepare_inner(
+        state,
+        tree,
+        UpdatePath::Component,
+        component_id,
+        update_id,
+        None,
+    )
+    .await
 }
 
 async fn put_prepare_inner(
     state: AppState,
     tree: Tree,
+    at: UpdatePath,
     component_id: String,
     update_id: String,
     expected_token: Option<Uuid>,
@@ -886,7 +966,7 @@ async fn put_prepare_inner(
         }
     }
 
-    let (status, headers) = accepted_with_status_location(tree, &component_id, &update_id)?;
+    let (status, headers) = accepted_with_status_location(tree, at, &component_id, &update_id)?;
     Ok((status, headers))
 }
 
@@ -901,12 +981,22 @@ pub async fn put_execute(
     Path((component_id, update_id)): Path<(String, String)>,
     Query(query): Query<ExecuteQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    put_execute_inner(state, tree, component_id, update_id, query, None).await
+    put_execute_inner(
+        state,
+        tree,
+        UpdatePath::Component,
+        component_id,
+        update_id,
+        query,
+        None,
+    )
+    .await
 }
 
 async fn put_execute_inner(
     state: AppState,
     tree: Tree,
+    at: UpdatePath,
     component_id: String,
     update_id: String,
     query: ExecuteQuery,
@@ -1229,7 +1319,7 @@ async fn put_execute_inner(
         }
     }
 
-    let (status, headers) = accepted_with_status_location(tree, &component_id, &update_id)?;
+    let (status, headers) = accepted_with_status_location(tree, at, &component_id, &update_id)?;
     Ok((status, headers))
 }
 
@@ -1243,6 +1333,16 @@ pub async fn put_automated(
     Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
+    automated(state, tree, UpdatePath::Component, component_id, update_id).await
+}
+
+async fn automated(
+    state: AppState,
+    tree: Tree,
+    at: UpdatePath,
+    component_id: String,
+    update_id: String,
+) -> Result<Response, ApiError> {
     let key = UpdateKey::new(&component_id, &update_id);
     // Phase A: only block if the package declared automated=false in
     // its registration manifest.  Default true unless explicitly
@@ -1273,6 +1373,7 @@ pub async fn put_automated(
     let prepare_resp = put_prepare_inner(
         state.clone(),
         tree,
+        at,
         component_id.clone(),
         update_id.clone(),
         Some(registration_token),
@@ -1317,6 +1418,7 @@ pub async fn put_automated(
         let _ = put_execute_inner(
             task_state,
             tree,
+            at,
             task_component_id,
             task_update_id,
             ExecuteQuery::default(),
@@ -1325,7 +1427,7 @@ pub async fn put_automated(
         .await;
     });
 
-    let (status, headers) = accepted_with_status_location(tree, &component_id, &update_id)?;
+    let (status, headers) = accepted_with_status_location(tree, at, &component_id, &update_id)?;
     Ok((status, headers).into_response())
 }
 
@@ -1341,8 +1443,25 @@ pub async fn put_x_ota_commit(
     Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    refuse_node_verdict(&state, tree, &component_id, Some(&update_id))?;
-    verdict_commit(&state, tree, &component_id, &update_id).await
+    x_ota_commit(
+        &state,
+        tree,
+        UpdatePath::Component,
+        &component_id,
+        &update_id,
+    )
+    .await
+}
+
+async fn x_ota_commit(
+    state: &AppState,
+    tree: Tree,
+    at: UpdatePath,
+    component_id: &str,
+    update_id: &str,
+) -> Result<(StatusCode, HeaderMap), ApiError> {
+    refuse_node_verdict(state, tree, component_id, Some(update_id))?;
+    verdict_commit(state, tree, at, component_id, update_id).await
 }
 
 /// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-ota-rollback`
@@ -1353,8 +1472,24 @@ pub async fn put_x_ota_rollback(
     Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    refuse_node_verdict(&state, tree, &component_id, Some(&update_id))?;
-    verdict_rollback(&state, tree, &component_id, &update_id)
+    x_ota_rollback(
+        &state,
+        tree,
+        UpdatePath::Component,
+        &component_id,
+        &update_id,
+    )
+}
+
+fn x_ota_rollback(
+    state: &AppState,
+    tree: Tree,
+    at: UpdatePath,
+    component_id: &str,
+    update_id: &str,
+) -> Result<(StatusCode, HeaderMap), ApiError> {
+    refuse_node_verdict(state, tree, component_id, Some(update_id))?;
+    verdict_rollback(state, tree, at, component_id, update_id)
 }
 
 /// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-update-commit`
@@ -1367,11 +1502,28 @@ pub async fn put_x_update_commit(
     Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    refuse_node_verdict(&state, tree, &component_id, Some(&update_id))?;
-    if settled_as(&state, &component_id, &update_id, XUpdateState::Committed).await? {
-        return accepted_with_status_location(tree, &component_id, &update_id);
+    x_update_commit(
+        &state,
+        tree,
+        UpdatePath::Component,
+        &component_id,
+        &update_id,
+    )
+    .await
+}
+
+async fn x_update_commit(
+    state: &AppState,
+    tree: Tree,
+    at: UpdatePath,
+    component_id: &str,
+    update_id: &str,
+) -> Result<(StatusCode, HeaderMap), ApiError> {
+    refuse_node_verdict(state, tree, component_id, Some(update_id))?;
+    if settled_as(state, component_id, update_id, XUpdateState::Committed).await? {
+        return accepted_with_status_location(tree, at, component_id, update_id);
     }
-    verdict_commit(&state, tree, &component_id, &update_id).await
+    verdict_commit(state, tree, at, component_id, update_id).await
 }
 
 /// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-update-rollback`
@@ -1384,11 +1536,28 @@ pub async fn put_x_update_rollback(
     Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    refuse_node_verdict(&state, tree, &component_id, Some(&update_id))?;
-    if settled_as(&state, &component_id, &update_id, XUpdateState::RolledBack).await? {
-        return accepted_with_status_location(tree, &component_id, &update_id);
+    x_update_rollback(
+        &state,
+        tree,
+        UpdatePath::Component,
+        &component_id,
+        &update_id,
+    )
+    .await
+}
+
+async fn x_update_rollback(
+    state: &AppState,
+    tree: Tree,
+    at: UpdatePath,
+    component_id: &str,
+    update_id: &str,
+) -> Result<(StatusCode, HeaderMap), ApiError> {
+    refuse_node_verdict(state, tree, component_id, Some(update_id))?;
+    if settled_as(state, component_id, update_id, XUpdateState::RolledBack).await? {
+        return accepted_with_status_location(tree, at, component_id, update_id);
     }
-    verdict_rollback(&state, tree, &component_id, &update_id)
+    verdict_rollback(state, tree, at, component_id, update_id)
 }
 
 /// Under `/v1`, refuse a per-update verdict (or a force-rollback, `update_id`
@@ -1441,6 +1610,7 @@ async fn settled_as(
 async fn verdict_commit(
     state: &AppState,
     tree: Tree,
+    at: UpdatePath,
     component_id: &str,
     update_id: &str,
 ) -> Result<(StatusCode, HeaderMap), ApiError> {
@@ -1461,7 +1631,7 @@ async fn verdict_commit(
         registration_token,
         crate::state::Verdict::Commit,
     )?;
-    accepted_with_status_location(tree, component_id, update_id)
+    accepted_with_status_location(tree, at, component_id, update_id)
 }
 
 /// Rollback verdict: no activation check — rolling back is always allowed
@@ -1469,6 +1639,7 @@ async fn verdict_commit(
 fn verdict_rollback(
     state: &AppState,
     tree: Tree,
+    at: UpdatePath,
     component_id: &str,
     update_id: &str,
 ) -> Result<(StatusCode, HeaderMap), ApiError> {
@@ -1480,7 +1651,7 @@ fn verdict_rollback(
         registration_token,
         crate::state::Verdict::Rollback,
     )?;
-    accepted_with_status_location(tree, component_id, update_id)
+    accepted_with_status_location(tree, at, component_id, update_id)
 }
 
 /// `PUT /vehicle/v1/components/{component_id}/x-ota-force-rollback`
@@ -1587,7 +1758,8 @@ pub async fn get_status(
             .await
             .ok()
             .map(|a| a.reset_kind);
-        return Ok(Json(held_status(&held.state, reset_kind)));
+        let target = x_update_target(tree, &component_id);
+        return Ok(Json(held_status(target, &held.state, reset_kind)));
     }
     let activation = execute_activation(&state, backend, &key, &update_id).await?;
     let store = state.updates.0.lock();
@@ -1609,6 +1781,7 @@ pub async fn get_status(
         x_update: Some(XUpdateStatus {
             state: x_update_state(entry, activation).for_tree(tree),
             reset_kind: entry.reset_kind.map(Into::into),
+            target: x_update_target(tree, &component_id),
         }),
     }))
 }
@@ -1680,6 +1853,16 @@ pub async fn list_bulk_data(
     Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<Json<BulkDataListResponse>, ApiError> {
+    bulk_data_list(state, tree, UpdatePath::Component, component_id, update_id).await
+}
+
+async fn bulk_data_list(
+    state: AppState,
+    tree: Tree,
+    at: UpdatePath,
+    component_id: String,
+    update_id: String,
+) -> Result<Json<BulkDataListResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
     let parts: Option<Vec<UpdatePart>> = state
         .updates
@@ -1730,7 +1913,7 @@ pub async fn list_bulk_data(
     let items: Vec<PartStatusEntry> = parts
         .iter()
         .map(|p| {
-            let mut item = part_status_entry(tree, &component_id, &update_id, p);
+            let mut item = part_status_entry(tree, at, &component_id, &update_id, p);
             item.present = held_names
                 .iter()
                 .any(|name| held_part_matches(&p.part_id, name));
@@ -1748,6 +1931,25 @@ pub async fn put_bulk_data_part(
     headers: HeaderMap,
     body: Body,
 ) -> Result<impl IntoResponse, ApiError> {
+    bulk_data_part(
+        state,
+        tree,
+        UpdatePath::Component,
+        (component_id, update_id, part_id),
+        headers,
+        body,
+    )
+    .await
+}
+
+async fn bulk_data_part(
+    state: AppState,
+    tree: Tree,
+    at: UpdatePath,
+    (component_id, update_id, part_id): (String, String, String),
+    headers: HeaderMap,
+    body: Body,
+) -> Result<(StatusCode, HeaderMap, Json<PartUploadResponse>), ApiError> {
     let backend = state.get_backend(&component_id)?;
     let key = UpdateKey::new(&component_id, &update_id);
     let registration_token = {
@@ -1849,8 +2051,8 @@ pub async fn put_bulk_data_part(
     }
 
     let href = format!(
-        "{}/updates/{}/bulk-data/{}",
-        tree.component(&component_id),
+        "{}/{}/bulk-data/{}",
+        at.collection(tree, &component_id),
         enc(&update_id),
         enc(&part_id)
     );
@@ -1870,6 +2072,317 @@ pub async fn put_bulk_data_part(
 }
 
 // ---------------------------------------------------------------------------
+// Node-level collection: `{base}/updates` (ISO 17978-3 §7.18.1.1 names the
+// server root the primary location). An alias of the per-component
+// collections: a registration names its component in `target`, every other
+// verb resolves the component from the update id and runs the per-component
+// handler, with the URLs it emits rooted at `{base}/updates`. See
+// `docs/x-update.md` "Node-level collection".
+// ---------------------------------------------------------------------------
+
+/// `POST {base}/updates` — register on the component named by `target`, one
+/// of the root document's `x-update.update-targets`. The id must be free on
+/// every component (409 otherwise).
+pub async fn register_node_update(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    body: Option<Json<RegisterUpdateRequest>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let target = match req.target.as_deref() {
+        None => {
+            return Err(ApiError::BadRequest(
+                "a registration on the node-level collection names its component in `target`"
+                    .into(),
+            ))
+        }
+        Some(target) if !update_targets(&state).iter().any(|(id, _)| *id == target) => {
+            return Err(ApiError::BadRequest(format!(
+                "target {target:?} is not one of x-update.update-targets"
+            )))
+        }
+        Some(target) => target.to_string(),
+    };
+    authorize_component(tree, client.as_deref(), &target)?;
+    // Ids the executors hold count as taken; the store is checked under its
+    // lock at insertion.
+    if let Some(id) = req.id.as_deref() {
+        for (owner, backend) in update_targets(&state) {
+            if held_updates(backend).await?.iter().any(|h| h.id == id) {
+                return Err(duplicate_node_id(id, owner));
+            }
+        }
+    }
+    register(state, tree, target, req, UpdatePath::Node).await
+}
+
+/// `GET {base}/updates` — the update ids of every update target the client
+/// may access, registered or held; same `origin` gate as [`list_updates`].
+pub async fn list_node_updates(
+    State(state): State<AppState>,
+    client: Option<Extension<ClientContext>>,
+    Query(query): Query<ListUpdatesQuery>,
+) -> Result<Json<UpdatesListResponse>, ApiError> {
+    if !origin_lists_catalog(query.origin.as_deref())? {
+        return Ok(Json(UpdatesListResponse { items: Vec::new() }));
+    }
+    let client = client.as_deref();
+    let targets: Vec<_> = update_targets(&state)
+        .into_iter()
+        .filter(|(id, _)| client.is_none_or(|c| c.can_access_component(id)))
+        .collect();
+    let mut items: Vec<String> = state
+        .updates
+        .0
+        .lock()
+        .keys()
+        .filter(|key| targets.iter().any(|(id, _)| *id == key.component_id()))
+        .map(|key| key.update_id().to_string())
+        .collect();
+    for (_, backend) in &targets {
+        items.extend(held_updates(backend).await?.into_iter().map(|h| h.id));
+    }
+    items.sort();
+    items.dedup();
+    Ok(Json(UpdatesListResponse { items }))
+}
+
+/// `GET {base}/updates/{update_id}`.
+pub async fn get_node_update(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<Json<UpdateDetail>, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    get_update(State(state), Extension(tree), Path((owner, update_id))).await
+}
+
+/// `DELETE {base}/updates/{update_id}`.
+pub async fn delete_node_update(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    delete_update(State(state), Extension(tree), Path((owner, update_id))).await
+}
+
+/// `GET {base}/updates/{update_id}/status`.
+pub async fn get_node_status(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<Json<UpdateStatusBody>, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    get_status(State(state), Extension(tree), Path((owner, update_id))).await
+}
+
+/// `GET {base}/updates/{update_id}/bulk-data`.
+pub async fn list_node_bulk_data(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<Json<BulkDataListResponse>, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    bulk_data_list(state, tree, UpdatePath::Node, owner, update_id).await
+}
+
+/// `PUT {base}/updates/{update_id}/bulk-data/{part_id}`.
+pub async fn put_node_bulk_data_part(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path((update_id, part_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    let path = (owner, update_id, part_id);
+    bulk_data_part(state, tree, UpdatePath::Node, path, headers, body).await
+}
+
+/// `PUT {base}/updates/{update_id}/prepare`.
+pub async fn put_node_prepare(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    put_prepare_inner(state, tree, UpdatePath::Node, owner, update_id, None).await
+}
+
+/// `PUT {base}/updates/{update_id}/execute`.
+pub async fn put_node_execute(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+    Query(query): Query<ExecuteQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    put_execute_inner(state, tree, UpdatePath::Node, owner, update_id, query, None).await
+}
+
+/// `PUT {base}/updates/{update_id}/automated`.
+pub async fn put_node_automated(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    automated(state, tree, UpdatePath::Node, owner, update_id).await
+}
+
+/// `PUT {base}/updates/{update_id}/x-ota-commit`.
+pub async fn put_node_x_ota_commit(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    x_ota_commit(&state, tree, UpdatePath::Node, &owner, &update_id).await
+}
+
+/// `PUT {base}/updates/{update_id}/x-ota-rollback`.
+pub async fn put_node_x_ota_rollback(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    x_ota_rollback(&state, tree, UpdatePath::Node, &owner, &update_id)
+}
+
+/// `PUT {base}/updates/{update_id}/x-update-commit`.
+pub async fn put_node_x_update_commit(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    x_update_commit(&state, tree, UpdatePath::Node, &owner, &update_id).await
+}
+
+/// `PUT {base}/updates/{update_id}/x-update-rollback`.
+pub async fn put_node_x_update_rollback(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    x_update_rollback(&state, tree, UpdatePath::Node, &owner, &update_id).await
+}
+
+/// The components whose backend supports software update (the root
+/// document's `x-update.update-targets`), sorted by id.
+fn update_targets(state: &AppState) -> Vec<(&str, &Arc<dyn sovd_core::DiagnosticBackend>)> {
+    let mut targets: Vec<_> = state
+        .backends()
+        .iter()
+        .filter(|(_, backend)| backend.capabilities().software_update)
+        .map(|(id, backend)| (id.as_str(), backend))
+        .collect();
+    targets.sort_by_key(|(id, _)| *id);
+    targets
+}
+
+/// The component a node-level `{base}/updates/{update_id}/…` request
+/// addresses: the one that has the update registered or, failing that, whose
+/// executor holds it. The client's component scope is then checked as for a
+/// component-addressed route.
+async fn node_owner(
+    state: &AppState,
+    tree: Tree,
+    client: Option<&ClientContext>,
+    uri: &Uri,
+    update_id: &str,
+) -> Result<String, ApiError> {
+    let mut owners: Vec<String> = state
+        .updates
+        .0
+        .lock()
+        .keys()
+        .filter(|key| key.update_id() == update_id)
+        .map(|key| key.component_id().to_string())
+        .collect();
+    if owners.is_empty() {
+        for (id, backend) in update_targets(state) {
+            if held_updates(backend)
+                .await?
+                .iter()
+                .any(|h| h.id == update_id)
+            {
+                owners.push(id.to_string());
+            }
+        }
+    }
+    owners.sort();
+    match owners.as_slice() {
+        [] => Err(ApiError::NotFound(format!("No resource at {}", uri.path()))),
+        [owner] => {
+            authorize_component(tree, client, owner)?;
+            Ok(owner.clone())
+        }
+        _ => Err(ApiError::Conflict(format!(
+            "update id '{update_id}' is registered on several components ({}); \
+             use the entity-level collection",
+            owners.join(", ")
+        ))),
+    }
+}
+
+/// The component-scope check the auth middleware makes on a
+/// component-addressed route (C-031), for a node-level route whose component
+/// is known only from the request: 403 under `/v1`, the legacy tree's 401.
+fn authorize_component(
+    tree: Tree,
+    client: Option<&ClientContext>,
+    component_id: &str,
+) -> Result<(), ApiError> {
+    match client {
+        Some(ctx) if !ctx.can_access_component(component_id) => {
+            let msg = format!("client not authorized for component '{component_id}'");
+            Err(match tree {
+                Tree::V1 => ApiError::Forbidden(msg),
+                Tree::Legacy => ApiError::Unauthorized(msg),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// 409 for a node-level registration whose id is taken on `owner`.
+fn duplicate_node_id(update_id: &str, owner: &str) -> ApiError {
+    ApiError::UpdateInProgress(format!(
+        "update package {update_id:?} is already registered on {owner:?}; \
+         ids are unique across the node-level collection"
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1885,6 +2398,7 @@ fn remove_registration(state: &AppState, key: &UpdateKey, registration_token: Uu
 
 fn part_status_entry(
     tree: Tree,
+    at: UpdatePath,
     component_id: &str,
     update_id: &str,
     p: &UpdatePart,
@@ -1894,8 +2408,8 @@ fn part_status_entry(
         size: p.size,
         sha256: p.sha256.clone(),
         href: Some(format!(
-            "{}/updates/{}/bulk-data/{}",
-            tree.component(component_id),
+            "{}/{}/bulk-data/{}",
+            at.collection(tree, component_id),
             enc(update_id),
             enc(&p.part_id)
         )),
@@ -1954,7 +2468,11 @@ fn held_descriptor(component_id: &str, held: &HeldUpdate) -> UpdatePackageDescri
 }
 
 /// Table 270 status of a held update, from the executor's held state.
-fn held_status(state: &HeldState, reset_kind: Option<sovd_core::ResetKind>) -> UpdateStatusBody {
+fn held_status(
+    target: Option<String>,
+    state: &HeldState,
+    reset_kind: Option<sovd_core::ResetKind>,
+) -> UpdateStatusBody {
     let (phase, status, x_state) = match state {
         HeldState::Preparing => (Phase::Prepare, Status::InProgress, XUpdateState::Preparing),
         HeldState::Prepared => (Phase::Prepare, Status::Completed, XUpdateState::Prepared),
@@ -1972,6 +2490,7 @@ fn held_status(state: &HeldState, reset_kind: Option<sovd_core::ResetKind>) -> U
         x_update: Some(XUpdateStatus {
             state: x_state,
             reset_kind: reset_kind.map(Into::into),
+            target,
         }),
     }
 }
@@ -2047,6 +2566,7 @@ mod tests {
             x_update: Some(XUpdateStatus {
                 state: XUpdateState::RolledBack,
                 reset_kind: Some(sovd_core::ResetKind::RequiresEcuReset.into()),
+                target: None,
             }),
         };
         let json = serde_json::to_string(&body).unwrap();
