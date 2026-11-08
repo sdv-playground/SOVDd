@@ -111,7 +111,7 @@ The states are named after the verbs that lead to them. The state is total, and 
 
 | state | phase | status | meaning |
 |---|---|---|---|
-| READY | prepare | pending | registered; manifest and parts may be uploaded; `prepare` may be sent |
+| REGISTERED (`/v1`), READY (`/vehicle/v1`) | prepare | pending | registered; manifest and parts may be uploaded; `prepare` may be sent |
 | PREPARING | prepare | inProgress | verifying and staging |
 | PREPARED | prepare | completed | staged in the inactive bank; `execute` or `DELETE` |
 | EXECUTING | execute | inProgress | armed; the restart named by `reset_kind` has not been observed yet |

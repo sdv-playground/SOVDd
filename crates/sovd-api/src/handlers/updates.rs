@@ -163,7 +163,11 @@ pub struct XUpdateStatus {
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum XUpdateState {
+    /// Legacy-tree name of the registered state; `/v1` renders it as
+    /// [`XUpdateState::Registered`] (see [`XUpdateState::for_tree`]).
     Ready,
+    /// `/v1` name of the registered state. Never derived, only rendered.
+    Registered,
     Preparing,
     Prepared,
     Executing,
@@ -173,6 +177,17 @@ pub enum XUpdateState {
     RollingBack,
     RolledBack,
     Failed,
+}
+
+impl XUpdateState {
+    /// The state as rendered under `tree`: `/v1` names the registered state
+    /// `REGISTERED`, the legacy tree keeps `READY`.
+    fn for_tree(self, tree: Tree) -> Self {
+        match (tree, self) {
+            (Tree::V1, Self::Ready) => Self::Registered,
+            (_, state) => state,
+        }
+    }
 }
 
 /// `x-update.reset_kind`: what has to restart for the update to take effect.
@@ -1530,6 +1545,7 @@ fn claim_verdict(
 /// — ISO 17978-3 §7.18.7.  Returns Table 270's `UpdateStatusBody`.
 pub async fn get_status(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<Json<UpdateStatusBody>, ApiError> {
     let backend = state.get_backend(&component_id)?;
@@ -1561,7 +1577,7 @@ pub async fn get_status(
         substate: entry.substate,
         reset_kind: entry.reset_kind,
         x_update: Some(XUpdateStatus {
-            state: x_update_state(entry, activation),
+            state: x_update_state(entry, activation).for_tree(tree),
             reset_kind: entry.reset_kind.map(Into::into),
         }),
     }))

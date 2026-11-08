@@ -117,9 +117,8 @@ async fn registration_without_id_gets_server_id() {
 }
 
 /// docs/x-update.md (status member): a freshly registered update reports
-/// `x-update.state` `REGISTERED`.
+/// `x-update.state` `REGISTERED` under `/v1`; the legacy tree keeps `READY`.
 #[tokio::test]
-#[ignore = "A3: docs/x-update.md — x-update.state after registration is READY, not REGISTERED"]
 async fn registered_state_name() {
     for tree in Tree::ALL {
         let server = server().await;
@@ -127,6 +126,10 @@ async fn registered_state_name() {
         let resp = register(&server, tree, json!({ "id": "u1" })).await;
         assert_eq!(resp.status().as_u16(), 201);
         let body = status(&server, &update).await;
-        assert_eq!(body["x-update"]["state"], "REGISTERED", "{update}: {body}");
+        let expected = match tree {
+            Tree::V1 => "REGISTERED",
+            Tree::Legacy => "READY",
+        };
+        assert_eq!(body["x-update"]["state"], expected, "{update}: {body}");
     }
 }
