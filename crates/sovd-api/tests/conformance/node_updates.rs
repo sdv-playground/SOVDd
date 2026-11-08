@@ -13,7 +13,8 @@ use sovd_core::{DiagnosticBackend, VerdictScope};
 
 use crate::common::{BankedBackend, MockBackend, ScopedAuthorizer};
 use crate::{
-    header, poll_until, register, send, server, status, terminal, upload_and_prepare, OTA,
+    header, poll_until, register, send, server, status, terminal, update_url, upload_and_prepare,
+    OTA,
 };
 
 /// A second update-capable component.
@@ -203,6 +204,21 @@ async fn node_lifecycle() {
         let body: Value = resp.json().await.expect("detail body");
         assert_eq!(body["id"], "u1", "{body}");
         assert_eq!(body["x-update"]["target"], target, "{body}");
+        // Entity references are rendered under the request's base, on the
+        // node-level and the component collection.
+        for detail in [update.clone(), update_url(tree, "u1")] {
+            let resp = send(&server, Method::GET, &detail, &[], None).await;
+            let body: Value = resp.json().await.expect("detail body");
+            let affected = body["affected_components"].as_array().expect("affected");
+            assert!(!affected.is_empty(), "{detail}: {body}");
+            for entry in affected {
+                let entry = entry.as_str().expect("entity path");
+                assert!(
+                    entry.starts_with(&format!("{}/", tree.base())),
+                    "{detail}: {entry}"
+                );
+            }
+        }
 
         let resp = send(&server, Method::DELETE, &update, &[], None).await;
         assert_eq!(resp.status().as_u16(), 204, "DELETE {update}");

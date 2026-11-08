@@ -662,10 +662,8 @@ pub async fn get_update(
         // Not registered here, but possibly held by the executor (e.g. after
         // a server restart): describe it from what the executor reports.
         let held = held_update(backend, &update_id).await?;
-        return Ok(Json(UpdateDetail {
-            descriptor: held_descriptor(&component_id, &held),
-            x_update: x_update_target(tree, &component_id).map(|target| XUpdateTarget { target }),
-        }));
+        let descriptor = held_descriptor(&component_id, &held);
+        return Ok(Json(update_detail(tree, &component_id, descriptor)));
     };
 
     let part_refs: Vec<UpdatePartRef<'_>> = parts
@@ -684,10 +682,34 @@ pub async fn get_update(
         parts: &part_refs,
     };
     let descriptor = backend.describe_update_package(&ctx).await?;
-    Ok(Json(UpdateDetail {
+    Ok(Json(update_detail(tree, &component_id, descriptor)))
+}
+
+/// The `GET /updates/{id}` body under `tree`. The descriptor's entity-path
+/// references come from the backend, which renders them under either base
+/// (the default descriptor under `/vehicle/v1`): one under a base is
+/// re-emitted under `tree`'s, any other is kept verbatim.
+fn update_detail(
+    tree: Tree,
+    component_id: &str,
+    mut descriptor: UpdatePackageDescriptor,
+) -> UpdateDetail {
+    for refs in [
+        &mut descriptor.added_components,
+        &mut descriptor.removed_components,
+        &mut descriptor.updated_components,
+        &mut descriptor.affected_components,
+    ] {
+        for entry in refs.iter_mut() {
+            if let Some((_, rest)) = Tree::split_path(entry) {
+                *entry = format!("{}{rest}", tree.base());
+            }
+        }
+    }
+    UpdateDetail {
         descriptor,
-        x_update: x_update_target(tree, &component_id).map(|target| XUpdateTarget { target }),
-    }))
+        x_update: x_update_target(tree, component_id).map(|target| XUpdateTarget { target }),
+    }
 }
 
 /// DELETE /vehicle/v1/components/{component_id}/updates/{update_id}
