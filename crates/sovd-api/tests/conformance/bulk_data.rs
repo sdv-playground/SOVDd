@@ -143,7 +143,7 @@ async fn post_upload_to_update_bulk_data() {
 }
 
 /// The legacy `PUT {update}/bulk-data/{part_id}` still uploads, and its part
-/// is listed like a `POST` one, with the default mimetype.
+/// is listed like a `POST` one, its `Content-Type` recorded alike.
 #[tokio::test]
 async fn put_and_post_parts_list_alike() {
     for tree in Tree::ALL {
@@ -171,7 +171,10 @@ async fn put_and_post_parts_list_alike() {
                 &server,
                 Method::POST,
                 &format!("{update}/bulk-data"),
-                &[("content-disposition", "form-data; name=\"post-part\"")],
+                &[
+                    ("content-type", "application/cbor"),
+                    ("content-disposition", "form-data; name=\"post-part\""),
+                ],
                 Some(b"bytes".to_vec()),
             )
             .await;
@@ -187,10 +190,7 @@ async fn put_and_post_parts_list_alike() {
             for (item, name) in items.iter_mut().zip(["put-part", "post-part"]) {
                 assert_eq!(item["part_id"], name, "{update}: {item}");
                 if tree == Tree::V1 {
-                    assert_eq!(
-                        item["mimetype"], "application/octet-stream",
-                        "{update}: {item}"
-                    );
+                    assert_eq!(item["mimetype"], "application/cbor", "{update}: {item}");
                 }
                 let obj = item.as_object_mut().expect("item object");
                 obj.remove("part_id");

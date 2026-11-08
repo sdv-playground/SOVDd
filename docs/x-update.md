@@ -48,7 +48,7 @@ forms are used here unchanged.
   `{"id": "<part>"}`. Uploading a part of the same name again replaces it (201 again, same
   `Location`). Parts are accepted while the update is registered or uploading (409 otherwise).
 - `PUT {entity}/updates/{update_id}/bulk-data/{part_id}` is the legacy alias of the `POST`, the
-  part named by the path; it records no mimetype and answers 201, the `ETag` and
+  part named by the path; it records `Content-Type` alike and answers 201, the `ETag` and
   `{part_id, size, sha256, href}`. It is scheduled for deprecation.
 
 `GET {entity}/updates/{update_id}/bulk-data` items carry, beside `part_id`, `size`, `sha256` and
@@ -57,8 +57,8 @@ part id is the held part's name or `#` and that name), not by hash: `sha256` is 
 part, the executor's digest is of the stored one. A part listed for an update only the executor
 holds is `present`, carries the executor's digest and has no `href`. Under `/v1` each item also
 carries the §7.20 Table 298 `BulkDataDescriptor` members `id` (the part name), `mimetype` (the
-recorded `Content-Type`; `application/octet-stream` for a `PUT` part or a held one), `size`,
-`hash` (the `sha256` value) and `hash_algorithm` (`sha256`). The part metadata is kept in the
+recorded `Content-Type`; `application/octet-stream` when none was sent, or for a held part),
+`size`, `hash` (the `sha256` value) and `hash_algorithm` (`sha256`). The part metadata is kept in the
 server's update store, so after a server restart a held part is listed with the executor's
 digest and the default mimetype.
 

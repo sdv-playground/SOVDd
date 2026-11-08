@@ -2012,8 +2012,8 @@ pub async fn post_bulk_data_part(
     bulk_data_post(state, tree, UpdatePath::Component, path, headers, body).await
 }
 
-/// The legacy `PUT {update}/bulk-data/{part_id}`: [`store_part`] with no
-/// recorded mimetype, answered with the pre-§7.20 body.
+/// The legacy `PUT {update}/bulk-data/{part_id}`: [`store_part`], answered
+/// with the pre-§7.20 body.
 async fn bulk_data_part(
     state: AppState,
     tree: Tree,
@@ -2031,7 +2031,8 @@ async fn bulk_data_part(
             .unwrap_or(""),
         "legacy_bulk_data_put: PUT bulk-data part upload"
     );
-    let stored = store_part(state, tree, at, path, None, &headers, body).await?;
+    let mimetype = content_type(&headers);
+    let stored = store_part(state, tree, at, path, mimetype, &headers, body).await?;
     let response_headers = etag_headers(&stored.sha256)?;
     let resp = PartUploadResponse {
         part_id: stored.part_id,
@@ -2053,13 +2054,9 @@ async fn bulk_data_post(
     body: Body,
 ) -> Result<(StatusCode, HeaderMap, Json<PartCreatedResponse>), ApiError> {
     let part_id = disposition_part_name(&headers)?;
-    let mimetype = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or(DEFAULT_PART_MIMETYPE)
-        .to_string();
+    let mimetype = content_type(&headers);
     let path = (component_id, update_id, part_id);
-    let stored = store_part(state, tree, at, path, Some(mimetype), &headers, body).await?;
+    let stored = store_part(state, tree, at, path, mimetype, &headers, body).await?;
     let mut response_headers = etag_headers(&stored.sha256)?;
     response_headers.insert(
         header::LOCATION,
@@ -2072,6 +2069,14 @@ async fn bulk_data_post(
 
 /// `Content-Type` reported for a part whose upload did not record one.
 const DEFAULT_PART_MIMETYPE: &str = "application/octet-stream";
+
+/// An upload's `Content-Type`, recorded as the part's mimetype.
+fn content_type(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
 
 /// The part name of a `POST {update}/bulk-data`: the `filename` parameter of
 /// `Content-Disposition`, else its `name`. It must be usable as the part's
