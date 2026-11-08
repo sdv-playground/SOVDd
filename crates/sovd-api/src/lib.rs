@@ -582,7 +582,7 @@ fn api_routes(tree: Tree) -> Router<AppState> {
         )
         .route(
             &format!("{}{}", tree.base(), "/components/{component_id}/updates/{update_id}/bulk-data"),
-            get(handlers::updates::list_bulk_data),
+            get(handlers::updates::list_bulk_data).post(handlers::updates::post_bulk_data_part),
         )
         .route(
             &format!("{}{}", tree.base(), "/components/{component_id}/updates/{update_id}/bulk-data/{part_id}"),
@@ -658,7 +658,8 @@ fn api_routes(tree: Tree) -> Router<AppState> {
         )
         .route(
             &format!("{}{}", tree.base(), "/updates/{update_id}/bulk-data"),
-            get(handlers::updates::list_node_bulk_data),
+            get(handlers::updates::list_node_bulk_data)
+                .post(handlers::updates::post_node_bulk_data_part),
         )
         .route(
             &format!("{}{}", tree.base(), "/updates/{update_id}/bulk-data/{part_id}"),

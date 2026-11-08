@@ -354,9 +354,14 @@ const PATHS: &[PathEntry] = &[
         summary: "List uploaded parts.",
     },
     PathEntry {
+        method: "POST",
+        path: "/components/{component_id}/updates/{update_id}/bulk-data",
+        summary: "Upload a part named by Content-Disposition (§7.20). 201 + Location + ETag.",
+    },
+    PathEntry {
         method: "PUT",
         path: "/components/{component_id}/updates/{update_id}/bulk-data/{part_id}",
-        summary: "Upload a part (manifest or detached payload). 201 + ETag.",
+        summary: "Upload a part (legacy alias of POST bulk-data). 201 + ETag.",
     },
     // Node-level updates (§7.18.1.1) — alias of the per-component collection;
     // a registration names its component in `target`.
@@ -386,9 +391,14 @@ const PATHS: &[PathEntry] = &[
         summary: "List uploaded parts.",
     },
     PathEntry {
+        method: "POST",
+        path: "/updates/{update_id}/bulk-data",
+        summary: "Upload a part named by Content-Disposition (§7.20). 201 + Location + ETag.",
+    },
+    PathEntry {
         method: "PUT",
         path: "/updates/{update_id}/bulk-data/{part_id}",
-        summary: "Upload a part (manifest or detached payload). 201 + ETag.",
+        summary: "Upload a part (legacy alias of POST bulk-data). 201 + ETag.",
     },
     // logs (§7.21)
     PathEntry {
@@ -943,6 +953,7 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
             "x-ota-bulk-data": {
                 "kind":      "sub-resource",
                 "endpoints": [
+                    "POST {base}/components/{id}/updates/{update_id}/bulk-data",
                     "PUT {base}/components/{id}/updates/{update_id}/bulk-data/{part_id}",
                     "GET {base}/components/{id}/updates/{update_id}/bulk-data"
                 ],

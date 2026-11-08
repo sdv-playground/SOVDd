@@ -9,7 +9,8 @@
 //! | Wire verb                       | Backend |
 //! |---------------------------------|---------|
 //! | `POST /updates`                 | (none — SOVD-side allocation of update_id) |
-//! | `PUT /bulk-data/{part_id}`      | `receive_package_part` (returns file_id, recorded per part) |
+//! | `POST /bulk-data`               | `receive_package_part` (returns file_id, recorded per part) |
+//! | `PUT /bulk-data/{part_id}`      | same; legacy alias of `POST /bulk-data` |
 //! | `POST /executions {verify}`     | `verify_package` per part, then `start_flash` (allocates transfer_id) |
 //! | `POST /executions {finalize}`   | `finalize_flash` + `activate` |
 //! | `POST /executions {commit}`     | `commit_flash` |
@@ -287,6 +288,12 @@ pub struct PartUploadResponse {
     pub size: u64,
     pub sha256: String,
     pub href: String,
+}
+
+/// Body of `POST /updates/{id}/bulk-data` — §7.20 Table 303.
+#[derive(Debug, Serialize)]
+pub struct PartCreatedResponse {
+    pub id: String,
 }
 
 /// `PUT /updates/{id}/execute` query parameters.
@@ -1946,14 +1953,186 @@ pub async fn put_bulk_data_part(
     .await
 }
 
+/// POST /vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data
+pub async fn post_bulk_data_part(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    Path((component_id, update_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<impl IntoResponse, ApiError> {
+    let path = (component_id, update_id);
+    bulk_data_post(state, tree, UpdatePath::Component, path, headers, body).await
+}
+
+/// The legacy `PUT {update}/bulk-data/{part_id}`: [`store_part`] with no
+/// recorded mimetype, answered with the pre-§7.20 body.
 async fn bulk_data_part(
     state: AppState,
     tree: Tree,
     at: UpdatePath,
-    (component_id, update_id, part_id): (String, String, String),
+    path: (String, String, String),
     headers: HeaderMap,
     body: Body,
 ) -> Result<(StatusCode, HeaderMap, Json<PartUploadResponse>), ApiError> {
+    tracing::info!(
+        legacy_bulk_data_put = true,
+        tree = tree.base(),
+        user_agent = headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+        "legacy_bulk_data_put: PUT bulk-data part upload"
+    );
+    let stored = store_part(state, tree, at, path, None, &headers, body).await?;
+    let response_headers = etag_headers(&stored.sha256)?;
+    let resp = PartUploadResponse {
+        part_id: stored.part_id,
+        size: stored.size,
+        sha256: stored.sha256,
+        href: stored.href,
+    };
+    Ok((StatusCode::CREATED, response_headers, Json(resp)))
+}
+
+/// `POST {update}/bulk-data` — §7.20 upload: the body is the part, named by
+/// `Content-Disposition`; 201 + `Location` of the part + Table 303 `{id}`.
+async fn bulk_data_post(
+    state: AppState,
+    tree: Tree,
+    at: UpdatePath,
+    (component_id, update_id): (String, String),
+    headers: HeaderMap,
+    body: Body,
+) -> Result<(StatusCode, HeaderMap, Json<PartCreatedResponse>), ApiError> {
+    let part_id = disposition_part_name(&headers)?;
+    let mimetype = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(DEFAULT_PART_MIMETYPE)
+        .to_string();
+    let path = (component_id, update_id, part_id);
+    let stored = store_part(state, tree, at, path, Some(mimetype), &headers, body).await?;
+    let mut response_headers = etag_headers(&stored.sha256)?;
+    response_headers.insert(
+        header::LOCATION,
+        HeaderValue::from_str(&stored.href)
+            .map_err(|e| ApiError::Internal(format!("bad Location header: {e}")))?,
+    );
+    let resp = PartCreatedResponse { id: stored.part_id };
+    Ok((StatusCode::CREATED, response_headers, Json(resp)))
+}
+
+/// `Content-Type` reported for a part whose upload did not record one.
+const DEFAULT_PART_MIMETYPE: &str = "application/octet-stream";
+
+/// The part name of a `POST {update}/bulk-data`: the `filename` parameter of
+/// `Content-Disposition`, else its `name`. It must be usable as the part's
+/// URL segment (`{update}/bulk-data/{part_id}`): non-empty, no `/`, not `.`
+/// or `..`. 400 otherwise, or when the header is absent.
+fn disposition_part_name(headers: &HeaderMap) -> Result<String, ApiError> {
+    let value = headers
+        .get(header::CONTENT_DISPOSITION)
+        .ok_or_else(|| {
+            ApiError::BadRequest("a bulk-data upload names its part in Content-Disposition".into())
+        })?
+        .to_str()
+        .map_err(|_| ApiError::BadRequest("Content-Disposition is not ASCII".into()))?;
+    let params = disposition_params(value);
+    let param = |key: &str| {
+        params
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v.clone())
+    };
+    let name = param("filename").or_else(|| param("name")).ok_or_else(|| {
+        ApiError::BadRequest(
+            "Content-Disposition names no part (no filename or name parameter)".into(),
+        )
+    })?;
+    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+        return Err(ApiError::BadRequest(format!(
+            "invalid bulk-data part name {name:?}"
+        )));
+    }
+    Ok(name)
+}
+
+/// The `key=value` parameters of a `Content-Disposition` value (RFC 6266),
+/// after the disposition type; quoted values are unquoted.
+fn disposition_params(value: &str) -> Vec<(String, String)> {
+    let mut params = Vec::new();
+    let mut chars = value.chars().peekable();
+    // Skip the disposition type.
+    chars.by_ref().find(|c| *c == ';');
+    while chars.peek().is_some() {
+        let mut key = String::new();
+        let mut has_value = false;
+        for c in chars.by_ref() {
+            match c {
+                '=' => {
+                    has_value = true;
+                    break;
+                }
+                ';' => break,
+                c => key.push(c),
+            }
+        }
+        let mut val = String::new();
+        if has_value {
+            while chars.next_if(|c| c.is_whitespace()).is_some() {}
+            if chars.next_if_eq(&'"').is_some() {
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        '\\' => val.extend(chars.next()),
+                        c => val.push(c),
+                    }
+                }
+                chars.by_ref().find(|c| *c == ';');
+            } else {
+                val.extend(chars.by_ref().take_while(|c| *c != ';'));
+            }
+        }
+        let key = key.trim();
+        if !key.is_empty() {
+            params.push((key.to_string(), val.trim().to_string()));
+        }
+    }
+    params
+}
+
+/// The `ETag` of an uploaded part: its SHA-256.
+fn etag_headers(sha256: &str) -> Result<HeaderMap, ApiError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::ETAG,
+        HeaderValue::from_str(&format!("\"{sha256}\""))
+            .map_err(|e| ApiError::Internal(format!("bad ETag header: {e}")))?,
+    );
+    Ok(headers)
+}
+
+/// A part [`store_part`] recorded.
+struct StoredPart {
+    part_id: String,
+    size: u64,
+    sha256: String,
+    href: String,
+}
+
+/// Stream `body` to the backend as part `part_id` of the update and record
+/// it (replacing a part of that id), the shared core of the `POST` and the
+/// legacy `PUT` upload.
+async fn store_part(
+    state: AppState,
+    tree: Tree,
+    at: UpdatePath,
+    (component_id, update_id, part_id): (String, String, String),
+    mimetype: Option<String>,
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<StoredPart, ApiError> {
     let backend = state.get_backend(&component_id)?;
     let key = UpdateKey::new(&component_id, &update_id);
     let registration_token = {
@@ -2039,6 +2218,7 @@ async fn bulk_data_part(
                         part_id: part_id.clone(),
                         size: final_size,
                         sha256: sha256.clone(),
+                        mimetype,
                         file_id,
                     });
                     entry.state = UpdateState::Uploading;
@@ -2060,19 +2240,12 @@ async fn bulk_data_part(
         enc(&update_id),
         enc(&part_id)
     );
-    let mut response_headers = HeaderMap::new();
-    response_headers.insert(
-        header::ETAG,
-        HeaderValue::from_str(&format!("\"{sha256}\""))
-            .map_err(|e| ApiError::Internal(format!("bad ETag header: {e}")))?,
-    );
-    let resp = PartUploadResponse {
+    Ok(StoredPart {
         part_id,
         size: final_size,
         sha256,
         href,
-    };
-    Ok((StatusCode::CREATED, response_headers, Json(resp)))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2214,6 +2387,28 @@ pub async fn put_node_bulk_data_part(
     let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
     let path = (owner, update_id, part_id);
     bulk_data_part(state, tree, UpdatePath::Node, path, headers, body).await
+}
+
+/// `POST {base}/updates/{update_id}/bulk-data`.
+pub async fn post_node_bulk_data_part(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    bulk_data_post(
+        state,
+        tree,
+        UpdatePath::Node,
+        (owner, update_id),
+        headers,
+        body,
+    )
+    .await
 }
 
 /// `PUT {base}/updates/{update_id}/prepare`.

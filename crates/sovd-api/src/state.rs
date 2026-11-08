@@ -188,6 +188,9 @@ pub struct UpdatePart {
     pub part_id: String,
     pub size: u64,
     pub sha256: String,
+    /// The upload's `Content-Type` (`POST {update}/bulk-data`); `None` for a
+    /// part uploaded with the legacy `PUT {update}/bulk-data/{part_id}`.
+    pub mimetype: Option<String>,
     /// Backend's file_id from `receive_package_stream`; needed by the
     /// `verify` step which calls `verify_package(file_id)` per part.
     pub file_id: String,
