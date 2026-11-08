@@ -36,6 +36,31 @@ part id is the held part's name or `#` and that name), not by hash: `sha256` is 
 part, the executor's digest is of the stored one. A part listed for an update only the executor
 holds is `present`, carries the executor's digest and has no `href`.
 
+## Node-level collection
+
+`{base}/updates` on the server root (ISO 17978-3 §7.18.1.1 names it the primary location) is an
+alias of the per-component collections, which remain and are unchanged. The root document
+(`GET {base}/`) references it as `updates` when at least one component accepts software
+updates.
+
+- `POST {base}/updates`, body `{"id"?, "target", "manifest"?}`, registers on the component
+  `target`, which is required and must be one of the root document's `x-update.update-targets`
+  (400 otherwise). The id rules are those of the component collection. The id must be free on
+  every component, registered or held by an executor: a taken id answers 409
+  `update-process-in-progress`, even where the component collection would replace it.
+- Every per-update verb (`GET`, `DELETE`, `bulk-data`, `prepare`, `execute`, `automated`,
+  `status`, the verdicts) is served at `{base}/updates/{update_id}/…` and acts on the component
+  the update is registered on, or, when none has it registered, the one whose executor holds it.
+  An unknown id answers 404. An id registered on several components (through their own
+  collections) answers 409 `precondition-not-fulfilled`; address it on a component collection.
+- The `Location` and hrefs a node-level request is answered with point into `{base}/updates`.
+- `GET {base}/updates` lists the ids of every update target the client may access.
+- The client's component scope applies to the update's component as on a component route: 403
+  under `/v1`, 401 under `/vehicle/v1`.
+- Under `/v1`, `GET …/updates/{update_id}` and `…/status` carry `x-update.target`, the component
+  the update is registered on, on both collections; `/vehicle/v1` bodies are unchanged.
+- `x-ota-force-rollback` is component-rooted and has no node-level form.
+
 ## Verdicts: `x-update-commit`, `x-update-rollback`
 
 `PUT {entity}/updates/{update_id}/x-update-commit` and `…/x-update-rollback` decide this one
@@ -106,8 +131,10 @@ running in phase execute (EXECUTING, EXECUTED, COMMITTING, ROLLING_BACK) answers
 `GET {entity}/updates/{update_id}/status` carries, beside the standard Table 270 members:
 
 ```json
-"x-update": { "state": "<State>", "reset_kind": "none" | "component" | "node" }
+"x-update": { "state": "<State>", "reset_kind": "none" | "component" | "node", "target": "<component id>" }
 ```
+
+`target` is served under `/v1` only (see "Node-level collection").
 
 The states are named after the verbs that lead to them. The state is total, and the standard
 `phase`/`status` in the same body agree with it:
