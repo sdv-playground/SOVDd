@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::state::{AppState, CapabilityExtensions};
+use crate::Tree;
 
 /// One entry of `/version-info`'s `sovd_info[]` array — ISO 17978-3
 /// §7.4.2 Table 37 (SOVDInfo). Describes one supported SOVD version.
@@ -51,24 +52,28 @@ pub struct VersionInfoResponse {
     pub sovd_info: Vec<SovdInfo>,
 }
 
-/// Single source of truth for the SOVD API edition(s) this server mounts.
+/// Single source of truth for the SOVD API base paths this server mounts.
 ///
-/// `version_info` (§7.4) derives its `versions` array from this slice, and
-/// the router in `lib.rs::create_router` mounts every base path listed here,
-/// so the advertised list can't drift from the actual surface (C-005).  Add a
-/// row here (and the matching routes) when introducing a new API edition.
+/// `version_info` (§7.4) derives its `sovd_info` array from this slice.  The
+/// router in `lib.rs::create_router` mounts the identical entity API under
+/// both bases — `/v1` (the spec base, §5.6) and `/vehicle/v1` (the original
+/// base, kept for existing clients) — one row per [`crate::Tree`], in
+/// [`crate::Tree::ALL`] order, so `/v1` is advertised first and the list can't
+/// drift from the actual surface (C-005).  Add a row here (and a `Tree`
+/// variant) when introducing a new base or API edition.
 ///
 /// Each tuple is `(version_identifier, base_uri, sovd_version)`:
 ///   * `version_identifier` — the URI version segment (§5.6 rule: value `v1`
 ///     for this edition). Not serialized on its own — it is carried inside
 ///     `base_uri`; kept here as the internal routing key.
-///   * `base_uri` — the version-specific base URI (`/vehicle/{version}`),
+///   * `base_uri` — the version-specific base URI (`/v1` or `/vehicle/v1`),
 ///     emitted as SOVDInfo `base_uri` (§7.4.2 Table 37).
 ///   * `sovd_version` — the SOVD standard version this maps to, as a SemVer
 ///     2.0.0 string, emitted as SOVDInfo `version` (Table 37). Aligned with
 ///     ASAM SOVD 1.1 (info.x-sovd-version) but expressed as `1.1.0` so it is
 ///     valid SemVer 2.0.0.
-pub const API_VERSIONS: &[(&str, &str, &str)] = &[("v1", "/vehicle/v1", "1.1.0")];
+pub const API_VERSIONS: &[(&str, &str, &str)] =
+    &[("v1", "/v1", "1.1.0"), ("v1", "/vehicle/v1", "1.1.0")];
 
 /// Build the `version-info` body from [`API_VERSIONS`].
 pub fn build_version_info() -> VersionInfoResponse {
@@ -103,7 +108,8 @@ pub async fn version_info() -> Json<VersionInfoResponse> {
 ///    path.  This is handled here in the fallback rather than as a real
 ///    route because axum's `{*wildcard}` must be the final path segment,
 ///    so a `/{*path}/docs` route is inexpressible.  The global
-///    `/vehicle/v1/docs` is a real route and never reaches this fallback.
+///    `{base}/docs` (both bases) is a real route and never reaches this
+///    fallback.
 ///    Scope is computed purely by path-template matching — entity
 ///    existence is not validated, and an empty scope still yields a valid
 ///    OpenAPI doc with empty `paths` (never a 404).
@@ -119,8 +125,15 @@ pub async fn not_found_fallback(State(state): State<AppState>, uri: Uri) -> Resp
         // request still 404s rather than aliasing the global doc.
         let entity = entity.strip_suffix('/').unwrap_or(entity);
         if !entity.is_empty() {
+            // The `PATHS` templates are written under `/vehicle/v1`; scope a
+            // `/v1` entity against them via the same base-relative tail so
+            // both bases yield the same document.
+            let entity = match Tree::split_path(entity) {
+                Some((Tree::V1, rest)) => format!("{}{}", Tree::Legacy.base(), rest),
+                _ => entity.to_string(),
+            };
             return Json(build_capability_doc_ext(
-                Some(entity),
+                Some(&entity),
                 state.capability_extensions(),
             ))
             .into_response();

@@ -25,6 +25,7 @@ use tokio::sync::RwLock;
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::Tree;
 
 // ---------------------------------------------------------------------------
 // Configuration — deserialized from the `[server.auth]` TOML section.
@@ -198,7 +199,11 @@ pub trait Authorizer: Send + Sync {
 /// an injected authorizer can enforce verb-level tiers (`docs/design/authorization.md` §5).
 pub fn route_capability(method: &Method, path: &str) -> Capability {
     let is_get = method == Method::GET;
-    if path.starts_with("/admin/") {
+    // `/admin/*` is rooted (off every base); the rest is decided on the
+    // base-relative path so `/v1` and `/vehicle/v1` resolve identically.
+    let admin = path.starts_with("/admin/");
+    let path = api_relative(path);
+    if admin {
         Capability::Admin
     } else if path.contains("/x-ota-commit")
         || path.contains("/x-ota-rollback")
@@ -662,19 +667,29 @@ pub async fn require_auth(
     Ok(next.run(req).await)
 }
 
-/// Resources reachable without authentication (ISO 17978-3 §5.4.4).
+/// `path` relative to its API base (`/v1` or `/vehicle/v1`, see
+/// [`Tree::split_path`]); paths under neither base are returned unchanged.
+/// Every auth decision is made on this, so it is identical under both bases.
+fn api_relative(path: &str) -> &str {
+    Tree::split_path(path).map_or(path, |(_, rest)| rest)
+}
+
+/// Resources reachable without authentication (ISO 17978-3 §5.4.4): health,
+/// version-info, `.well-known/*`, and the global + scoped capability docs
+/// (`{base}/docs`, `{base}/{entity}/docs`).
 fn is_public_path(path: &str) -> bool {
-    matches!(path, "/health" | "/version-info" | "/vehicle/v1/docs")
-        || path.ends_with("/docs")
+    matches!(path, "/health" | "/version-info")
         || path.starts_with("/.well-known/")
+        || api_relative(path).ends_with("/docs")
 }
 
 /// The top-level component id addressed by `path`, if any
-/// (`/vehicle/v1/components/{id}[/...]`). `None` for the collection itself
-/// (`/vehicle/v1/components`) and non-component paths — the collection is
+/// (`{base}/components/{id}[/...]`). `None` for the collection itself
+/// (`{base}/components`) and non-component paths — the collection is
 /// scope-filtered in its handler instead (C-031 non-leakage).
 fn component_in_path(path: &str) -> Option<&str> {
-    let rest = path.strip_prefix("/vehicle/v1/components/")?;
+    let (_, rest) = Tree::split_path(path)?;
+    let rest = rest.strip_prefix("/components/")?;
     let id = rest.split('/').next().unwrap_or("");
     (!id.is_empty()).then_some(id)
 }
@@ -738,13 +753,56 @@ mod tests {
     fn public_paths_recognized() {
         assert!(is_public_path("/health"));
         assert!(is_public_path("/version-info"));
-        assert!(is_public_path("/vehicle/v1/docs"));
-        assert!(is_public_path("/vehicle/v1/components/engine_ecu/docs"));
         assert!(is_public_path("/.well-known/sovd-extensions"));
-        assert!(!is_public_path(
-            "/vehicle/v1/components/engine_ecu/data/rpm"
-        ));
-        assert!(!is_public_path("/vehicle/v1/components"));
+        for tree in Tree::ALL {
+            let b = tree.base();
+            assert!(is_public_path(&format!("{b}/docs")), "{b}");
+            assert!(
+                is_public_path(&format!("{b}/components/engine_ecu/docs")),
+                "{b}"
+            );
+            assert!(
+                !is_public_path(&format!("{b}/components/engine_ecu/data/rpm")),
+                "{b}"
+            );
+            assert!(!is_public_path(&format!("{b}/components")), "{b}");
+        }
+    }
+
+    #[test]
+    fn component_in_path_under_every_base() {
+        for tree in Tree::ALL {
+            let b = tree.base();
+            assert_eq!(component_in_path(&format!("{b}/components/x")), Some("x"));
+            assert_eq!(
+                component_in_path(&format!("{b}/components/x/data/y")),
+                Some("x"),
+                "{b}"
+            );
+            assert_eq!(component_in_path(&format!("{b}/components")), None, "{b}");
+            assert_eq!(component_in_path(&format!("{b}/components/")), None, "{b}");
+            assert_eq!(component_in_path(&format!("{b}/docs")), None, "{b}");
+        }
+        // Paths under neither base address no component.
+        assert_eq!(component_in_path("/components/x"), None);
+        assert_eq!(component_in_path("/v1components/x"), None);
+        assert_eq!(component_in_path("/admin/definitions"), None);
+    }
+
+    #[test]
+    fn split_path_matches_whole_base_segments() {
+        assert_eq!(
+            Tree::split_path("/v1/components"),
+            Some((Tree::V1, "/components"))
+        );
+        assert_eq!(
+            Tree::split_path("/vehicle/v1/components"),
+            Some((Tree::Legacy, "/components"))
+        );
+        assert_eq!(Tree::split_path("/v1"), None);
+        assert_eq!(Tree::split_path("/v1x/components"), None);
+        assert_eq!(Tree::split_path("/vehicle/v2/components"), None);
+        assert_eq!(Tree::split_path("/health"), None);
     }
 
     #[test]
@@ -754,41 +812,47 @@ mod tests {
         // gates on this capability. They must resolve to UpdateVerdict — NOT Read
         // (the `/operations` GET case) and NOT ResetExecute (no `/reset` substring).
         let post = Method::POST;
-        assert_eq!(
-            route_capability(
-                &post,
-                "/vehicle/v1/operations/x-ota-commit-trials/executions"
-            ),
-            Capability::UpdateVerdict
-        );
-        assert_eq!(
-            route_capability(
-                &post,
-                "/vehicle/v1/operations/x-ota-rollback-trials/executions"
-            ),
-            Capability::UpdateVerdict
-        );
-        // The x-update aliases of the node verdicts (served by the embedder).
-        for op in ["x-update-commit", "x-update-rollback"] {
+        for tree in Tree::ALL {
+            let b = tree.base();
             assert_eq!(
-                route_capability(&post, &format!("/vehicle/v1/operations/{op}/executions")),
+                route_capability(
+                    &post,
+                    &format!("{b}/operations/x-ota-commit-trials/executions")
+                ),
+                Capability::UpdateVerdict
+            );
+            assert_eq!(
+                route_capability(
+                    &post,
+                    &format!("{b}/operations/x-ota-rollback-trials/executions")
+                ),
+                Capability::UpdateVerdict
+            );
+            // The x-update aliases of the node verdicts (served by the embedder).
+            for op in ["x-update-commit", "x-update-rollback"] {
+                assert_eq!(
+                    route_capability(&post, &format!("{b}/operations/{op}/executions")),
+                    Capability::UpdateVerdict
+                );
+            }
+            // The retired single verdict verb, still served by machine managers
+            // during the alias period.
+            assert_eq!(
+                route_capability(
+                    &post,
+                    &format!("{b}/operations/x-update-verdict/executions")
+                ),
+                Capability::UpdateVerdict
+            );
+            // The trials branch wins over the generic /operations branch even on GET.
+            assert_eq!(
+                route_capability(
+                    &Method::GET,
+                    &format!("{b}/operations/x-ota-commit-trials/executions")
+                ),
                 Capability::UpdateVerdict
             );
         }
-        // The retired single verdict verb, still served by machine managers
-        // during the alias period.
-        assert_eq!(
-            route_capability(&post, "/vehicle/v1/operations/x-update-verdict/executions"),
-            Capability::UpdateVerdict
-        );
-        // The trials branch wins over the generic /operations branch even on GET.
-        assert_eq!(
-            route_capability(
-                &Method::GET,
-                "/vehicle/v1/operations/x-ota-commit-trials/executions"
-            ),
-            Capability::UpdateVerdict
-        );
     }
 
     #[test]
@@ -796,33 +860,70 @@ mod tests {
         // The `/updates` orchestration verbs (`x-ota-` family, C-026) must
         // resolve to UpdateVerdict, not the generic `/updates` capabilities.
         let put = Method::PUT;
-        assert_eq!(
-            route_capability(&put, "/vehicle/v1/components/dev1/updates/u1/x-ota-commit"),
-            Capability::UpdateVerdict
-        );
-        assert_eq!(
-            route_capability(
-                &put,
-                "/vehicle/v1/components/dev1/updates/u1/x-ota-rollback"
-            ),
-            Capability::UpdateVerdict
-        );
-        for verb in ["x-update-commit", "x-update-rollback"] {
+        for tree in Tree::ALL {
+            let b = tree.base();
             assert_eq!(
                 route_capability(
                     &put,
-                    &format!("/vehicle/v1/components/dev1/updates/u1/{verb}")
+                    &format!("{b}/components/dev1/updates/u1/x-ota-commit")
                 ),
-                Capability::UpdateVerdict,
-                "{verb}"
+                Capability::UpdateVerdict
+            );
+            assert_eq!(
+                route_capability(
+                    &put,
+                    &format!("{b}/components/dev1/updates/u1/x-ota-rollback")
+                ),
+                Capability::UpdateVerdict
+            );
+            for verb in ["x-update-commit", "x-update-rollback"] {
+                assert_eq!(
+                    route_capability(&put, &format!("{b}/components/dev1/updates/u1/{verb}")),
+                    Capability::UpdateVerdict,
+                    "{verb}"
+                );
+            }
+            // force-rollback is deliberately absent from the verdict branch and
+            // falls through to the catch-all — unchanged by the rename.
+            assert_eq!(
+                route_capability(&put, &format!("{b}/components/dev1/x-ota-force-rollback")),
+                Capability::Read
             );
         }
-        // force-rollback is deliberately absent from the verdict branch and
-        // falls through to the catch-all — unchanged by the rename.
-        assert_eq!(
-            route_capability(&put, "/vehicle/v1/components/dev1/x-ota-force-rollback"),
-            Capability::Read
-        );
+    }
+
+    /// The security property: for every base-relative path, the auth decision
+    /// (public / capability / component) is the same under both bases.
+    #[test]
+    fn auth_decision_identical_under_both_bases() {
+        let rels = [
+            "/docs",
+            "/components",
+            "/components/a",
+            "/components/a/docs",
+            "/components/a/data/rpm",
+            "/components/a/faults",
+            "/components/a/operations/op/executions",
+            "/components/a/modes/session",
+            "/components/a/updates/u1/execute",
+            "/components/a/updates/u1/bulk-data/p1",
+            "/components/a/status/restart",
+            "/components/a/apps/b/data/x",
+            "/admin/definitions",
+        ];
+        let methods = [Method::GET, Method::PUT, Method::POST, Method::DELETE];
+        for rel in rels {
+            let [v1, legacy] = Tree::ALL.map(|t| format!("{}{rel}", t.base()));
+            assert_eq!(is_public_path(&v1), is_public_path(&legacy), "{rel}");
+            assert_eq!(component_in_path(&v1), component_in_path(&legacy), "{rel}");
+            for m in &methods {
+                assert_eq!(
+                    route_capability(m, &v1),
+                    route_capability(m, &legacy),
+                    "{m} {rel}"
+                );
+            }
+        }
     }
 
     #[test]

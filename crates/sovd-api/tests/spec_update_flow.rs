@@ -1520,7 +1520,8 @@ async fn cyclic_subscription_gateway_child_resource_201() {
 // ---------------------------------------------------------------------------
 
 /// C-005: `/version-info` derives its `sovd_info` array (§7.4.2 Table 36)
-/// from the shared `API_VERSIONS` source of truth (/vehicle/v1 @ SemVer 1.1.0).
+/// from the shared `API_VERSIONS` source of truth (/v1 then /vehicle/v1, both
+/// @ SemVer 1.1.0).
 #[tokio::test]
 async fn version_info_lists_all_supported_versions() {
     let (server, _backend) = spawn_with("singleshot").await;
@@ -1531,8 +1532,9 @@ async fn version_info_lists_all_supported_versions() {
 
     // Top-level element is `sovd_info` (SOVDInfo[]), per §7.4.2 Table 36.
     let sovd_info = body["sovd_info"].as_array().expect("sovd_info array");
-    assert_eq!(sovd_info.len(), 1, "exactly the one mounted edition");
-    let v1 = &sovd_info[0];
+    assert_eq!(sovd_info.len(), 2, "both mounted bases, /v1 first");
+    assert_eq!(sovd_info[0]["base_uri"], "/v1");
+    let v1 = &sovd_info[1];
     // Table 37: `version` is a SemVer 2.0.0 string, `base_uri` a uri-reference.
     assert_eq!(v1["version"], "1.1.0");
     assert_eq!(v1["base_uri"], "/vehicle/v1");
