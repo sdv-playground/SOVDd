@@ -188,6 +188,10 @@ pub struct XUpdateStatus {
     /// [`x_update_target`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    /// How the update is settled (`/v1` only, see
+    /// [`x_update_verdict_scope`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verdict_scope: Option<XUpdateVerdictScope>,
 }
 
 /// Body of `GET /updates/{id}`: the §7.18.3 Table 261 descriptor plus, under
@@ -204,6 +208,10 @@ pub struct UpdateDetail {
 #[derive(Debug, Serialize)]
 pub struct XUpdateTarget {
     pub target: String,
+    /// How the update is settled (`/v1` only, see
+    /// [`x_update_verdict_scope`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verdict_scope: Option<XUpdateVerdictScope>,
 }
 
 /// `x-update.target`: the component an update is registered on, which a
@@ -211,6 +219,35 @@ pub struct XUpdateTarget {
 /// legacy tree keeps its bodies as they were.
 fn x_update_target(tree: Tree, component_id: &str) -> Option<String> {
     (tree == Tree::V1).then(|| component_id.to_string())
+}
+
+/// `x-update.verdict_scope`: whether an update on `backend`'s component is
+/// settled by its own verdict verbs or only by the node operation. Served
+/// under `/v1` only; the legacy tree keeps its bodies as they were.
+pub(crate) fn x_update_verdict_scope(
+    tree: Tree,
+    backend: &dyn sovd_core::DiagnosticBackend,
+) -> Option<XUpdateVerdictScope> {
+    (tree == Tree::V1).then(|| backend.verdict_scope().into())
+}
+
+/// `x-update.verdict_scope`: how this update is settled.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum XUpdateVerdictScope {
+    /// Settled by its own `x-update-commit` / `x-update-rollback` verbs.
+    Update,
+    /// A member of a node transaction, settled only by the node operations.
+    Node,
+}
+
+impl From<sovd_core::VerdictScope> for XUpdateVerdictScope {
+    fn from(scope: sovd_core::VerdictScope) -> Self {
+        match scope {
+            sovd_core::VerdictScope::Update => Self::Update,
+            sovd_core::VerdictScope::Node => Self::Node,
+        }
+    }
 }
 
 /// Verb-named lifecycle state carried in `x-update.state`.
@@ -663,7 +700,12 @@ pub async fn get_update(
         // a server restart): describe it from what the executor reports.
         let held = held_update(backend, &update_id).await?;
         let descriptor = held_descriptor(&component_id, &held);
-        return Ok(Json(update_detail(tree, &component_id, descriptor)));
+        return Ok(Json(update_detail(
+            tree,
+            &component_id,
+            backend.as_ref(),
+            descriptor,
+        )));
     };
 
     let part_refs: Vec<UpdatePartRef<'_>> = parts
@@ -682,7 +724,12 @@ pub async fn get_update(
         parts: &part_refs,
     };
     let descriptor = backend.describe_update_package(&ctx).await?;
-    Ok(Json(update_detail(tree, &component_id, descriptor)))
+    Ok(Json(update_detail(
+        tree,
+        &component_id,
+        backend.as_ref(),
+        descriptor,
+    )))
 }
 
 /// The `GET /updates/{id}` body under `tree`. The descriptor's entity-path
@@ -692,6 +739,7 @@ pub async fn get_update(
 fn update_detail(
     tree: Tree,
     component_id: &str,
+    backend: &dyn sovd_core::DiagnosticBackend,
     mut descriptor: UpdatePackageDescriptor,
 ) -> UpdateDetail {
     for refs in [
@@ -708,7 +756,10 @@ fn update_detail(
     }
     UpdateDetail {
         descriptor,
-        x_update: x_update_target(tree, component_id).map(|target| XUpdateTarget { target }),
+        x_update: x_update_target(tree, component_id).map(|target| XUpdateTarget {
+            target,
+            verdict_scope: x_update_verdict_scope(tree, backend),
+        }),
     }
 }
 
@@ -1808,7 +1859,13 @@ pub async fn get_status(
             .ok()
             .map(|a| a.reset_kind);
         let target = x_update_target(tree, &component_id);
-        return Ok(Json(held_status(target, &held.state, reset_kind)));
+        let verdict_scope = x_update_verdict_scope(tree, backend.as_ref());
+        return Ok(Json(held_status(
+            target,
+            verdict_scope,
+            &held.state,
+            reset_kind,
+        )));
     }
     let activation = execute_activation(&state, backend, &key, &update_id).await?;
     let store = state.updates.0.lock();
@@ -1831,6 +1888,7 @@ pub async fn get_status(
             state: x_update_state(entry, activation).for_tree(tree),
             reset_kind: entry.reset_kind.map(Into::into),
             target: x_update_target(tree, &component_id),
+            verdict_scope: x_update_verdict_scope(tree, backend.as_ref()),
         }),
     }))
 }
@@ -2740,6 +2798,7 @@ fn held_descriptor(component_id: &str, held: &HeldUpdate) -> UpdatePackageDescri
 /// Table 270 status of a held update, from the executor's held state.
 fn held_status(
     target: Option<String>,
+    verdict_scope: Option<XUpdateVerdictScope>,
     state: &HeldState,
     reset_kind: Option<sovd_core::ResetKind>,
 ) -> UpdateStatusBody {
@@ -2761,6 +2820,7 @@ fn held_status(
             state: x_state,
             reset_kind: reset_kind.map(Into::into),
             target,
+            verdict_scope,
         }),
     }
 }
@@ -2837,6 +2897,7 @@ mod tests {
                 state: XUpdateState::RolledBack,
                 reset_kind: Some(sovd_core::ResetKind::RequiresEcuReset.into()),
                 target: None,
+                verdict_scope: None,
             }),
         };
         let json = serde_json::to_string(&body).unwrap();

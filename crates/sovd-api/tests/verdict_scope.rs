@@ -3,6 +3,10 @@
 //! `precondition-not-fulfilled`, before any state check, with a message naming
 //! the node operations. `/vehicle/v1` keeps accepting them.
 //!
+//! Under `/v1` the scope is also served as `x-update.verdict_scope` on the
+//! update's status and detail bodies and in the component's
+//! `capabilities.x-update`; `/vehicle/v1` bodies carry no such member.
+//!
 //! Two mock components over one shared `AppState`: `node_member`
 //! (`VerdictScope::Node`) and `solo` (the default, `VerdictScope::Update`).
 //! Same in-process `TestServer` pattern as `spec_update_flow.rs`; the mock
@@ -86,6 +90,21 @@ async fn status(server: &TestServer, base: &str, component: &str, id: &str) -> V
         .expect("status");
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     resp.json().await.unwrap()
+}
+
+/// `GET {path}` → 200; returns the raw body text.
+async fn get_text(server: &TestServer, path: &str) -> String {
+    let resp = reqwest::Client::new()
+        .get(url(server, path))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK, "{path}");
+    resp.text().await.unwrap()
+}
+
+async fn get_json(server: &TestServer, path: &str) -> Value {
+    serde_json::from_str(&get_text(server, path).await).unwrap()
 }
 
 async fn poll_until(
@@ -290,4 +309,69 @@ async fn v1_scope_refusal_precedes_state_check() {
         .as_str()
         .unwrap()
         .contains("node transaction"));
+}
+
+#[tokio::test]
+async fn v1_serves_verdict_scope_on_update_bodies() {
+    let f = spawn().await;
+    for (component, scope) in [("node_member", "node"), ("solo", "update")] {
+        let id = register(&f.server, "/v1", component, &format!("vs-{component}")).await;
+
+        let body = status(&f.server, "/v1", component, &id).await;
+        assert_eq!(body["x-update"]["verdict_scope"], scope, "{body}");
+        let body = get_json(&f.server, &format!("/v1/updates/{id}/status")).await;
+        assert_eq!(body["x-update"]["verdict_scope"], scope, "{body}");
+
+        let body = get_json(
+            &f.server,
+            &format!("/v1/components/{component}/updates/{id}"),
+        )
+        .await;
+        assert_eq!(body["x-update"]["target"], component, "{body}");
+        assert_eq!(body["x-update"]["verdict_scope"], scope, "{body}");
+        let body = get_json(&f.server, &format!("/v1/updates/{id}")).await;
+        assert_eq!(body["x-update"]["verdict_scope"], scope, "{body}");
+
+        let body = get_json(&f.server, &format!("/v1/components/{component}")).await;
+        assert_eq!(
+            body["capabilities"]["x-update"],
+            serde_json::json!({ "verdict": true, "verdict_scope": scope }),
+            "{body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn v1_status_member_order() {
+    let f = spawn().await;
+    let id = register(&f.server, "/v1", "node_member", "vs-order").await;
+    let text = get_text(
+        &f.server,
+        &format!("/v1/components/node_member/updates/{id}/status"),
+    )
+    .await;
+    assert!(
+        text.contains(r#""target":"node_member","verdict_scope":"node"}"#),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn legacy_bodies_carry_no_verdict_scope() {
+    let f = spawn().await;
+    let base = "/vehicle/v1";
+    let id = register(&f.server, base, "node_member", "vs-legacy").await;
+    for path in [
+        format!("{base}/components/node_member/updates/{id}/status"),
+        format!("{base}/components/node_member/updates/{id}"),
+        format!("{base}/components/node_member"),
+    ] {
+        let text = get_text(&f.server, &path).await;
+        assert!(!text.contains("verdict_scope"), "{path}: {text}");
+    }
+    let body = get_json(&f.server, &format!("{base}/components/node_member")).await;
+    assert_eq!(
+        body["capabilities"]["x-update"],
+        serde_json::json!({ "verdict": true })
+    );
 }

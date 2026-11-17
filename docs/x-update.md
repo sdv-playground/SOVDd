@@ -85,7 +85,8 @@ updates.
 - The client's component scope applies to the update's component as on a component route: 403
   under `/v1`, 401 under `/vehicle/v1`.
 - Under `/v1`, `GET …/updates/{update_id}` and `…/status` carry `x-update.target`, the component
-  the update is registered on, on both collections; `/vehicle/v1` bodies are unchanged.
+  the update is registered on, and `x-update.verdict_scope` (see "Status member"), on both
+  collections; `/vehicle/v1` bodies are unchanged.
 - `x-ota-force-rollback` is component-rooted and has no node-level form.
 
 ## Verdicts: `x-update-commit`, `x-update-rollback`
@@ -114,7 +115,8 @@ This crate refuses them under `/v1`: on a component whose backend reports its up
 of a node transaction, `x-update-commit`, `x-update-rollback`, `x-ota-commit`, `x-ota-rollback`
 and `x-ota-force-rollback` answer 409 `precondition-not-fulfilled` before any state check, with a
 message naming the node operations as the settle path. Under `/vehicle/v1` they are accepted as
-before, for existing clients.
+before, for existing clients. Under `/v1`, `x-update.verdict_scope` `node` on the update and on
+the component's capabilities tells a client so before it sends a verdict.
 
 Served by this crate, which forwards the verdict to the update's executor and reports what it
 answers.
@@ -158,10 +160,10 @@ running in phase execute (EXECUTING, EXECUTED, COMMITTING, ROLLING_BACK) answers
 `GET {entity}/updates/{update_id}/status` carries, beside the standard Table 270 members:
 
 ```json
-"x-update": { "state": "<State>", "reset_kind": "none" | "component" | "node", "target": "<component id>" }
+"x-update": { "state": "<State>", "reset_kind": "none" | "component" | "node", "target": "<component id>", "verdict_scope": "update" | "node" }
 ```
 
-`target` is served under `/v1` only (see "Node-level collection").
+`target` and `verdict_scope` are served under `/v1` only (see "Node-level collection").
 
 The states are named after the verbs that lead to them. The state is total, and the standard
 `phase`/`status` in the same body agree with it:
@@ -187,6 +189,17 @@ The states are named after the verbs that lead to them. The state is total, and 
 | component | a standard restart of this entity activates it |
 | node | one restart of the node's entity activates every update on the node that reports `node` |
 
+`verdict_scope`:
+
+| value | meaning |
+|---|---|
+| update | the update is settled by its own `x-update-commit` / `x-update-rollback` verbs |
+| node | the update is a member of a node transaction, settled only by the node operations; a per-update verdict is refused with 409 |
+
+`reset_kind` says what must restart to activate the update; `verdict_scope` says what settles it.
+They are independent: a VM image in the node's shared boot vector reports `reset_kind`
+`component` and `verdict_scope` `node`.
+
 The x-ota member `x-ota-reset-kind` keeps its old vocabulary (`none`, `local`,
 `requires_ecu_reset`) and is served beside it.
 
@@ -195,8 +208,10 @@ The x-ota member `x-ota-reset-kind` keeps its old vocabulary (`none`, `local`,
 `GET {entity}` (component body) carries:
 
 ```json
-"capabilities": { "...": "...", "x-update": { "verdict": true } }
+"capabilities": { "...": "...", "x-update": { "verdict": true, "verdict_scope": "update" | "node" } }
 ```
+
+`verdict_scope` is served under `/v1` only, with the values of the status member.
 
 | `verdict` | meaning |
 |---|---|

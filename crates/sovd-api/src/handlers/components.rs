@@ -8,6 +8,7 @@ use sovd_core::Capabilities;
 
 use crate::auth::ClientContext;
 use crate::error::ApiError;
+use crate::handlers::updates::{x_update_verdict_scope, XUpdateVerdictScope};
 use crate::state::AppState;
 use crate::Tree;
 
@@ -84,6 +85,10 @@ pub struct XUpdateCapability {
     /// Whether an update on this component pauses in trial for a verdict
     /// (`banked`) or completes without one (`singleshot`).
     pub verdict: bool,
+    /// Whether that verdict is given per update or by the node operation
+    /// (`/v1` only, see `updates::x_update_verdict_scope`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verdict_scope: Option<XUpdateVerdictScope>,
 }
 
 impl From<&Capabilities> for CapabilitiesResponse {
@@ -154,9 +159,16 @@ pub async fn get_component(
     let info = backend.entity_info();
     let caps = backend.capabilities();
     let mut capabilities = CapabilitiesResponse::from(caps);
+    let verdict_scope = x_update_verdict_scope(tree, backend.as_ref());
     capabilities.x_update = match backend.update_shape() {
-        "banked" => Some(XUpdateCapability { verdict: true }),
-        "singleshot" => Some(XUpdateCapability { verdict: false }),
+        "banked" => Some(XUpdateCapability {
+            verdict: true,
+            verdict_scope,
+        }),
+        "singleshot" => Some(XUpdateCapability {
+            verdict: false,
+            verdict_scope,
+        }),
         _ => None,
     };
 
