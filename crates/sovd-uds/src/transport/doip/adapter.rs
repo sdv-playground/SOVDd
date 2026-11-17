@@ -97,10 +97,10 @@ impl DoIpAdapter {
     /// Add an ECU target for multi-ECU support
     pub async fn add_ecu(&self, target_address: u16) {
         let mut channels = self.ecu_channels.write().await;
-        if !channels.contains_key(&target_address) {
+        channels.entry(target_address).or_insert_with(|| {
             let (tx, _) = broadcast::channel(64);
-            channels.insert(target_address, tx);
-        }
+            tx
+        });
     }
 
     /// Connect with retry logic
@@ -322,7 +322,7 @@ impl DoIpAdapter {
         let payload = DoipPayload::DiagnosticMessage(DiagnosticMessage {
             source_address: self.config.source_address.to_be_bytes(),
             target_address: target.to_be_bytes(),
-            message: data.to_vec().into(),
+            message: data.to_vec(),
         });
         self.connection
             .lock()
