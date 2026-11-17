@@ -9,7 +9,8 @@
 //! | Wire verb                       | Backend |
 //! |---------------------------------|---------|
 //! | `POST /updates`                 | (none — SOVD-side allocation of update_id) |
-//! | `PUT /bulk-data/{part_id}`      | `receive_package_part` (returns file_id, recorded per part) |
+//! | `POST /bulk-data`               | `receive_package_part` (returns file_id, recorded per part) |
+//! | `PUT /bulk-data/{part_id}`      | same; legacy alias of `POST /bulk-data` |
 //! | `POST /executions {verify}`     | `verify_package` per part, then `start_flash` (allocates transfer_id) |
 //! | `POST /executions {finalize}`   | `finalize_flash` + `activate` |
 //! | `POST /executions {commit}`     | `commit_flash` |
@@ -24,21 +25,23 @@ use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
-use axum::response::IntoResponse;
-use axum::Json;
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
+use axum::{Extension, Json};
 use futures::StreamExt;
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sovd_core::{
     HeldState, HeldUpdate, PackageStream, UpdatePackageContext, UpdatePackageDescriptor,
-    UpdatePartRef,
+    UpdatePartRef, VerdictScope,
 };
 use uuid::Uuid;
 
+use crate::auth::ClientContext;
 use crate::error::ApiError;
 use crate::state::{AppState, Phase, Status, UpdateKey, UpdatePart, UpdateState, UpdatesEntry};
+use crate::Tree;
 
 /// Reserved update-package id (§7.18.1.5). On servers that self-select,
 /// `GET /updates/autonomous` resolves to a concrete installable id; SOVDd
@@ -67,6 +70,27 @@ fn enc(segment: &str) -> String {
     utf8_percent_encode(segment, ID_SEGMENT_ENCODE).to_string()
 }
 
+/// The `/updates` collection a request came in on. The hrefs and Locations a
+/// handler emits are rooted at it, so a client can follow them on the
+/// collection it uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdatePath {
+    /// `{base}/components/{component_id}/updates`.
+    Component,
+    /// `{base}/updates`, the node-level alias (see [`register_node_update`]).
+    Node,
+}
+
+impl UpdatePath {
+    /// The collection's URL for an update on `component_id` under `tree`.
+    fn collection(self, tree: Tree, component_id: &str) -> String {
+        match self {
+            Self::Component => format!("{}/updates", tree.component(component_id)),
+            Self::Node => format!("{}/updates", tree.base()),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Wire types
 // ---------------------------------------------------------------------------
@@ -85,14 +109,18 @@ fn enc(segment: &str) -> String {
 #[derive(Debug, Deserialize, Default)]
 pub struct RegisterUpdateRequest {
     /// Client-declared stable package id (§7.18 Table 261 `id`). When present
-    /// it becomes the catalog key / URL id; absent → the server mints a UUID.
-    /// The reserved id `autonomous` is refused (400, §7.18.1.5).
+    /// it becomes the catalog key / URL id. Absent (or null): under `/v1` the
+    /// server mints a UUID (§7.18.9); the legacy tree refuses it (400). An
+    /// empty string and the reserved id `autonomous` (§7.18.1.5) are refused
+    /// (400) on both trees.
     #[serde(default)]
     pub id: Option<String>,
     /// Optional component id the manifest is addressed to.  When
     /// present, MUST match the path's `{component_id}` — otherwise the
     /// server returns 415 Unsupported Media Type before allocating an
-    /// update_id.  Absent means "trust the path" (F.D2 behaviour).
+    /// update_id.  Absent means "trust the path" (F.D2 behaviour).  On the
+    /// node-level collection (`POST {base}/updates`) it is required and
+    /// names the component to register on.
     #[serde(default)]
     pub target: Option<String>,
     /// Pass-through register document.  The §7.18.3 descriptor default impl
@@ -104,6 +132,9 @@ pub struct RegisterUpdateRequest {
 
 #[derive(Debug, Serialize)]
 pub struct RegisterUpdateResponse {
+    /// §7.18.9 Table 277 `id`; same value as `update_id`.
+    pub id: String,
+    /// Pre-Table-277 name of `id`, kept for existing clients.
     pub update_id: String,
     pub href: String,
     pub bulk_data_href: String,
@@ -153,13 +184,81 @@ pub struct XUpdateStatus {
     pub state: XUpdateState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reset_kind: Option<XUpdateResetKind>,
+    /// The component the update is registered on (`/v1` only, see
+    /// [`x_update_target`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// How the update is settled (`/v1` only, see
+    /// [`x_update_verdict_scope`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verdict_scope: Option<XUpdateVerdictScope>,
+}
+
+/// Body of `GET /updates/{id}`: the §7.18.3 Table 261 descriptor plus, under
+/// `/v1`, the `x-update` vendor member naming the update's component.
+#[derive(Debug, Serialize)]
+pub struct UpdateDetail {
+    #[serde(flatten)]
+    pub descriptor: UpdatePackageDescriptor,
+    #[serde(rename = "x-update", skip_serializing_if = "Option::is_none")]
+    pub x_update: Option<XUpdateTarget>,
+}
+
+/// `x-update` member of [`UpdateDetail`].
+#[derive(Debug, Serialize)]
+pub struct XUpdateTarget {
+    pub target: String,
+    /// How the update is settled (`/v1` only, see
+    /// [`x_update_verdict_scope`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verdict_scope: Option<XUpdateVerdictScope>,
+}
+
+/// `x-update.target`: the component an update is registered on, which a
+/// node-level client cannot read from the URL. Served under `/v1` only; the
+/// legacy tree keeps its bodies as they were.
+fn x_update_target(tree: Tree, component_id: &str) -> Option<String> {
+    (tree == Tree::V1).then(|| component_id.to_string())
+}
+
+/// `x-update.verdict_scope`: whether an update on `backend`'s component is
+/// settled by its own verdict verbs or only by the node operation. Served
+/// under `/v1` only; the legacy tree keeps its bodies as they were.
+pub(crate) fn x_update_verdict_scope(
+    tree: Tree,
+    backend: &dyn sovd_core::DiagnosticBackend,
+) -> Option<XUpdateVerdictScope> {
+    (tree == Tree::V1).then(|| backend.verdict_scope().into())
+}
+
+/// `x-update.verdict_scope`: how this update is settled.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum XUpdateVerdictScope {
+    /// Settled by its own `x-update-commit` / `x-update-rollback` verbs.
+    Update,
+    /// A member of a node transaction, settled only by the node operations.
+    Node,
+}
+
+impl From<sovd_core::VerdictScope> for XUpdateVerdictScope {
+    fn from(scope: sovd_core::VerdictScope) -> Self {
+        match scope {
+            sovd_core::VerdictScope::Update => Self::Update,
+            sovd_core::VerdictScope::Node => Self::Node,
+        }
+    }
 }
 
 /// Verb-named lifecycle state carried in `x-update.state`.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum XUpdateState {
+    /// Legacy-tree name of the registered state; `/v1` renders it as
+    /// [`XUpdateState::Registered`] (see [`XUpdateState::for_tree`]).
     Ready,
+    /// `/v1` name of the registered state. Never derived, only rendered.
+    Registered,
     Preparing,
     Prepared,
     Executing,
@@ -169,6 +268,17 @@ pub enum XUpdateState {
     RollingBack,
     RolledBack,
     Failed,
+}
+
+impl XUpdateState {
+    /// The state as rendered under `tree`: `/v1` names the registered state
+    /// `REGISTERED`, the legacy tree keeps `READY`.
+    fn for_tree(self, tree: Tree) -> Self {
+        match (tree, self) {
+            (Tree::V1, Self::Ready) => Self::Registered,
+            (_, state) => state,
+        }
+    }
 }
 
 /// `x-update.reset_kind`: what has to restart for the update to take effect.
@@ -195,11 +305,27 @@ pub struct BulkDataListResponse {
     pub items: Vec<PartStatusEntry>,
 }
 
+/// One part of `GET /updates/{id}/bulk-data`. Under `/v1` it also carries
+/// the §7.20 Table 298 `BulkDataDescriptor` members (`id`, `mimetype`,
+/// `size`, `hash`, `hash_algorithm`); the legacy tree keeps the pre-Table-298
+/// shape.
 #[derive(Debug, Serialize)]
 pub struct PartStatusEntry {
+    /// Table 298 `id`: the part name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Table 298 `mimetype`: the upload's `Content-Type`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mimetype: Option<String>,
     pub part_id: String,
     pub size: u64,
     pub sha256: String,
+    /// Table 298 `hash` (same value as `sha256`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
+    /// Table 298 `hash_algorithm` of `hash`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash_algorithm: Option<&'static str>,
     /// Absent for a part the executor holds but this server never received.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub href: Option<String>,
@@ -215,6 +341,12 @@ pub struct PartUploadResponse {
     pub size: u64,
     pub sha256: String,
     pub href: String,
+}
+
+/// Body of `POST /updates/{id}/bulk-data` — §7.20 Table 303.
+#[derive(Debug, Serialize)]
+pub struct PartCreatedResponse {
+    pub id: String,
 }
 
 /// `PUT /updates/{id}/execute` query parameters.
@@ -246,13 +378,26 @@ impl ExecuteQuery {
 /// POST /vehicle/v1/components/{component_id}/updates
 pub async fn register_update(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
     body: Option<Json<RegisterUpdateRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    register(state, tree, component_id, req, UpdatePath::Component).await
+}
+
+/// Register `req` on `component_id`. On the node-level collection (`at`) the
+/// id must also be free on every other component; on `component_id` itself
+/// the component collection's rule applies.
+async fn register(
+    state: AppState,
+    tree: Tree,
+    component_id: String,
+    req: RegisterUpdateRequest,
+    at: UpdatePath,
+) -> Result<(StatusCode, HeaderMap, Json<RegisterUpdateResponse>), ApiError> {
     // Verify the component exists before allocating an id.
     let backend = state.get_backend(&component_id)?;
-
-    let req = body.map(|Json(b)| b).unwrap_or_default();
 
     // F.D3 dispatcher target validation.  If the manifest carries an
     // explicit `target`, it MUST match the addressed component.  We
@@ -267,9 +412,11 @@ pub async fn register_update(
         }
     }
 
-    // The client owns the package id (Table 261 `id`): it becomes the catalog
-    // key verbatim, and the server never makes one up. `autonomous` is
-    // reserved (§7.18.1.5) and cannot be registered as an installable package.
+    // A requested package id (Table 261 `id`) becomes the catalog key
+    // verbatim. Without one, `/v1` mints a UUID (§7.18.9: the server creates
+    // the id); the legacy tree keeps refusing it. An empty id is malformed on
+    // both trees. `autonomous` is reserved (§7.18.1.5) and cannot be
+    // registered as an installable package.
     let update_id = match req.id.as_deref() {
         Some(AUTONOMOUS_PACKAGE_ID) => {
             return Err(ApiError::BadRequest(
@@ -279,6 +426,7 @@ pub async fn register_update(
             ));
         }
         Some(id) if !id.is_empty() => id.to_string(),
+        None if tree == Tree::V1 => Uuid::new_v4().to_string(),
         _ => {
             return Err(ApiError::BadRequest(
                 "a registration carries the client's update id".into(),
@@ -296,6 +444,14 @@ pub async fn register_update(
     // holding the same lock so a concurrent registration sees the reservation.
     let prior = {
         let mut store = state.updates.0.lock();
+        if at == UpdatePath::Node {
+            if let Some(owner) = store
+                .keys()
+                .find(|k| k.update_id() == update_id && k.component_id() != component_id)
+            {
+                return Err(duplicate_node_id(&update_id, owner.component_id()));
+            }
+        }
         let prior = if let Some(entry) = store.get(&key) {
             let terminal = matches!(
                 entry.state,
@@ -420,12 +576,9 @@ pub async fn register_update(
         )));
     }
 
-    let base = format!(
-        "/vehicle/v1/components/{}/updates/{}",
-        component_id,
-        enc(&update_id)
-    );
+    let base = format!("{}/{}", at.collection(tree, &component_id), enc(&update_id));
     let resp = RegisterUpdateResponse {
+        id: update_id.clone(),
         update_id: update_id.clone(),
         href: base.clone(),
         bulk_data_href: format!("{base}/bulk-data"),
@@ -518,8 +671,9 @@ pub async fn list_updates(
 /// Table 261 detail body, resolved via the backend's package describer.
 pub async fn get_update(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
-) -> Result<Json<UpdatePackageDescriptor>, ApiError> {
+) -> Result<Json<UpdateDetail>, ApiError> {
     let backend = state.get_backend(&component_id)?;
 
     // §7.18.1.5: `autonomous` is a read-only indirection to a concrete id on
@@ -545,7 +699,13 @@ pub async fn get_update(
         // Not registered here, but possibly held by the executor (e.g. after
         // a server restart): describe it from what the executor reports.
         let held = held_update(backend, &update_id).await?;
-        return Ok(Json(held_descriptor(&component_id, &held)));
+        let descriptor = held_descriptor(&component_id, &held);
+        return Ok(Json(update_detail(
+            tree,
+            &component_id,
+            backend.as_ref(),
+            descriptor,
+        )));
     };
 
     let part_refs: Vec<UpdatePartRef<'_>> = parts
@@ -564,16 +724,77 @@ pub async fn get_update(
         parts: &part_refs,
     };
     let descriptor = backend.describe_update_package(&ctx).await?;
-    Ok(Json(descriptor))
+    Ok(Json(update_detail(
+        tree,
+        &component_id,
+        backend.as_ref(),
+        descriptor,
+    )))
+}
+
+/// The `GET /updates/{id}` body under `tree`. The descriptor's entity-path
+/// references come from the backend, which renders them under either base
+/// (the default descriptor under `/vehicle/v1`): one under a base is
+/// re-emitted under `tree`'s, any other is kept verbatim.
+fn update_detail(
+    tree: Tree,
+    component_id: &str,
+    backend: &dyn sovd_core::DiagnosticBackend,
+    mut descriptor: UpdatePackageDescriptor,
+) -> UpdateDetail {
+    for refs in [
+        &mut descriptor.added_components,
+        &mut descriptor.removed_components,
+        &mut descriptor.updated_components,
+        &mut descriptor.affected_components,
+    ] {
+        for entry in refs.iter_mut() {
+            if let Some((_, rest)) = Tree::split_path(entry) {
+                *entry = format!("{}{rest}", tree.base());
+            }
+        }
+    }
+    UpdateDetail {
+        descriptor,
+        x_update: x_update_target(tree, component_id).map(|target| XUpdateTarget {
+            target,
+            verdict_scope: x_update_verdict_scope(tree, backend),
+        }),
+    }
 }
 
 /// DELETE /vehicle/v1/components/{component_id}/updates/{update_id}
+///
+/// Under `/v1`, §7.18.8 Table 275: an update still running in phase execute
+/// (EXECUTING, EXECUTED, COMMITTING, ROLLING_BACK) is not deletable → 405.
+/// The legacy tree deletes it (aborting the task) as before.
 pub async fn delete_update(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Response, ApiError> {
     let backend = state.get_backend(&component_id)?;
     let key = UpdateKey::new(&component_id, &update_id);
+    if tree == Tree::V1 {
+        let activation = execute_activation(&state, backend, &key, &update_id).await?;
+        let store = state.updates.0.lock();
+        let entry = store
+            .get(&key)
+            .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+        if matches!(
+            x_update_state(entry, activation),
+            XUpdateState::Executing
+                | XUpdateState::Executed
+                | XUpdateState::Committing
+                | XUpdateState::RollingBack
+        ) {
+            let err = sovd_core::GenericError::vendor(
+                "method-not-allowed",
+                format!("update {update_id} is in phase execute and cannot be deleted (§7.18.8)"),
+            );
+            return Ok((StatusCode::METHOD_NOT_ALLOWED, Json(err)).into_response());
+        }
+    }
     let (registration_token, transfer_id, abort_handle) = {
         let store = state.updates.0.lock();
         let entry = store
@@ -592,7 +813,7 @@ pub async fn delete_update(
         let _ = backend.abort_flash(&tid).await;
     }
     remove_registration(&state, &key, registration_token);
-    Ok(StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -603,12 +824,14 @@ pub async fn delete_update(
 
 /// Common 202-response shape for all three lifecycle PUTs.
 fn accepted_with_status_location(
+    tree: Tree,
+    at: UpdatePath,
     component_id: &str,
     update_id: &str,
 ) -> Result<(StatusCode, HeaderMap), ApiError> {
     let location = format!(
-        "/vehicle/v1/components/{}/updates/{}/status",
-        component_id,
+        "{}/{}/status",
+        at.collection(tree, component_id),
         enc(update_id)
     );
     let mut headers = HeaderMap::new();
@@ -649,13 +872,24 @@ where
 /// `202 Accepted` + `Location: .../status`.
 pub async fn put_prepare(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    put_prepare_inner(state, component_id, update_id, None).await
+    put_prepare_inner(
+        state,
+        tree,
+        UpdatePath::Component,
+        component_id,
+        update_id,
+        None,
+    )
+    .await
 }
 
 async fn put_prepare_inner(
     state: AppState,
+    tree: Tree,
+    at: UpdatePath,
     component_id: String,
     update_id: String,
     expected_token: Option<Uuid>,
@@ -832,7 +1066,7 @@ async fn put_prepare_inner(
         }
     }
 
-    let (status, headers) = accepted_with_status_location(&component_id, &update_id)?;
+    let (status, headers) = accepted_with_status_location(tree, at, &component_id, &update_id)?;
     Ok((status, headers))
 }
 
@@ -843,14 +1077,26 @@ async fn put_prepare_inner(
 /// for orchestrator-driven trial verdict on banked components.
 pub async fn put_execute(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
     Query(query): Query<ExecuteQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    put_execute_inner(state, component_id, update_id, query, None).await
+    put_execute_inner(
+        state,
+        tree,
+        UpdatePath::Component,
+        component_id,
+        update_id,
+        query,
+        None,
+    )
+    .await
 }
 
 async fn put_execute_inner(
     state: AppState,
+    tree: Tree,
+    at: UpdatePath,
     component_id: String,
     update_id: String,
     query: ExecuteQuery,
@@ -1173,7 +1419,7 @@ async fn put_execute_inner(
         }
     }
 
-    let (status, headers) = accepted_with_status_location(&component_id, &update_id)?;
+    let (status, headers) = accepted_with_status_location(tree, at, &component_id, &update_id)?;
     Ok((status, headers))
 }
 
@@ -1184,8 +1430,19 @@ async fn put_execute_inner(
 /// `automated`.
 pub async fn put_automated(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
+    automated(state, tree, UpdatePath::Component, component_id, update_id).await
+}
+
+async fn automated(
+    state: AppState,
+    tree: Tree,
+    at: UpdatePath,
+    component_id: String,
+    update_id: String,
+) -> Result<Response, ApiError> {
     let key = UpdateKey::new(&component_id, &update_id);
     // Phase A: only block if the package declared automated=false in
     // its registration manifest.  Default true unless explicitly
@@ -1215,6 +1472,8 @@ pub async fn put_automated(
     // same task machinery so both phases drive the same wire fields.
     let prepare_resp = put_prepare_inner(
         state.clone(),
+        tree,
+        at,
         component_id.clone(),
         update_id.clone(),
         Some(registration_token),
@@ -1258,6 +1517,8 @@ pub async fn put_automated(
         // (empty query → not orchestrated).
         let _ = put_execute_inner(
             task_state,
+            tree,
+            at,
             task_component_id,
             task_update_id,
             ExecuteQuery::default(),
@@ -1266,7 +1527,7 @@ pub async fn put_automated(
         .await;
     });
 
-    let (status, headers) = accepted_with_status_location(&component_id, &update_id)?;
+    let (status, headers) = accepted_with_status_location(tree, at, &component_id, &update_id)?;
     Ok((status, headers).into_response())
 }
 
@@ -1279,9 +1540,28 @@ pub async fn put_automated(
 /// `awaiting-verdict`.  Returns `202 + Location: .../status`.
 pub async fn put_x_ota_commit(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    verdict_commit(&state, &component_id, &update_id).await
+    x_ota_commit(
+        &state,
+        tree,
+        UpdatePath::Component,
+        &component_id,
+        &update_id,
+    )
+    .await
+}
+
+async fn x_ota_commit(
+    state: &AppState,
+    tree: Tree,
+    at: UpdatePath,
+    component_id: &str,
+    update_id: &str,
+) -> Result<(StatusCode, HeaderMap), ApiError> {
+    refuse_node_verdict(state, tree, component_id, Some(update_id))?;
+    verdict_commit(state, tree, at, component_id, update_id).await
 }
 
 /// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-ota-rollback`
@@ -1289,9 +1569,27 @@ pub async fn put_x_ota_commit(
 /// Symmetric to `x-ota-commit`; sends a `Rollback` verdict.
 pub async fn put_x_ota_rollback(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    verdict_rollback(&state, &component_id, &update_id)
+    x_ota_rollback(
+        &state,
+        tree,
+        UpdatePath::Component,
+        &component_id,
+        &update_id,
+    )
+}
+
+fn x_ota_rollback(
+    state: &AppState,
+    tree: Tree,
+    at: UpdatePath,
+    component_id: &str,
+    update_id: &str,
+) -> Result<(StatusCode, HeaderMap), ApiError> {
+    refuse_node_verdict(state, tree, component_id, Some(update_id))?;
+    verdict_rollback(state, tree, at, component_id, update_id)
 }
 
 /// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-update-commit`
@@ -1301,12 +1599,31 @@ pub async fn put_x_ota_rollback(
 /// update it is accepted and changes nothing.
 pub async fn put_x_update_commit(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if settled_as(&state, &component_id, &update_id, XUpdateState::Committed).await? {
-        return accepted_with_status_location(&component_id, &update_id);
+    x_update_commit(
+        &state,
+        tree,
+        UpdatePath::Component,
+        &component_id,
+        &update_id,
+    )
+    .await
+}
+
+async fn x_update_commit(
+    state: &AppState,
+    tree: Tree,
+    at: UpdatePath,
+    component_id: &str,
+    update_id: &str,
+) -> Result<(StatusCode, HeaderMap), ApiError> {
+    refuse_node_verdict(state, tree, component_id, Some(update_id))?;
+    if settled_as(state, component_id, update_id, XUpdateState::Committed).await? {
+        return accepted_with_status_location(tree, at, component_id, update_id);
     }
-    verdict_commit(&state, &component_id, &update_id).await
+    verdict_commit(state, tree, at, component_id, update_id).await
 }
 
 /// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-update-rollback`
@@ -1316,12 +1633,56 @@ pub async fn put_x_update_commit(
 /// nothing. `202 + Location: .../status`.
 pub async fn put_x_update_rollback(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if settled_as(&state, &component_id, &update_id, XUpdateState::RolledBack).await? {
-        return accepted_with_status_location(&component_id, &update_id);
+    x_update_rollback(
+        &state,
+        tree,
+        UpdatePath::Component,
+        &component_id,
+        &update_id,
+    )
+    .await
+}
+
+async fn x_update_rollback(
+    state: &AppState,
+    tree: Tree,
+    at: UpdatePath,
+    component_id: &str,
+    update_id: &str,
+) -> Result<(StatusCode, HeaderMap), ApiError> {
+    refuse_node_verdict(state, tree, component_id, Some(update_id))?;
+    if settled_as(state, component_id, update_id, XUpdateState::RolledBack).await? {
+        return accepted_with_status_location(tree, at, component_id, update_id);
     }
-    verdict_rollback(&state, &component_id, &update_id)
+    verdict_rollback(state, tree, at, component_id, update_id)
+}
+
+/// Under `/v1`, refuse a per-update verdict (or a force-rollback, `update_id`
+/// `None`) on a component whose updates are settled by the node operation.
+/// Runs before any state check so the client learns the settle path first.
+/// `/vehicle/v1` keeps accepting them for existing clients.
+fn refuse_node_verdict(
+    state: &AppState,
+    tree: Tree,
+    component_id: &str,
+    update_id: Option<&str>,
+) -> Result<(), ApiError> {
+    if tree != Tree::V1 || state.get_backend(component_id)?.verdict_scope() != VerdictScope::Node {
+        return Ok(());
+    }
+    let subject = match update_id {
+        Some(update_id) => format!("update '{update_id}' on '{component_id}'"),
+        None => format!("component '{component_id}'"),
+    };
+    let base = tree.base();
+    Err(ApiError::PreconditionFailed(format!(
+        "{subject} belongs to a node transaction; settle it with \
+         POST {base}/operations/x-update-commit/executions or \
+         POST {base}/operations/x-update-rollback/executions"
+    )))
 }
 
 /// Whether the update already settled the way a repeated verdict asks for: a
@@ -1348,6 +1709,8 @@ async fn settled_as(
 /// live) before the verdict is claimed.
 async fn verdict_commit(
     state: &AppState,
+    tree: Tree,
+    at: UpdatePath,
     component_id: &str,
     update_id: &str,
 ) -> Result<(StatusCode, HeaderMap), ApiError> {
@@ -1368,13 +1731,15 @@ async fn verdict_commit(
         registration_token,
         crate::state::Verdict::Commit,
     )?;
-    accepted_with_status_location(component_id, update_id)
+    accepted_with_status_location(tree, at, component_id, update_id)
 }
 
 /// Rollback verdict: no activation check — rolling back is always allowed
 /// from `awaiting-verdict`.
 fn verdict_rollback(
     state: &AppState,
+    tree: Tree,
+    at: UpdatePath,
     component_id: &str,
     update_id: &str,
 ) -> Result<(StatusCode, HeaderMap), ApiError> {
@@ -1386,7 +1751,7 @@ fn verdict_rollback(
         registration_token,
         crate::state::Verdict::Rollback,
     )?;
-    accepted_with_status_location(component_id, update_id)
+    accepted_with_status_location(tree, at, component_id, update_id)
 }
 
 /// `PUT /vehicle/v1/components/{component_id}/x-ota-force-rollback`
@@ -1405,8 +1770,10 @@ fn verdict_rollback(
 /// because by definition there may be no in-flight update_id.
 pub async fn put_x_ota_force_rollback(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    refuse_node_verdict(&state, tree, &component_id, None)?;
     let backend = state.get_backend(&component_id)?;
     backend.rollback_flash().await?;
     Ok(StatusCode::NO_CONTENT)
@@ -1479,6 +1846,7 @@ fn claim_verdict(
 /// — ISO 17978-3 §7.18.7.  Returns Table 270's `UpdateStatusBody`.
 pub async fn get_status(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
 ) -> Result<Json<UpdateStatusBody>, ApiError> {
     let backend = state.get_backend(&component_id)?;
@@ -1490,7 +1858,14 @@ pub async fn get_status(
             .await
             .ok()
             .map(|a| a.reset_kind);
-        return Ok(Json(held_status(&held.state, reset_kind)));
+        let target = x_update_target(tree, &component_id);
+        let verdict_scope = x_update_verdict_scope(tree, backend.as_ref());
+        return Ok(Json(held_status(
+            target,
+            verdict_scope,
+            &held.state,
+            reset_kind,
+        )));
     }
     let activation = execute_activation(&state, backend, &key, &update_id).await?;
     let store = state.updates.0.lock();
@@ -1510,8 +1885,10 @@ pub async fn get_status(
         substate: entry.substate,
         reset_kind: entry.reset_kind,
         x_update: Some(XUpdateStatus {
-            state: x_update_state(entry, activation),
+            state: x_update_state(entry, activation).for_tree(tree),
             reset_kind: entry.reset_kind.map(Into::into),
+            target: x_update_target(tree, &component_id),
+            verdict_scope: x_update_verdict_scope(tree, backend.as_ref()),
         }),
     }))
 }
@@ -1580,7 +1957,18 @@ pub(crate) fn x_update_state(
 /// GET /vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data
 pub async fn list_bulk_data(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id)): Path<(String, String)>,
+) -> Result<Json<BulkDataListResponse>, ApiError> {
+    bulk_data_list(state, tree, UpdatePath::Component, component_id, update_id).await
+}
+
+async fn bulk_data_list(
+    state: AppState,
+    tree: Tree,
+    at: UpdatePath,
+    component_id: String,
+    update_id: String,
 ) -> Result<Json<BulkDataListResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
     let parts: Option<Vec<UpdatePart>> = state
@@ -1595,16 +1983,25 @@ pub async fn list_bulk_data(
         let items = held
             .parts
             .into_iter()
-            .map(|p| PartStatusEntry {
-                part_id: if p.name.starts_with('#') {
+            .map(|p| {
+                let part_id = if p.name.starts_with('#') {
                     p.name
                 } else {
                     format!("#{}", p.name)
-                },
-                size: p.size,
-                sha256: p.sha256,
-                href: None,
-                present: true,
+                };
+                let mut item = PartStatusEntry {
+                    id: None,
+                    mimetype: None,
+                    part_id,
+                    size: p.size,
+                    sha256: p.sha256,
+                    hash: None,
+                    hash_algorithm: None,
+                    href: None,
+                    present: true,
+                };
+                describe_part(tree, &mut item, None);
+                item
             })
             .collect();
         return Ok(Json(BulkDataListResponse { items }));
@@ -1632,7 +2029,7 @@ pub async fn list_bulk_data(
     let items: Vec<PartStatusEntry> = parts
         .iter()
         .map(|p| {
-            let mut item = part_status_entry(&component_id, &update_id, p);
+            let mut item = part_status_entry(tree, at, &component_id, &update_id, p);
             item.present = held_names
                 .iter()
                 .any(|name| held_part_matches(&p.part_id, name));
@@ -1645,10 +2042,207 @@ pub async fn list_bulk_data(
 /// PUT /vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data/{part_id}
 pub async fn put_bulk_data_part(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, update_id, part_id)): Path<(String, String, String)>,
     headers: HeaderMap,
     body: Body,
 ) -> Result<impl IntoResponse, ApiError> {
+    bulk_data_part(
+        state,
+        tree,
+        UpdatePath::Component,
+        (component_id, update_id, part_id),
+        headers,
+        body,
+    )
+    .await
+}
+
+/// POST /vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data
+pub async fn post_bulk_data_part(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    Path((component_id, update_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<impl IntoResponse, ApiError> {
+    let path = (component_id, update_id);
+    bulk_data_post(state, tree, UpdatePath::Component, path, headers, body).await
+}
+
+/// The legacy `PUT {update}/bulk-data/{part_id}`: [`store_part`], answered
+/// with the pre-§7.20 body.
+async fn bulk_data_part(
+    state: AppState,
+    tree: Tree,
+    at: UpdatePath,
+    path: (String, String, String),
+    headers: HeaderMap,
+    body: Body,
+) -> Result<(StatusCode, HeaderMap, Json<PartUploadResponse>), ApiError> {
+    tracing::info!(
+        legacy_bulk_data_put = true,
+        tree = tree.base(),
+        user_agent = headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+        "legacy_bulk_data_put: PUT bulk-data part upload"
+    );
+    let mimetype = content_type(&headers);
+    let stored = store_part(state, tree, at, path, mimetype, &headers, body).await?;
+    let response_headers = etag_headers(&stored.sha256)?;
+    let resp = PartUploadResponse {
+        part_id: stored.part_id,
+        size: stored.size,
+        sha256: stored.sha256,
+        href: stored.href,
+    };
+    Ok((StatusCode::CREATED, response_headers, Json(resp)))
+}
+
+/// `POST {update}/bulk-data` — §7.20 upload: the body is the part, named by
+/// `Content-Disposition`; 201 + `Location` of the part + Table 303 `{id}`.
+async fn bulk_data_post(
+    state: AppState,
+    tree: Tree,
+    at: UpdatePath,
+    (component_id, update_id): (String, String),
+    headers: HeaderMap,
+    body: Body,
+) -> Result<(StatusCode, HeaderMap, Json<PartCreatedResponse>), ApiError> {
+    let part_id = disposition_part_name(&headers)?;
+    let mimetype = content_type(&headers);
+    let path = (component_id, update_id, part_id);
+    let stored = store_part(state, tree, at, path, mimetype, &headers, body).await?;
+    let mut response_headers = etag_headers(&stored.sha256)?;
+    response_headers.insert(
+        header::LOCATION,
+        HeaderValue::from_str(&stored.href)
+            .map_err(|e| ApiError::Internal(format!("bad Location header: {e}")))?,
+    );
+    let resp = PartCreatedResponse { id: stored.part_id };
+    Ok((StatusCode::CREATED, response_headers, Json(resp)))
+}
+
+/// `Content-Type` reported for a part whose upload did not record one.
+const DEFAULT_PART_MIMETYPE: &str = "application/octet-stream";
+
+/// An upload's `Content-Type`, recorded as the part's mimetype.
+fn content_type(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
+
+/// The part name of a `POST {update}/bulk-data`: the `filename` parameter of
+/// `Content-Disposition`, else its `name`. It must be usable as the part's
+/// URL segment (`{update}/bulk-data/{part_id}`): non-empty, no `/`, not `.`
+/// or `..`. 400 otherwise, or when the header is absent.
+fn disposition_part_name(headers: &HeaderMap) -> Result<String, ApiError> {
+    let value = headers
+        .get(header::CONTENT_DISPOSITION)
+        .ok_or_else(|| {
+            ApiError::BadRequest("a bulk-data upload names its part in Content-Disposition".into())
+        })?
+        .to_str()
+        .map_err(|_| ApiError::BadRequest("Content-Disposition is not ASCII".into()))?;
+    let params = disposition_params(value);
+    let param = |key: &str| {
+        params
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v.clone())
+    };
+    let name = param("filename").or_else(|| param("name")).ok_or_else(|| {
+        ApiError::BadRequest(
+            "Content-Disposition names no part (no filename or name parameter)".into(),
+        )
+    })?;
+    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+        return Err(ApiError::BadRequest(format!(
+            "invalid bulk-data part name {name:?}"
+        )));
+    }
+    Ok(name)
+}
+
+/// The `key=value` parameters of a `Content-Disposition` value (RFC 6266),
+/// after the disposition type; quoted values are unquoted.
+fn disposition_params(value: &str) -> Vec<(String, String)> {
+    let mut params = Vec::new();
+    let mut chars = value.chars().peekable();
+    // Skip the disposition type.
+    chars.by_ref().find(|c| *c == ';');
+    while chars.peek().is_some() {
+        let mut key = String::new();
+        let mut has_value = false;
+        for c in chars.by_ref() {
+            match c {
+                '=' => {
+                    has_value = true;
+                    break;
+                }
+                ';' => break,
+                c => key.push(c),
+            }
+        }
+        let mut val = String::new();
+        if has_value {
+            while chars.next_if(|c| c.is_whitespace()).is_some() {}
+            if chars.next_if_eq(&'"').is_some() {
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        '\\' => val.extend(chars.next()),
+                        c => val.push(c),
+                    }
+                }
+                chars.by_ref().find(|c| *c == ';');
+            } else {
+                val.extend(chars.by_ref().take_while(|c| *c != ';'));
+            }
+        }
+        let key = key.trim();
+        if !key.is_empty() {
+            params.push((key.to_string(), val.trim().to_string()));
+        }
+    }
+    params
+}
+
+/// The `ETag` of an uploaded part: its SHA-256.
+fn etag_headers(sha256: &str) -> Result<HeaderMap, ApiError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::ETAG,
+        HeaderValue::from_str(&format!("\"{sha256}\""))
+            .map_err(|e| ApiError::Internal(format!("bad ETag header: {e}")))?,
+    );
+    Ok(headers)
+}
+
+/// A part [`store_part`] recorded.
+struct StoredPart {
+    part_id: String,
+    size: u64,
+    sha256: String,
+    href: String,
+}
+
+/// Stream `body` to the backend as part `part_id` of the update and record
+/// it (replacing a part of that id), the shared core of the `POST` and the
+/// legacy `PUT` upload.
+async fn store_part(
+    state: AppState,
+    tree: Tree,
+    at: UpdatePath,
+    (component_id, update_id, part_id): (String, String, String),
+    mimetype: Option<String>,
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<StoredPart, ApiError> {
     let backend = state.get_backend(&component_id)?;
     let key = UpdateKey::new(&component_id, &update_id);
     let registration_token = {
@@ -1734,6 +2328,7 @@ pub async fn put_bulk_data_part(
                         part_id: part_id.clone(),
                         size: final_size,
                         sha256: sha256.clone(),
+                        mimetype,
                         file_id,
                     });
                     entry.state = UpdateState::Uploading;
@@ -1750,24 +2345,351 @@ pub async fn put_bulk_data_part(
     }
 
     let href = format!(
-        "/vehicle/v1/components/{}/updates/{}/bulk-data/{}",
-        component_id,
+        "{}/{}/bulk-data/{}",
+        at.collection(tree, &component_id),
         enc(&update_id),
         enc(&part_id)
     );
-    let mut response_headers = HeaderMap::new();
-    response_headers.insert(
-        header::ETAG,
-        HeaderValue::from_str(&format!("\"{sha256}\""))
-            .map_err(|e| ApiError::Internal(format!("bad ETag header: {e}")))?,
-    );
-    let resp = PartUploadResponse {
+    Ok(StoredPart {
         part_id,
         size: final_size,
         sha256,
         href,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Node-level collection: `{base}/updates` (ISO 17978-3 §7.18.1.1 names the
+// server root the primary location). An alias of the per-component
+// collections: a registration names its component in `target`, every other
+// verb resolves the component from the update id and runs the per-component
+// handler, with the URLs it emits rooted at `{base}/updates`. See
+// `docs/x-update.md` "Node-level collection".
+// ---------------------------------------------------------------------------
+
+/// `POST {base}/updates` — register on the component named by `target`, one
+/// of the root document's `x-update.update-targets`. The id must be free on
+/// every other component (409 otherwise); on `target` itself the answer is
+/// that of `POST {base}/components/{target}/updates`.
+pub async fn register_node_update(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    body: Option<Json<RegisterUpdateRequest>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let target = match req.target.as_deref() {
+        None => {
+            return Err(ApiError::BadRequest(
+                "a registration on the node-level collection names its component in `target`"
+                    .into(),
+            ))
+        }
+        Some(target) if !update_targets(&state).iter().any(|(id, _)| *id == target) => {
+            return Err(ApiError::BadRequest(format!(
+                "target {target:?} is not one of x-update.update-targets"
+            )))
+        }
+        Some(target) => target.to_string(),
     };
-    Ok((StatusCode::CREATED, response_headers, Json(resp)))
+    authorize_component(tree, client.as_deref(), &target)?;
+    // Ids other components' executors hold count as taken; the store is
+    // checked under its lock at insertion.
+    if let Some(id) = req.id.as_deref() {
+        for (owner, backend) in update_targets(&state) {
+            if owner != target && held_updates(backend).await?.iter().any(|h| h.id == id) {
+                return Err(duplicate_node_id(id, owner));
+            }
+        }
+    }
+    register(state, tree, target, req, UpdatePath::Node).await
+}
+
+/// `GET {base}/updates` — the update ids of every update target the client
+/// may access, registered or held; same `origin` gate as [`list_updates`].
+pub async fn list_node_updates(
+    State(state): State<AppState>,
+    client: Option<Extension<ClientContext>>,
+    Query(query): Query<ListUpdatesQuery>,
+) -> Result<Json<UpdatesListResponse>, ApiError> {
+    if !origin_lists_catalog(query.origin.as_deref())? {
+        return Ok(Json(UpdatesListResponse { items: Vec::new() }));
+    }
+    let client = client.as_deref();
+    let targets: Vec<_> = update_targets(&state)
+        .into_iter()
+        .filter(|(id, _)| client.is_none_or(|c| c.can_access_component(id)))
+        .collect();
+    let mut items: Vec<String> = state
+        .updates
+        .0
+        .lock()
+        .keys()
+        .filter(|key| targets.iter().any(|(id, _)| *id == key.component_id()))
+        .map(|key| key.update_id().to_string())
+        .collect();
+    for (_, backend) in &targets {
+        items.extend(held_updates(backend).await?.into_iter().map(|h| h.id));
+    }
+    items.sort();
+    items.dedup();
+    Ok(Json(UpdatesListResponse { items }))
+}
+
+/// `GET {base}/updates/{update_id}`.
+pub async fn get_node_update(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<Json<UpdateDetail>, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    get_update(State(state), Extension(tree), Path((owner, update_id))).await
+}
+
+/// `DELETE {base}/updates/{update_id}`.
+pub async fn delete_node_update(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    delete_update(State(state), Extension(tree), Path((owner, update_id))).await
+}
+
+/// `GET {base}/updates/{update_id}/status`.
+pub async fn get_node_status(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<Json<UpdateStatusBody>, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    get_status(State(state), Extension(tree), Path((owner, update_id))).await
+}
+
+/// `GET {base}/updates/{update_id}/bulk-data`.
+pub async fn list_node_bulk_data(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<Json<BulkDataListResponse>, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    bulk_data_list(state, tree, UpdatePath::Node, owner, update_id).await
+}
+
+/// `PUT {base}/updates/{update_id}/bulk-data/{part_id}`.
+pub async fn put_node_bulk_data_part(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path((update_id, part_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    let path = (owner, update_id, part_id);
+    bulk_data_part(state, tree, UpdatePath::Node, path, headers, body).await
+}
+
+/// `POST {base}/updates/{update_id}/bulk-data`.
+pub async fn post_node_bulk_data_part(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    bulk_data_post(
+        state,
+        tree,
+        UpdatePath::Node,
+        (owner, update_id),
+        headers,
+        body,
+    )
+    .await
+}
+
+/// `PUT {base}/updates/{update_id}/prepare`.
+pub async fn put_node_prepare(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    put_prepare_inner(state, tree, UpdatePath::Node, owner, update_id, None).await
+}
+
+/// `PUT {base}/updates/{update_id}/execute`.
+pub async fn put_node_execute(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+    Query(query): Query<ExecuteQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    put_execute_inner(state, tree, UpdatePath::Node, owner, update_id, query, None).await
+}
+
+/// `PUT {base}/updates/{update_id}/automated`.
+pub async fn put_node_automated(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    automated(state, tree, UpdatePath::Node, owner, update_id).await
+}
+
+/// `PUT {base}/updates/{update_id}/x-ota-commit`.
+pub async fn put_node_x_ota_commit(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    x_ota_commit(&state, tree, UpdatePath::Node, &owner, &update_id).await
+}
+
+/// `PUT {base}/updates/{update_id}/x-ota-rollback`.
+pub async fn put_node_x_ota_rollback(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    x_ota_rollback(&state, tree, UpdatePath::Node, &owner, &update_id)
+}
+
+/// `PUT {base}/updates/{update_id}/x-update-commit`.
+pub async fn put_node_x_update_commit(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    x_update_commit(&state, tree, UpdatePath::Node, &owner, &update_id).await
+}
+
+/// `PUT {base}/updates/{update_id}/x-update-rollback`.
+pub async fn put_node_x_update_rollback(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path(update_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    x_update_rollback(&state, tree, UpdatePath::Node, &owner, &update_id).await
+}
+
+/// The components whose backend supports software update (the root
+/// document's `x-update.update-targets`), sorted by id.
+fn update_targets(state: &AppState) -> Vec<(&str, &Arc<dyn sovd_core::DiagnosticBackend>)> {
+    let mut targets: Vec<_> = state
+        .backends()
+        .iter()
+        .filter(|(_, backend)| backend.capabilities().software_update)
+        .map(|(id, backend)| (id.as_str(), backend))
+        .collect();
+    targets.sort_by_key(|(id, _)| *id);
+    targets
+}
+
+/// The component a node-level `{base}/updates/{update_id}/…` request
+/// addresses: the one that has the update registered or, failing that, whose
+/// executor holds it. The client's component scope is then checked as for a
+/// component-addressed route.
+async fn node_owner(
+    state: &AppState,
+    tree: Tree,
+    client: Option<&ClientContext>,
+    uri: &Uri,
+    update_id: &str,
+) -> Result<String, ApiError> {
+    let mut owners: Vec<String> = state
+        .updates
+        .0
+        .lock()
+        .keys()
+        .filter(|key| key.update_id() == update_id)
+        .map(|key| key.component_id().to_string())
+        .collect();
+    if owners.is_empty() {
+        for (id, backend) in update_targets(state) {
+            if held_updates(backend)
+                .await?
+                .iter()
+                .any(|h| h.id == update_id)
+            {
+                owners.push(id.to_string());
+            }
+        }
+    }
+    owners.sort();
+    match owners.as_slice() {
+        [] => Err(ApiError::NotFound(format!("No resource at {}", uri.path()))),
+        [owner] => {
+            authorize_component(tree, client, owner)?;
+            Ok(owner.clone())
+        }
+        _ => Err(ApiError::Conflict(format!(
+            "update id '{update_id}' is registered on several components ({}); \
+             use the entity-level collection",
+            owners.join(", ")
+        ))),
+    }
+}
+
+/// The component-scope check the auth middleware makes on a
+/// component-addressed route (C-031), for a node-level route whose component
+/// is known only from the request: 403 under `/v1`, the legacy tree's 401.
+fn authorize_component(
+    tree: Tree,
+    client: Option<&ClientContext>,
+    component_id: &str,
+) -> Result<(), ApiError> {
+    match client {
+        Some(ctx) if !ctx.can_access_component(component_id) => {
+            let msg = format!("client not authorized for component '{component_id}'");
+            Err(match tree {
+                Tree::V1 => ApiError::Forbidden(msg),
+                Tree::Legacy => ApiError::Unauthorized(msg),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// 409 for a node-level registration whose id is taken on `owner`.
+fn duplicate_node_id(update_id: &str, owner: &str) -> ApiError {
+    ApiError::UpdateInProgress(format!(
+        "update package {update_id:?} is already registered on {owner:?}; \
+         an id is registered on one component only in the node-level collection"
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1784,19 +2706,43 @@ fn remove_registration(state: &AppState, key: &UpdateKey, registration_token: Uu
     }
 }
 
-fn part_status_entry(component_id: &str, update_id: &str, p: &UpdatePart) -> PartStatusEntry {
-    PartStatusEntry {
+fn part_status_entry(
+    tree: Tree,
+    at: UpdatePath,
+    component_id: &str,
+    update_id: &str,
+    p: &UpdatePart,
+) -> PartStatusEntry {
+    let mut item = PartStatusEntry {
+        id: None,
+        mimetype: None,
         part_id: p.part_id.clone(),
         size: p.size,
         sha256: p.sha256.clone(),
+        hash: None,
+        hash_algorithm: None,
         href: Some(format!(
-            "/vehicle/v1/components/{}/updates/{}/bulk-data/{}",
-            component_id,
+            "{}/{}/bulk-data/{}",
+            at.collection(tree, component_id),
             enc(update_id),
             enc(&p.part_id)
         )),
         present: false,
+    };
+    describe_part(tree, &mut item, p.mimetype.as_deref());
+    item
+}
+
+/// Fill the Table 298 members of a listed part under `/v1`; the legacy
+/// tree's listing keeps its pre-Table-298 shape.
+fn describe_part(tree: Tree, item: &mut PartStatusEntry, mimetype: Option<&str>) {
+    if tree != Tree::V1 {
+        return;
     }
+    item.id = Some(item.part_id.clone());
+    item.mimetype = Some(mimetype.unwrap_or(DEFAULT_PART_MIMETYPE).to_string());
+    item.hash = Some(item.sha256.clone());
+    item.hash_algorithm = Some("sha256");
 }
 
 /// The updates the component's executor holds. An executor that does not
@@ -1850,7 +2796,12 @@ fn held_descriptor(component_id: &str, held: &HeldUpdate) -> UpdatePackageDescri
 }
 
 /// Table 270 status of a held update, from the executor's held state.
-fn held_status(state: &HeldState, reset_kind: Option<sovd_core::ResetKind>) -> UpdateStatusBody {
+fn held_status(
+    target: Option<String>,
+    verdict_scope: Option<XUpdateVerdictScope>,
+    state: &HeldState,
+    reset_kind: Option<sovd_core::ResetKind>,
+) -> UpdateStatusBody {
     let (phase, status, x_state) = match state {
         HeldState::Preparing => (Phase::Prepare, Status::InProgress, XUpdateState::Preparing),
         HeldState::Prepared => (Phase::Prepare, Status::Completed, XUpdateState::Prepared),
@@ -1868,6 +2819,8 @@ fn held_status(state: &HeldState, reset_kind: Option<sovd_core::ResetKind>) -> U
         x_update: Some(XUpdateStatus {
             state: x_state,
             reset_kind: reset_kind.map(Into::into),
+            target,
+            verdict_scope,
         }),
     }
 }
@@ -1943,6 +2896,8 @@ mod tests {
             x_update: Some(XUpdateStatus {
                 state: XUpdateState::RolledBack,
                 reset_kind: Some(sovd_core::ResetKind::RequiresEcuReset.into()),
+                target: None,
+                verdict_scope: None,
             }),
         };
         let json = serde_json::to_string(&body).unwrap();

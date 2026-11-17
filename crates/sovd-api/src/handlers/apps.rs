@@ -1,12 +1,13 @@
 //! Sub-entity (apps/containers) handlers
 
 use axum::extract::{Path, State};
-use axum::Json;
+use axum::{Extension, Json};
 use serde::Serialize;
 
 use crate::error::ApiError;
 use crate::handlers::components::CapabilitiesResponse;
 use crate::state::AppState;
+use crate::Tree;
 
 #[derive(Serialize)]
 pub struct AppsResponse {
@@ -47,6 +48,7 @@ pub struct AppDetailResponse {
 /// List sub-entities (containers/apps)
 pub async fn list_apps(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
 ) -> Result<Json<AppsResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
@@ -67,7 +69,7 @@ pub async fn list_apps(
             name: e.name.clone(),
             entity_type: e.entity_type.clone(),
             status: e.status.clone(),
-            href: format!("/vehicle/v1/components/{}/apps/{}", component_id, e.id),
+            href: tree.app(&component_id, &e.id),
         })
         .collect();
 
@@ -78,6 +80,7 @@ pub async fn list_apps(
 /// List sub-entities of a sub-entity (e.g., ECUs behind a nested gateway)
 pub async fn list_sub_entity_apps(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, app_id)): Path<(String, String)>,
 ) -> Result<Json<AppsResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
@@ -99,10 +102,7 @@ pub async fn list_sub_entity_apps(
             name: e.name.clone(),
             entity_type: e.entity_type.clone(),
             status: e.status.clone(),
-            href: format!(
-                "/vehicle/v1/components/{}/apps/{}/apps/{}",
-                component_id, app_id, e.id
-            ),
+            href: format!("{}/apps/{}", tree.app(&component_id, &app_id), e.id),
         })
         .collect();
 
@@ -113,6 +113,7 @@ pub async fn list_sub_entity_apps(
 /// Get sub-entity details
 pub async fn get_app(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, app_id)): Path<(String, String)>,
 ) -> Result<Json<AppDetailResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
@@ -128,7 +129,7 @@ pub async fn get_app(
     let info = sub_backend.entity_info();
     let caps = sub_backend.capabilities();
 
-    let base_path = format!("/vehicle/v1/components/{}/apps/{}", component_id, app_id);
+    let base_path = tree.app(&component_id, &app_id);
 
     Ok(Json(AppDetailResponse {
         id: info.id.clone(),

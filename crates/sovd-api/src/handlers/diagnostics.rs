@@ -10,12 +10,13 @@
 //! diag-agent. See `tasks/diag-agent-design.md`.
 
 use axum::extract::{Path, Query, State};
-use axum::Json;
+use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 use sovd_core::DiagnosticResult;
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::Tree;
 
 #[derive(Debug, Serialize)]
 pub struct DiagnosticsResponse {
@@ -42,11 +43,12 @@ pub struct DiagnosticsQuery {
 /// GET /vehicle/v1/components/:component_id/diagnostics
 pub async fn list_diagnostics(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
     Query(query): Query<DiagnosticsQuery>,
 ) -> Result<Json<DiagnosticsResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
-    let base = format!("/vehicle/v1/components/{component_id}/diagnostics");
+    let base = format!("{}/diagnostics", tree.component(&component_id));
     let items = backend
         .list_diagnostics()
         .await?
@@ -104,7 +106,7 @@ mod tests {
                     name: "vm1".into(),
                     entity_type: "component".into(),
                     description: None,
-                    href: "/vehicle/v1/components/vm1".into(),
+                    href: Tree::Legacy.component("vm1"),
                     status: Some("online".into()),
                 },
                 caps: Capabilities {
@@ -177,6 +179,7 @@ mod tests {
     async fn lists_probes_with_href() {
         let r = list_diagnostics(
             State(state()),
+            Extension(Tree::Legacy),
             Path("vm1".into()),
             Query(DiagnosticsQuery::default()),
         )
@@ -194,6 +197,7 @@ mod tests {
     async fn tags_filter_selects() {
         let r = list_diagnostics(
             State(state()),
+            Extension(Tree::Legacy),
             Path("vm1".into()),
             Query(DiagnosticsQuery {
                 tags: Some("storage".into()),

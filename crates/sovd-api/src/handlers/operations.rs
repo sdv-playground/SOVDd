@@ -5,7 +5,8 @@
 //!   `POST /vehicle/v1/components/{id}/operations/{op_id}/executions`
 //!     body: `{parameters?: "<hex>" | <io-control-object>}`
 //!     → `202 Accepted` + `Location: .../executions/{exec_id}` +
-//!       placeholder `OperationExecution { status: running }` body.
+//!       placeholder `OperationExecution { status: running }` body, plus
+//!       the Table 184/189 `id` and `capability` members.
 //!       The backend call runs in a tokio task; clients poll
 //!       `GET .../executions/{exec_id}` until terminal.
 //!
@@ -21,13 +22,14 @@
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
-use axum::Json;
+use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 use sovd_core::{IoControlAction, OperationExecution, OperationInfo, OperationStatus};
 use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::Tree;
 
 #[derive(Serialize)]
 pub struct OperationsResponse {
@@ -124,6 +126,31 @@ impl From<&OperationInfo> for OperationInfoResponse {
     }
 }
 
+/// An [`OperationExecution`] as served by `POST .../executions` (ISO 17978-3
+/// §7.14.6 Table 184) and `GET .../executions/{exec_id}` (§7.14.7 Table 189):
+/// the spec's `id` and `capability` beside the existing members, which stay
+/// (clients read `execution_id`).
+#[derive(Serialize)]
+pub struct ExecutionResponse {
+    /// Table 184 `id` — the execution id, equal to `execution_id`.
+    pub id: String,
+    /// Table 189 `capability` — always `execute`: this server offers no
+    /// `PUT .../executions/{exec_id}` capability change (§7.14.9).
+    pub capability: &'static str,
+    #[serde(flatten)]
+    pub execution: OperationExecution,
+}
+
+impl From<OperationExecution> for ExecutionResponse {
+    fn from(execution: OperationExecution) -> Self {
+        Self {
+            id: execution.execution_id.clone(),
+            capability: "execute",
+            execution,
+        }
+    }
+}
+
 /// Body for `POST .../operations/{op_id}/executions`.
 ///
 /// `parameters` is polymorphic:
@@ -153,13 +180,14 @@ pub struct ExecutionQuery {
 /// here so a single GET enumerates both classes.
 pub async fn list_operations(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
 ) -> Result<Json<OperationsResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
     let routines = backend.list_operations().await?;
     let outputs = backend.list_outputs().await.unwrap_or_default();
 
-    let base = format!("/vehicle/v1/components/{}/operations", component_id);
+    let base = format!("{}/operations", tree.component(&component_id));
     let mut items: Vec<OperationInfoResponse> = routines
         .iter()
         .map(|op| OperationInfoResponse {
@@ -195,10 +223,11 @@ pub async fn list_operations(
 /// frozen) so clients don't need a second round-trip.
 pub async fn get_operation(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, operation_id)): Path<(String, String)>,
 ) -> Result<Json<OperationInfoResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
-    let base = format!("/vehicle/v1/components/{}/operations", component_id);
+    let base = format!("{}/operations", tree.component(&component_id));
     let href = format!("{}/{}/executions", base, operation_id);
 
     // RoutineControl path: pluck from list_operations.
@@ -274,6 +303,7 @@ pub async fn get_operation(
 /// re-poll the backend live).
 pub async fn start_operation_execution(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, operation_id)): Path<(String, String)>,
     Json(request): Json<StartExecutionRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -394,8 +424,10 @@ pub async fn start_operation_execution(
     });
 
     let href = format!(
-        "/vehicle/v1/components/{}/operations/{}/executions/{}",
-        component_id, operation_id, exec_id
+        "{}/operations/{}/executions/{}",
+        tree.component(&component_id),
+        operation_id,
+        exec_id
     );
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -410,7 +442,7 @@ pub async fn start_operation_execution(
     Ok((
         StatusCode::ACCEPTED,
         headers,
-        Json(OperationExecution {
+        Json(ExecutionResponse::from(OperationExecution {
             execution_id: exec_id,
             operation_id,
             status: OperationStatus::Running,
@@ -418,7 +450,7 @@ pub async fn start_operation_execution(
             started_at: now,
             completed_at: None,
             error: None,
-        }),
+        })),
     ))
 }
 
@@ -431,7 +463,7 @@ pub async fn get_operation_execution(
     State(state): State<AppState>,
     Path((component_id, operation_id, exec_id)): Path<(String, String, String)>,
     Query(query): Query<ExecutionQuery>,
-) -> Result<Json<OperationExecution>, ApiError> {
+) -> Result<Json<ExecutionResponse>, ApiError> {
     // Validate the component exists before checking the cache.
     let backend = state.get_backend(&component_id)?;
 
@@ -441,14 +473,14 @@ pub async fn get_operation_execution(
             .operation_executions
             .get(&component_id, &operation_id, &exec_id)
         {
-            return Ok(Json(cached));
+            return Ok(Json(cached.into()));
         }
     }
 
     // Either `?refresh=true` or no cache hit — re-poll the backend.
     let mut execution = backend.get_operation_status(&operation_id).await?;
     execution.execution_id = exec_id;
-    Ok(Json(execution))
+    Ok(Json(execution.into()))
 }
 
 /// Parse the structured `parameters` object for an IO control op.

@@ -8,7 +8,9 @@ use sovd_core::Capabilities;
 
 use crate::auth::ClientContext;
 use crate::error::ApiError;
+use crate::handlers::updates::{x_update_verdict_scope, XUpdateVerdictScope};
 use crate::state::AppState;
+use crate::Tree;
 
 #[derive(Serialize)]
 pub struct ComponentsResponse {
@@ -42,6 +44,13 @@ pub struct ComponentDetailResponse {
     pub logs: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub apps: Option<String>,
+    /// §7.6.3 Table 53 (C1): present only when the component supports it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updates: Option<String>,
+    #[serde(rename = "bulk-data", skip_serializing_if = "Option::is_none")]
+    pub bulk_data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configurations: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -76,6 +85,10 @@ pub struct XUpdateCapability {
     /// Whether an update on this component pauses in trial for a verdict
     /// (`banked`) or completes without one (`singleshot`).
     pub verdict: bool,
+    /// Whether that verdict is given per update or by the node operation
+    /// (`/v1` only, see `updates::x_update_verdict_scope`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verdict_scope: Option<XUpdateVerdictScope>,
 }
 
 impl From<&Capabilities> for CapabilitiesResponse {
@@ -109,6 +122,7 @@ impl From<&Capabilities> for CapabilitiesResponse {
 /// disabled ⇒ list everything).
 pub async fn list_components(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     client: Option<Extension<ClientContext>>,
 ) -> Json<ComponentsResponse> {
     let client = client.map(|Extension(c)| c);
@@ -126,7 +140,7 @@ pub async fn list_components(
                 name: info.name.clone(),
                 description: info.description.clone(),
                 entity_type: info.entity_type.clone(),
-                href: format!("/vehicle/v1/components/{}", id),
+                href: tree.component(id),
             }
         })
         .collect();
@@ -138,37 +152,51 @@ pub async fn list_components(
 /// Get detailed information about a component
 pub async fn get_component(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
 ) -> Result<Json<ComponentDetailResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
     let info = backend.entity_info();
     let caps = backend.capabilities();
     let mut capabilities = CapabilitiesResponse::from(caps);
+    let verdict_scope = x_update_verdict_scope(tree, backend.as_ref());
     capabilities.x_update = match backend.update_shape() {
-        "banked" => Some(XUpdateCapability { verdict: true }),
-        "singleshot" => Some(XUpdateCapability { verdict: false }),
+        "banked" => Some(XUpdateCapability {
+            verdict: true,
+            verdict_scope,
+        }),
+        "singleshot" => Some(XUpdateCapability {
+            verdict: false,
+            verdict_scope,
+        }),
         _ => None,
     };
 
+    let base = tree.component(&component_id);
     let response = ComponentDetailResponse {
         id: component_id.clone(),
         name: info.name.clone(),
         description: info.description.clone(),
         entity_type: info.entity_type.clone(),
         capabilities,
-        data: format!("/vehicle/v1/components/{}/data", component_id),
-        faults: format!("/vehicle/v1/components/{}/faults", component_id),
-        operations: format!("/vehicle/v1/components/{}/operations", component_id),
+        data: format!("{base}/data"),
+        faults: format!("{base}/faults"),
+        operations: format!("{base}/operations"),
         logs: if caps.logs {
-            Some(format!("/vehicle/v1/components/{}/logs", component_id))
+            Some(format!("{base}/logs"))
         } else {
             None
         },
         apps: if caps.sub_entities {
-            Some(format!("/vehicle/v1/components/{}/apps", component_id))
+            Some(format!("{base}/apps"))
         } else {
             None
         },
+        updates: caps.software_update.then(|| format!("{base}/updates")),
+        bulk_data: caps.bulk_data.then(|| format!("{base}/bulk-data")),
+        configurations: caps
+            .configurations
+            .then(|| format!("{base}/configurations")),
     };
 
     Ok(Json(response))
