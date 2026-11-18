@@ -217,3 +217,75 @@ async fn options_on_update_bulk_data_allows_post() {
         assert!(allow.contains("GET"), "{path}: {allow}");
     }
 }
+
+/// `GET {update}/bulk-data/{part_id}` reads a part back as it was uploaded,
+/// with its `Content-Type` and `ETag`, and answers 404 until it is there: an
+/// orchestrator retrying an upload checks with it whether its last one landed
+/// (lib-orchestrate `Sovd::upload_manifest`), on the component collection and
+/// on the node-level alias alike.
+#[tokio::test]
+async fn a_part_reads_back_as_uploaded() {
+    for tree in Tree::ALL {
+        for update in update_urls(tree, "u1") {
+            let server = server().await;
+            let manifest = format!("{update}/bulk-data/manifest");
+            let get = |path: String| {
+                let server = &server;
+                async move { send(server, Method::GET, &path, &[], None).await }
+            };
+
+            let resp = get(manifest.clone()).await;
+            assert_eq!(resp.status().as_u16(), 404, "{manifest} of no update");
+
+            let resp = register(&server, tree, json!({ "id": "u1" })).await;
+            assert_eq!(resp.status().as_u16(), 201);
+            let resp = get(manifest.clone()).await;
+            assert_eq!(resp.status().as_u16(), 404, "{manifest} before the upload");
+            let body: Value = resp.json().await.expect("error body");
+            assert!(body.get("error_code").is_some(), "{manifest}: GenericError");
+
+            let resp = send(
+                &server,
+                Method::PUT,
+                &manifest,
+                &[("content-type", "application/cbor")],
+                Some(b"banked".to_vec()),
+            )
+            .await;
+            assert_eq!(resp.status().as_u16(), 201, "PUT {manifest}");
+            let etag = header(&resp, "etag");
+            assert!(etag.is_some(), "{manifest}: ETag");
+
+            let resp = get(manifest.clone()).await;
+            assert_eq!(resp.status().as_u16(), 200, "{manifest} after the upload");
+            assert_eq!(
+                header(&resp, "content-type").as_deref(),
+                Some("application/cbor")
+            );
+            assert_eq!(header(&resp, "etag"), etag, "{manifest}");
+            assert_eq!(&resp.bytes().await.expect("part")[..], b"banked");
+
+            let other = format!("{update}/bulk-data/image");
+            let resp = get(other.clone()).await;
+            assert_eq!(resp.status().as_u16(), 404, "{other}: never uploaded");
+        }
+    }
+}
+
+/// A part larger than SOVD keeps is uploaded as before but not read back: 501,
+/// its descriptor still in the listing.
+#[tokio::test]
+async fn a_part_larger_than_kept_is_not_read_back() {
+    let tree = Tree::V1;
+    let server = server().await;
+    let resp = register(&server, tree, json!({ "id": "u1" })).await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let update = update_url(tree, "u1");
+    let part = format!("{update}/bulk-data/manifest");
+    let big = vec![0u8; sovd_api::handlers::updates::MAX_KEPT_PART_BYTES + 1];
+    let resp = send(&server, Method::PUT, &part, &[], Some(big)).await;
+    assert_eq!(resp.status().as_u16(), 201, "PUT {part}");
+    let resp = send(&server, Method::GET, &part, &[], None).await;
+    assert_eq!(resp.status().as_u16(), 501, "GET {part}");
+    assert_eq!(parts(&server, &update).await.len(), 1);
+}

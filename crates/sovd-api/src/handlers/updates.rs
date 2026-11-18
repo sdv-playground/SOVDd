@@ -11,6 +11,7 @@
 //! | `POST /updates`                 | (none — SOVD-side allocation of update_id) |
 //! | `POST /bulk-data`               | `receive_package_part` (returns file_id, recorded per part) |
 //! | `PUT /bulk-data/{part_id}`      | same; legacy alias of `POST /bulk-data` |
+//! | `GET /bulk-data/{part_id}`      | (none — the bytes SOVD kept of a part up to [`MAX_KEPT_PART_BYTES`]) |
 //! | `POST /executions {verify}`     | `verify_package` per part, then `start_flash` (allocates transfer_id) |
 //! | `POST /executions {finalize}`   | `finalize_flash` + `activate` |
 //! | `POST /executions {commit}`     | `commit_flash` |
@@ -2058,6 +2059,55 @@ pub async fn put_bulk_data_part(
     .await
 }
 
+/// GET /vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data/{part_id}
+pub async fn get_bulk_data_part(
+    State(state): State<AppState>,
+    Path((component_id, update_id, part_id)): Path<(String, String, String)>,
+) -> Result<Response, ApiError> {
+    state.get_backend(&component_id)?;
+    part_content(&state, &component_id, &update_id, &part_id)
+}
+
+/// The largest part whose bytes SOVD keeps to serve `GET {update}/bulk-data/{part_id}`:
+/// a manifest fits; an image is held by the backend alone.
+pub const MAX_KEPT_PART_BYTES: usize = 1024 * 1024;
+
+/// A part as uploaded, with its `Content-Type` and `ETag`: 404 while the update has
+/// no such part (so a client can tell whether an upload already landed), 501 for a
+/// part larger than [`MAX_KEPT_PART_BYTES`].
+fn part_content(
+    state: &AppState,
+    component_id: &str,
+    update_id: &str,
+    part_id: &str,
+) -> Result<Response, ApiError> {
+    let part = state
+        .updates
+        .0
+        .lock()
+        .get(&UpdateKey::new(component_id, update_id))
+        .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?
+        .parts
+        .iter()
+        .find(|p| p.part_id == part_id)
+        .cloned()
+        .ok_or_else(|| ApiError::NotFound(format!("update {update_id} has no part {part_id:?}")))?;
+    let content = part.content.ok_or_else(|| {
+        ApiError::NotImplemented(format!(
+            "part {part_id:?} of update {update_id} is {} bytes; its content is kept only up \
+             to {MAX_KEPT_PART_BYTES} bytes",
+            part.size
+        ))
+    })?;
+    let mut headers = etag_headers(&part.sha256)?;
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(part.mimetype.as_deref().unwrap_or(DEFAULT_PART_MIMETYPE))
+            .map_err(|e| ApiError::Internal(format!("bad Content-Type header: {e}")))?,
+    );
+    Ok((StatusCode::OK, headers, content).into_response())
+}
+
 /// POST /vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data
 pub async fn post_bulk_data_part(
     State(state): State<AppState>,
@@ -2276,14 +2326,26 @@ async fn store_part(
 
     let hasher = Arc::new(Mutex::new(Sha256::new()));
     let size_counter = Arc::new(AtomicU64::new(0));
+    // The part's bytes while it stays within MAX_KEPT_PART_BYTES, for reading it back.
+    let kept = Arc::new(Mutex::new(Some(Vec::new())));
     let hasher_clone = hasher.clone();
     let size_clone = size_counter.clone();
+    let kept_clone = kept.clone();
     let data_stream = body.into_data_stream().map(move |chunk_res| {
         let chunk =
             chunk_res.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         size_clone.fetch_add(chunk.len() as u64, Ordering::Relaxed);
         if let Ok(mut h) = hasher_clone.lock() {
             h.update(&chunk);
+        }
+        if let Ok(mut kept) = kept_clone.lock() {
+            let within = kept
+                .as_ref()
+                .is_some_and(|bytes| bytes.len() + chunk.len() <= MAX_KEPT_PART_BYTES);
+            match kept.as_mut() {
+                Some(bytes) if within => bytes.extend_from_slice(&chunk),
+                _ => *kept = None,
+            }
         }
         Ok(chunk)
     });
@@ -2308,6 +2370,11 @@ async fn store_part(
         .clone()
         .finalize();
     let sha256 = hex::encode(digest);
+    let content = kept
+        .lock()
+        .map_err(|e| ApiError::Internal(format!("part buffer mutex poisoned: {e}")))?
+        .take()
+        .map(axum::body::Bytes::from);
 
     let stored = {
         let mut store = state.updates.0.lock();
@@ -2330,6 +2397,7 @@ async fn store_part(
                         sha256: sha256.clone(),
                         mimetype,
                         file_id,
+                        content,
                     });
                     entry.state = UpdateState::Uploading;
                     true
@@ -2497,6 +2565,18 @@ pub async fn put_node_bulk_data_part(
     let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
     let path = (owner, update_id, part_id);
     bulk_data_part(state, tree, UpdatePath::Node, path, headers, body).await
+}
+
+/// `GET {base}/updates/{update_id}/bulk-data/{part_id}`.
+pub async fn get_node_bulk_data_part(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path((update_id, part_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    part_content(&state, &owner, &update_id, &part_id)
 }
 
 /// `POST {base}/updates/{update_id}/bulk-data`.
