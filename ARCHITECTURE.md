@@ -405,6 +405,30 @@ graph LR
   Vehicle-Gateway SOVDd (no CAN) → {proxy → SOVDd; proxy → example-app → proxy → SOVDd} →
   `example-ecu` on vcan. `gateway_e2e_test.rs` covers the single-gateway-over-real-vcan case.
 
+### 7.1 Node topology (`sovd-api::topology`)
+
+By default every backend is a top-level component. A server configured with a node
+(`AppState::with_node(NodeTopology)`, `[server.node]` in `sovdd`) is one vehicle node instead, the
+shape x-update's discovery expects (a node lists exactly one component):
+
+| Path | Serves |
+|---|---|
+| `{base}/components` | the node alone |
+| `{base}/components/{node}` | the node's document, with its `subcomponents` link; with a host backend (`NodeTopology::with_host`), the host's document under the node's URL |
+| `{base}/components/{node}/subcomponents` | the backends, scope-filtered like `{base}/components` |
+| `{base}/components/{node}/subcomponents/{id}/...` | backend `id`'s entity API: everything a top-level component serves |
+| `{base}/components/{node}/...` (other than `subcomponents`) | the host backend's resources, as the node's own; 404 without a host |
+| `{base}/components/{id}/...` of a backend | 404: a node has no other top-level component |
+
+The root document's `x-update.update-targets` still names the backends, and registrations still
+take a backend id as `target`. The routes stay the flat ones: `with_node_topology(router, &state)`
+rewrites a node-form path onto its flat route before routing, so handlers, authorization (a
+subcomponent needs `component:{id}`, as a component does) and any routes an embedder merged in serve
+the node form unchanged. It must wrap the embedder's **final** router, after its own routes are
+merged. While a request is in node mode, `Tree::component` renders backends' URLs in the node form.
+Unlike gateway children (`/apps/...`, above), subcomponents are the server's own backends, not
+entities behind one of them.
+
 ---
 
 ## 8. Software update / flash
@@ -524,7 +548,8 @@ resolved relative to the current directory) with a warning, and errors out if th
 the gateway/test configs use 18082-18092.
 
 Recognized TOML sections: `[server]` (`port`); `[server.tls]` (certificate + private key → in-process
-rustls termination); `[server.auth]` (§13); `[transport]` (`socketcan`|`mock` + isotp);
+rustls termination); `[server.auth]` (§13); `[server.node]` (`id`, `name`, `host`: serve the
+components as the subcomponents of one node, §7.1); `[transport]` (`socketcan`|`mock` + isotp);
 `[session]`/`[session.security]`/`[session.keepalive]`; `[service_overrides]` (OEM SID remaps);
 `[ecu.<id>]` (transport, params, operations, outputs, flash, session/security, overrides);
 `[proxy.<id>]` (`url`, `component_id`, `auth_token`); `[gateway]` (`enabled`, `id`, `scan`).

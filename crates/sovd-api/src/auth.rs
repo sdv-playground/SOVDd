@@ -733,11 +733,18 @@ fn is_public_path(path: &str) -> bool {
 /// The top-level component id addressed by `path`, if any
 /// (`{base}/components/{id}[/...]`). `None` for the collection itself
 /// (`{base}/components`) and non-component paths — the collection is
-/// scope-filtered in its handler instead (C-031 non-leakage).
+/// scope-filtered in its handler instead (C-031 non-leakage), and so is a
+/// node's `{base}/components/{node}/subcomponents`.
 fn component_in_path(path: &str) -> Option<&str> {
     let (_, rest) = Tree::split_path(path)?;
     let rest = rest.strip_prefix("/components/")?;
-    let id = rest.split('/').next().unwrap_or("");
+    let mut segments = rest.split('/');
+    let id = segments.next().unwrap_or("");
+    // A node's subcomponents collection is scope-filtered in its handler, like
+    // the components collection: a client scoped to some subcomponents lists those.
+    if segments.next() == Some("subcomponents") && matches!(segments.next(), None | Some("")) {
+        return None;
+    }
     (!id.is_empty()).then_some(id)
 }
 

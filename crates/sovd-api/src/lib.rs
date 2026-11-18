@@ -18,6 +18,7 @@ pub mod auth;
 pub mod error;
 pub mod handlers;
 pub mod state;
+pub mod topology;
 pub mod workshop_ca;
 
 pub use auth::{
@@ -26,6 +27,7 @@ pub use auth::{
 };
 pub use error::ApiError;
 pub use state::{AppState, CapabilityExtensions};
+pub use topology::{with_node_topology, NodeTopology};
 
 // Re-export DidStore from sovd-conv for convenience
 pub use sovd_conv::{DataType, DidDefinition, DidStore};
@@ -59,9 +61,15 @@ impl Tree {
         }
     }
 
-    /// `{base}/components/{id}` — a component's URL under this tree.
+    /// `{base}/components/{id}` — a component's URL under this tree; while a
+    /// request is served in node mode ([`topology`]), a backend's URL is its
+    /// subcomponent URL, `{base}/components/{node}/subcomponents/{id}`, and the
+    /// node's own id stays `{base}/components/{node}`.
     pub fn component(self, id: &str) -> String {
-        format!("{}/components/{id}", self.base())
+        match topology::current() {
+            Some(node) if node.id() != id => node.subcomponent_href(self, id),
+            _ => format!("{}/components/{id}", self.base()),
+        }
     }
 
     /// `{base}/components/{component_id}/apps/{app_id}` — a sub-entity's URL
@@ -185,6 +193,11 @@ fn api_routes(tree: Tree) -> Router<AppState> {
         .route(
             &format!("{}{}", tree.base(), "/components/{component_id}"),
             get(handlers::components::get_component),
+        )
+        // A node's subcomponents (node topology; 404 otherwise).
+        .route(
+            &format!("{}{}", tree.base(), "/components/{component_id}/subcomponents"),
+            get(handlers::components::list_subcomponents),
         )
         // Data routes
         .route(
