@@ -288,6 +288,40 @@ async fn v1_accepts_commit_on_solo() {
     assert_eq!(done["status"], "completed");
 }
 
+/// Behind a node topology the refusal names the node's own operations.
+#[tokio::test]
+async fn v1_refusal_names_the_node_operations_on_a_node() {
+    let mut backends = HashMap::new();
+    backends.insert(
+        "node_member".to_string(),
+        Arc::new(BankedBackend::new("node_member", VerdictScope::Node))
+            as Arc<dyn DiagnosticBackend>,
+    );
+    let state = AppState::new(backends)
+        .with_node(sovd_api::NodeTopology::new("node", "Node"))
+        .expect("node");
+    let router = sovd_api::with_node_topology(create_router(state.clone()), &state);
+    let server = TestServer::start(router).await.expect("test server");
+    let id = register(&server, "/v1", "node/subcomponents/node_member", "u-n").await;
+    let resp = put(
+        &server,
+        &format!("/v1/components/node/subcomponents/node_member/updates/{id}/x-update-commit"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+    let body: Value = resp.json().await.unwrap();
+    let message = body["message"].as_str().unwrap();
+    for op in ["x-update-commit", "x-update-rollback"] {
+        assert!(
+            message.contains(&format!(
+                "POST /v1/components/node/operations/{op}/executions"
+            )),
+            "{message}"
+        );
+    }
+    assert!(!message.contains("POST /v1/operations/"), "{message}");
+}
+
 #[tokio::test]
 async fn v1_scope_refusal_precedes_state_check() {
     let f = spawn().await;
