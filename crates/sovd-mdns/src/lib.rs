@@ -17,19 +17,30 @@
 //! - SRV port = the SOVD server's actual bind port (a parameter, never
 //!   hardcoded).
 //!
-//! The instance id is derived from the TLS leaf certificate (see
-//! [`instance_from_cert_der`]) so the advertised hostname is guaranteed to match
-//! what TLS clients verify. An unprovisioned device (no leaf) is not a
-//! discoverable SOVD server and must not advertise — the integration only calls
-//! the advertiser on the provisioned HTTPS path.
+//! A provisioned server derives the instance id from its TLS leaf certificate
+//! (see [`instance_from_cert_der`]) so the advertised hostname is guaranteed to
+//! match what TLS clients verify, and advertises an `https` `accessurl`.
+//!
+//! An unprovisioned server (no leaf yet) advertises too: enrollment runs over
+//! its plain-HTTP endpoint, so a client has to be able to find it. It announces
+//! its node identity ([`node_identity_from_spki_der`], the device key's digest)
+//! with an `http` `accessurl` ([`SovdAdvertiser::from_node_identity_and_bind`]).
+//! The node identity is a name the device holds from first boot, unique per
+//! device, so fresh devices on one link never collide.
 //!
 //! ## Usage
 //! ```no_run
 //! # fn leaf_der() -> Vec<u8> { Vec::new() }
-//! // On the provisioned HTTPS path, with the TLS leaf DER and the bind addr:
-//! if let Some(adv) =
+//! # fn device_key_spki_der() -> Vec<u8> { Vec::new() }
+//! # let provisioned = true;
+//! // HTTPS with the TLS leaf DER, or HTTP with the node identity; plus the bind addr.
+//! let adv = if provisioned {
 //!     sovd_mdns::SovdAdvertiser::from_leaf_and_bind(&leaf_der(), "0.0.0.0:4000")
-//! {
+//! } else {
+//!     let identity = sovd_mdns::node_identity_from_spki_der(&device_key_spki_der());
+//!     sovd_mdns::SovdAdvertiser::from_node_identity_and_bind(&identity, "0.0.0.0:4000")
+//! };
+//! if let Some(adv) = adv {
 //!     match adv.start() {
 //!         Ok(guard) => { /* hold `guard` for the server's lifetime */ }
 //!         Err(e) => tracing::warn!(error = %e, "SOVD mDNS advertise failed"),
@@ -129,6 +140,53 @@ impl SovdAdvertiser {
             port,
         })
     }
+
+    /// Build the advertiser of a server that has no TLS leaf yet and serves
+    /// plain HTTP: the instance / hostname is its node identity (see
+    /// [`node_identity_from_spki_der`]), `identification` the same, and
+    /// `accessurl` is `http://<identity>.local:<port>/vehicle`.
+    ///
+    /// Returns `None` for an empty identity or a bind address without a port.
+    pub fn from_node_identity_and_bind(identity: &str, bind: &str) -> Option<SovdAdvertiser> {
+        if identity.is_empty() {
+            return None;
+        }
+        let port = port_from_bind(bind)?;
+        Some(SovdAdvertiser {
+            instance: identity.to_string(),
+            port,
+            identification: identity.to_string(),
+            accessurl: format!("http://{identity}.local:{port}{ACCESS_URL_PATH}"),
+        })
+    }
+}
+
+/// The node identity: the SHA-256 of the device key's DER SubjectPublicKeyInfo
+/// (the digest an ECU id is, in hex) in RFC 4648 Base32, lowercase and unpadded
+/// — 52 characters of `a-z2-7`, one DNS label. The name a server announces
+/// before its TLS leaf exists, and the CN it asks the issuer for.
+pub fn node_identity_from_spki_der(spki_der: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    base32_lower_unpadded(&Sha256::digest(spki_der))
+}
+
+/// RFC 4648 Base32, lowercase alphabet, no padding.
+fn base32_lower_unpadded(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut out = String::with_capacity(bytes.len().div_ceil(5) * 8);
+    let (mut buffer, mut bits) = (0u32, 0u32);
+    for &byte in bytes {
+        buffer = (buffer << 8) | u32::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(ALPHABET[((buffer >> bits) & 0x1f) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        out.push(ALPHABET[((buffer << (5 - bits)) & 0x1f) as usize] as char);
+    }
+    out
 }
 
 /// Derive the DNS-SD instance id from a TLS leaf certificate (DER).
@@ -249,6 +307,55 @@ mod tests {
             assert_eq!(device_label(name), label, "{name:?}");
         }
         assert!(is_dns_label(&"a".repeat(63)));
+    }
+
+    #[test]
+    fn base32_matches_rfc4648() {
+        // RFC 4648 §10 test vectors, lowercase and without padding.
+        for (input, encoded) in [
+            ("", ""),
+            ("f", "my"),
+            ("fo", "mzxq"),
+            ("foo", "mzxw6"),
+            ("foob", "mzxw6yq"),
+            ("fooba", "mzxw6ytb"),
+            ("foobar", "mzxw6ytboi"),
+        ] {
+            assert_eq!(
+                base32_lower_unpadded(input.as_bytes()),
+                encoded,
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn node_identity_is_the_whole_digest_in_base32() {
+        // The digests of "" and "abc", as the traton-one-os SOVD server names them.
+        assert_eq!(
+            node_identity_from_spki_der(b""),
+            "4oymiquy7qobjgx36tejs35zeqt24qpemsnzgtfeswmrw6csxbkq"
+        );
+        assert_eq!(
+            node_identity_from_spki_der(b"abc"),
+            "xj4bnp4pahh6uqkbidpf3lrceoyagyndsylxvhfucd7wd4qacwwq"
+        );
+    }
+
+    #[test]
+    fn from_node_identity_and_bind_advertises_plain_http() {
+        let identity = node_identity_from_spki_der(b"abc");
+        let adv = SovdAdvertiser::from_node_identity_and_bind(&identity, "0.0.0.0:4000")
+            .expect("identity and port");
+        assert_eq!(adv.instance, identity);
+        assert_eq!(adv.port, 4000);
+        assert_eq!(adv.identification, identity);
+        assert_eq!(
+            adv.accessurl,
+            format!("http://{identity}.local:4000/vehicle")
+        );
+        assert!(SovdAdvertiser::from_node_identity_and_bind("", "0.0.0.0:4000").is_none());
+        assert!(SovdAdvertiser::from_node_identity_and_bind(&identity, "0.0.0.0").is_none());
     }
 
     #[test]

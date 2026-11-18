@@ -3,7 +3,7 @@ name = "sovd-mdns"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Conformant mDNS / DNS-SD advertiser for the SOVD server (ISO 17978-3 §5.11): registers _sovd._tcp.local. with the cert-derived <id>.local hostname plus identification/accessurl TXT records. Off-QNX it uses mdns-sd; on QNX (nto) a hand-rolled pure-Rust responder (simple-dns + socket2)."
+description = "Conformant mDNS / DNS-SD advertiser for the SOVD server (ISO 17978-3 §5.11): registers _sovd._tcp.local. with the cert-derived <id>.local hostname (the node identity before the device has a cert) plus identification/accessurl TXT records. Off-QNX it uses mdns-sd; on QNX (nto) a hand-rolled pure-Rust responder (simple-dns + socket2)."
 
 [lib]
 path = "src/lib.rs"
@@ -14,6 +14,8 @@ path = "src/lib.rs"
 # on every target including the QNX (nto) cross-build.
 x509-cert = { version = "0.2", features = ["std"] }
 const-oid = { version = "0.9", features = ["db"] }
+# The node identity is a SHA-256 of the device key (node_identity_from_spki_der).
+sha2 = { workspace = true }
 tracing = { workspace = true }
 
 # Hand-rolled pure-Rust DNS-SD responder (src/responder.rs) — the live backend
