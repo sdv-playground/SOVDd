@@ -133,11 +133,13 @@ impl SovdAdvertiser {
 
 /// Derive the DNS-SD instance id from a TLS leaf certificate (DER).
 ///
-/// Prefers the `<id>.local` `subjectAltName` dNSName (stripping the `.local`
-/// suffix): that is exactly the hostname a discovery client dials and verifies
-/// against the certificate. Falls back to the subject CommonName (the
-/// identity-tower CA sets both `CN=<device_id>` and the `<device_id>.local`
-/// SAN). Returns `None` if neither is present / parseable.
+/// The host label of the first `subjectAltName` dNSName of a shape the minters
+/// name devices with — `<id>`, `<id>.local` or `<id>._sovd._tcp.local`, `<id>`
+/// one DNS label of letters, digits and `-` — the hostname a discovery client
+/// dials and verifies against the certificate. drive-security lists
+/// `<id>._sovd._tcp.local` first, the identity-tower CA a bare `<id>`. Other
+/// shapes (wildcards, other domains) never name the node. Falls back to the
+/// subject CommonName if it is such a label. Returns `None` otherwise.
 pub fn instance_from_cert_der(der: &[u8]) -> Option<String> {
     use const_oid::db::rfc4519::COMMON_NAME;
     use x509_cert::der::Decode;
@@ -146,14 +148,12 @@ pub fn instance_from_cert_der(der: &[u8]) -> Option<String> {
 
     let cert = Certificate::from_der(der).ok()?;
 
-    // 1) Prefer the `<id>.local` SAN dNSName (what TLS clients verify).
+    // 1) The host label of the first device-shaped SAN dNSName (what TLS clients verify).
     if let Ok(Some((_critical, san))) = cert.tbs_certificate.get::<SubjectAltName>() {
         for name in san.0.iter() {
             if let GeneralName::DnsName(dns) = name {
-                if let Some(id) = dns.as_str().strip_suffix(".local") {
-                    if !id.is_empty() {
-                        return Some(id.to_string());
-                    }
+                if let Some(label) = device_label(dns.as_str()) {
+                    return Some(label.to_string());
                 }
             }
         }
@@ -167,8 +167,19 @@ pub fn instance_from_cert_der(der: &[u8]) -> Option<String> {
         .flat_map(|rdn| rdn.0.iter())
         .find(|atv| atv.oid == COMMON_NAME)
         .and_then(|atv| std::str::from_utf8(atv.value.value()).ok())
-        .filter(|s| !s.is_empty())
+        .filter(|s| is_dns_label(s))
         .map(|s| s.to_string())
+}
+
+/// `<id>`, `<id>.local` or `<id>._sovd._tcp.local` → `<id>`, if `<id>` is a DNS label.
+fn device_label(name: &str) -> Option<&str> {
+    let (label, suffix) = name.split_at(name.find('.').unwrap_or(name.len()));
+    (is_dns_label(label) && matches!(suffix, "" | ".local" | "._sovd._tcp.local")).then_some(label)
+}
+
+/// One DNS label: 1–63 ASCII letters, digits and `-`.
+fn is_dns_label(s: &str) -> bool {
+    (1..=63).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 /// Parse the port from a bind address like `"0.0.0.0:4000"` or `"[::]:4000"`.
@@ -203,9 +214,46 @@ mod tests {
         "/tests/fixtures/leaf-cvc-host-rig1.der"
     ));
 
+    // A drive-security-shaped leaf: CN=4c6ff3d8a60d6655 with SAN dNSNames
+    // [4c6ff3d8a60d6655._sovd._tcp.local, 4c6ff3d8a60d6655.local], service SAN first.
+    const SERVICE_SAN_FIRST_DER: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/leaf-drive-security-service-san-first.der"
+    ));
+
+    #[test]
+    fn instance_is_the_host_label_of_a_service_instance_san() {
+        assert_eq!(
+            instance_from_cert_der(SERVICE_SAN_FIRST_DER).as_deref(),
+            Some("4c6ff3d8a60d6655")
+        );
+    }
+
+    #[test]
+    fn only_device_shaped_names_name_the_node() {
+        for (name, label) in [
+            ("cvc-host-rig1", Some("cvc-host-rig1")),
+            ("cvc-host-rig1.local", Some("cvc-host-rig1")),
+            (
+                "4c6ff3d8a60d6655._sovd._tcp.local",
+                Some("4c6ff3d8a60d6655"),
+            ),
+            ("*.local", None),
+            ("cvc.example.com", None),
+            ("cvc.local.", None),
+            (".local", None),
+            ("", None),
+            ("under_score.local", None),
+            (&"a".repeat(64), None),
+        ] {
+            assert_eq!(device_label(name), label, "{name:?}");
+        }
+        assert!(is_dns_label(&"a".repeat(63)));
+    }
+
     #[test]
     fn instance_parsed_from_local_san() {
-        // The `.local` SAN is preferred and the `.local` suffix is stripped.
+        // The first SAN's host label.
         assert_eq!(
             instance_from_cert_der(LEAF_DER).as_deref(),
             Some("cvc-host-rig1")
