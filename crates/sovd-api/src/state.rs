@@ -195,8 +195,8 @@ pub struct UpdatePart {
     /// `verify` step which calls `verify_package(file_id)` per part.
     pub file_id: String,
     /// The uploaded bytes, kept for `GET {update}/bulk-data/{part_id}` when the
-    /// part is at most [`crate::handlers::updates::MAX_KEPT_PART_BYTES`] (a
-    /// manifest); `None` for a larger part, whose bytes only the backend holds.
+    /// update's kept parts stay within [`crate::handlers::updates::MAX_KEPT_PART_BYTES`]
+    /// together (a manifest); `None` beyond that, the bytes only the backend holds.
     pub content: Option<axum::body::Bytes>,
 }
 

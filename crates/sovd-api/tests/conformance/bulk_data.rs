@@ -289,3 +289,27 @@ async fn a_part_larger_than_kept_is_not_read_back() {
     assert_eq!(resp.status().as_u16(), 501, "GET {part}");
     assert_eq!(parts(&server, &update).await.len(), 1);
 }
+
+/// SOVD keeps an update's parts up to the cap together, not per part: a part that
+/// would take the update past it is uploaded as before but not read back (501),
+/// while the parts kept before it still read back.
+#[tokio::test]
+async fn an_updates_kept_parts_share_one_cap() {
+    let tree = Tree::V1;
+    let server = server().await;
+    let resp = register(&server, tree, json!({ "id": "u1" })).await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let update = update_url(tree, "u1");
+    let half = sovd_api::handlers::updates::MAX_KEPT_PART_BYTES / 2 + 1;
+    let first = format!("{update}/bulk-data/manifest");
+    let second = format!("{update}/bulk-data/other");
+    for part in [&first, &second] {
+        let resp = send(&server, Method::PUT, part, &[], Some(vec![1u8; half])).await;
+        assert_eq!(resp.status().as_u16(), 201, "PUT {part}");
+    }
+    let resp = send(&server, Method::GET, &first, &[], None).await;
+    assert_eq!(resp.status().as_u16(), 200, "GET {first}");
+    let resp = send(&server, Method::GET, &second, &[], None).await;
+    assert_eq!(resp.status().as_u16(), 501, "GET {second}");
+    assert_eq!(parts(&server, &update).await.len(), 2);
+}

@@ -2068,13 +2068,15 @@ pub async fn get_bulk_data_part(
     part_content(&state, &component_id, &update_id, &part_id)
 }
 
-/// The largest part whose bytes SOVD keeps to serve `GET {update}/bulk-data/{part_id}`:
-/// a manifest fits; an image is held by the backend alone.
+/// The most bytes SOVD keeps of an update's parts, together, to serve
+/// `GET {update}/bulk-data/{part_id}`: a manifest fits; an image is held by the backend
+/// alone. A part keeps its bytes only while the update's kept parts stay within it, so
+/// many small parts cannot make SOVD hold more than this per update.
 pub const MAX_KEPT_PART_BYTES: usize = 1024 * 1024;
 
 /// A part as uploaded, with its `Content-Type` and `ETag`: 404 while the update has
 /// no such part (so a client can tell whether an upload already landed), 501 for a
-/// part larger than [`MAX_KEPT_PART_BYTES`].
+/// part whose bytes SOVD did not keep (beyond [`MAX_KEPT_PART_BYTES`] for the update).
 fn part_content(
     state: &AppState,
     component_id: &str,
@@ -2094,8 +2096,8 @@ fn part_content(
         .ok_or_else(|| ApiError::NotFound(format!("update {update_id} has no part {part_id:?}")))?;
     let content = part.content.ok_or_else(|| {
         ApiError::NotImplemented(format!(
-            "part {part_id:?} of update {update_id} is {} bytes; its content is kept only up \
-             to {MAX_KEPT_PART_BYTES} bytes",
+            "part {part_id:?} of update {update_id} is {} bytes; an update's parts are kept \
+             only up to {MAX_KEPT_PART_BYTES} bytes together",
             part.size
         ))
     })?;
@@ -2391,6 +2393,13 @@ async fn store_part(
                     false
                 } else {
                     entry.parts.retain(|p| p.part_id != part_id);
+                    let kept_by_others: usize = entry
+                        .parts
+                        .iter()
+                        .filter_map(|p| p.content.as_ref().map(|c| c.len()))
+                        .sum();
+                    let content =
+                        content.filter(|c| kept_by_others + c.len() <= MAX_KEPT_PART_BYTES);
                     entry.parts.push(UpdatePart {
                         part_id: part_id.clone(),
                         size: final_size,
