@@ -10,9 +10,13 @@
 //! - [`socket2`] — a thin libc UDP-socket wrapper (its only dep is `libc`, the
 //!   same `0.6` line the supernova QNX cross-build already carries).
 //!
-//! The local IPv4 for the `A` record is found without interface enumeration:
-//! we connect a throwaway UDP socket toward the mDNS group and read back the
-//! egress address the kernel picked (see [`local_ipv4`]).
+//! It serves every up, multicast-capable IPv4 interface ([`interfaces`],
+//! `getifaddrs`): a host whose guests sit on their own point-to-point links (the
+//! CVC: the LAN, plus one /30 per VM) must be found on each of them, at that
+//! link's address. Each interface gets its own `A` record, announcements go out
+//! of each interface, and a query is answered with the address of the interface
+//! whose subnet holds its sender. Where no interface can be listed, the egress
+//! address toward the mDNS group serves alone (see [`local_ipv4`]).
 //!
 //! The module is compiled on *every* target (so it is testable on Linux) but is
 //! only *selected* as the live backend on `nto` — see `src/lib.rs`. It is
@@ -33,7 +37,8 @@
 //! - No probing/conflict resolution (RFC 6762 §8.1): the instance name is the
 //!   cert-unique device id, so a clash on-link is not expected.
 //! - No known-answer suppression (RFC 6762 §7.1) and no response delay/dedup.
-//! - Single default multicast interface (no multi-homed fan-out).
+//! - The interface a query arrived on is inferred from its sender's subnet, not
+//!   read from the packet (`IP_PKTINFO` has no `nto` path).
 
 use crate::{AdvertiseError, SovdAdvertiser};
 use simple_dns::rdata::{RData, A, PTR, SRV, TXT};
@@ -44,7 +49,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Standard mDNS UDP port (RFC 6762 §2).
 const MDNS_PORT: u16 = 5353;
@@ -59,6 +64,9 @@ const TTL_SHARED: u32 = 4500;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// Receive buffer — one link MTU comfortably holds an mDNS query.
 const RX_BUF: usize = 1500;
+/// How often the interface list is read again: a VM's link comes up only when
+/// the VM starts, after the SOVD server.
+const RESCAN_INTERVAL: Duration = Duration::from_secs(10);
 
 /// The conformant SOVD record set, plus the lower-cased names we match queries
 /// against (DNS names compare case-insensitively; `simple-dns`'s own `Name`
@@ -245,6 +253,91 @@ fn query_match(datagram: &[u8], r: &Records) -> Option<(Shape, bool)> {
     None
 }
 
+/// One IPv4 interface the responder serves: its address, which its `A` record
+/// carries, and its netmask, which decides the senders it answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Iface {
+    addr: Ipv4Addr,
+    mask: Ipv4Addr,
+}
+
+impl Iface {
+    /// Whether `ip` is on this interface's subnet.
+    fn contains(&self, ip: Ipv4Addr) -> bool {
+        let mask = u32::from(self.mask);
+        u32::from(ip) & mask == u32::from(self.addr) & mask
+    }
+}
+
+/// The interfaces to serve: every up, multicast-capable, non-loopback IPv4
+/// interface, or, when none can be listed, the egress address alone.
+fn interfaces() -> Vec<Iface> {
+    let listed = list_interfaces().unwrap_or_default();
+    if listed.is_empty() {
+        return vec![Iface {
+            addr: local_ipv4(),
+            mask: Ipv4Addr::UNSPECIFIED,
+        }];
+    }
+    listed
+}
+
+/// `getifaddrs`, filtered to up, multicast-capable, non-loopback IPv4
+/// interfaces, one entry per address. `None` when the call fails.
+#[cfg(unix)]
+fn list_interfaces() -> Option<Vec<Iface>> {
+    let flag = |flags: u32, f: libc::c_int| flags & f as u32 != 0;
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs fills `head` with a list freed by freeifaddrs below;
+    // every pointer read is checked for null first.
+    unsafe {
+        if libc::getifaddrs(&mut head) != 0 {
+            return None;
+        }
+        let mut out: Vec<Iface> = Vec::new();
+        let mut cur = head;
+        while !cur.is_null() {
+            let ifa = &*cur;
+            cur = ifa.ifa_next;
+            let flags = ifa.ifa_flags as u32;
+            if !flag(flags, libc::IFF_UP)
+                || flag(flags, libc::IFF_LOOPBACK)
+                || !flag(flags, libc::IFF_MULTICAST)
+                || ifa.ifa_addr.is_null()
+                || i32::from((*ifa.ifa_addr).sa_family) != libc::AF_INET
+            {
+                continue;
+            }
+            let addr = sockaddr_ipv4(ifa.ifa_addr);
+            let mask = if ifa.ifa_netmask.is_null() {
+                Ipv4Addr::UNSPECIFIED
+            } else {
+                sockaddr_ipv4(ifa.ifa_netmask)
+            };
+            if !out.iter().any(|i| i.addr == addr) {
+                out.push(Iface { addr, mask });
+            }
+        }
+        libc::freeifaddrs(head);
+        Some(out)
+    }
+}
+
+#[cfg(not(unix))]
+fn list_interfaces() -> Option<Vec<Iface>> {
+    None
+}
+
+/// The IPv4 address in an `AF_INET` sockaddr.
+///
+/// # Safety
+/// `sa` must point to a valid `sockaddr_in`.
+#[cfg(unix)]
+unsafe fn sockaddr_ipv4(sa: *const libc::sockaddr) -> Ipv4Addr {
+    let sin = &*(sa as *const libc::sockaddr_in);
+    Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr))
+}
+
 /// Resolve this host's egress IPv4 without interface enumeration: connect a
 /// throwaway UDP socket toward a destination and read the local address the
 /// kernel bound (the "connected-UDP getsockname" trick). We aim at the mDNS
@@ -266,7 +359,8 @@ fn local_ipv4() -> Ipv4Addr {
 
 /// Open and configure the mDNS UDP socket: reuse the well-known port (so the
 /// responder can co-exist with a host mDNS daemon during testing), bind
-/// `0.0.0.0:5353`, join the group, and set the mDNS multicast options.
+/// `0.0.0.0:5353` and set the mDNS multicast options. The group is joined per
+/// interface as each is served ([`Served::join`]).
 fn open_socket() -> std::io::Result<Socket> {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     sock.set_reuse_address(true)?;
@@ -280,7 +374,6 @@ fn open_socket() -> std::io::Result<Socket> {
         Ipv4Addr::UNSPECIFIED,
         MDNS_PORT,
     ))))?;
-    sock.join_multicast_v4(&MDNS_GROUP, &Ipv4Addr::UNSPECIFIED)?;
     // Loop our own multicast back so co-resident stacks on this host see us.
     let _ = sock.set_multicast_loop_v4(true);
     let _ = sock.set_multicast_ttl_v4(255); // RFC 6762 §11: mDNS uses IP TTL 255
@@ -300,36 +393,123 @@ fn nap(dur: Duration, stop: &AtomicBool) {
     }
 }
 
-/// The worker thread: announce, serve queries, then say goodbye on stop.
-fn serve(sock: Socket, records: Records, wire: Wire, stop: Arc<AtomicBool>) {
-    let group = SockAddr::from(SocketAddr::V4(SocketAddrV4::new(MDNS_GROUP, MDNS_PORT)));
+/// One served interface and its encoded record set.
+struct Served {
+    iface: Iface,
+    wire: Wire,
+}
 
-    // Unsolicited announcements: at least two, ~1s apart (RFC 6762 §8.3).
-    for i in 0..2 {
-        if stop.load(Ordering::Relaxed) {
-            break;
-        }
-        if let Err(e) = sock.send_to(&wire.announce, &group) {
-            tracing::debug!(error = %e, "mDNS announcement send failed");
-        }
-        if i == 0 {
-            nap(Duration::from_secs(1), &stop);
+impl Served {
+    /// Join the mDNS group on this interface. A failure is logged and the
+    /// interface still answers the queries the socket receives.
+    fn join(&self, sock: &Socket) {
+        let joined = if self.iface.mask.is_unspecified() {
+            sock.join_multicast_v4(&MDNS_GROUP, &Ipv4Addr::UNSPECIFIED)
+        } else {
+            sock.join_multicast_v4(&MDNS_GROUP, &self.iface.addr)
+        };
+        if let Err(e) = joined {
+            tracing::debug!(address = %self.iface.addr, error = %e, "mDNS group join failed");
         }
     }
 
-    // Serve loop. The read timeout bounds each iteration, so the stop flag (and
-    // hence the goodbye) is observed within `POLL_INTERVAL`.
+    /// Multicast `bytes` out of this interface.
+    fn multicast(&self, sock: &Socket, group: &SockAddr, bytes: &[u8], what: &str) {
+        if !self.iface.mask.is_unspecified() {
+            let _ = sock.set_multicast_if_v4(&self.iface.addr);
+        }
+        if let Err(e) = sock.send_to(bytes, group) {
+            tracing::debug!(address = %self.iface.addr, error = %e, "mDNS {what} send failed");
+        }
+    }
+}
+
+/// Bring `served` in line with the host's interfaces now: serve the new ones
+/// (join, record set) and drop the gone. Returns the newly served.
+fn rescan(sock: &Socket, adv: &SovdAdvertiser, served: &mut Vec<Served>) -> Vec<usize> {
+    let now = interfaces();
+    served.retain(|s| now.contains(&s.iface));
+    let mut added = Vec::new();
+    for iface in now {
+        if served.iter().any(|s| s.iface == iface) {
+            continue;
+        }
+        match Wire::build(&Records::new(adv, iface.addr)) {
+            Ok(wire) => {
+                let s = Served { iface, wire };
+                s.join(sock);
+                tracing::info!(address = %iface.addr, "SOVD mDNS: serving interface");
+                served.push(s);
+                added.push(served.len() - 1);
+            }
+            Err(e) => {
+                tracing::warn!(address = %iface.addr, error = %e, "mDNS records not encodable")
+            }
+        }
+    }
+    added
+}
+
+/// The served interface a query from `from` is answered on: the one whose
+/// subnet holds the sender, else the first.
+fn answering<'a>(served: &'a [Served], from: &SockAddr) -> Option<&'a Served> {
+    let sender = from.as_socket_ipv4().map(|a| *a.ip());
+    sender
+        .and_then(|ip| served.iter().find(|s| s.iface.contains(ip)))
+        .or_else(|| served.first())
+}
+
+/// The worker thread: announce on every interface, serve queries, rescan the
+/// interfaces now and then, and say goodbye on stop.
+fn serve(sock: Socket, adv: SovdAdvertiser, records: Records, stop: Arc<AtomicBool>) {
+    let group = SockAddr::from(SocketAddr::V4(SocketAddrV4::new(MDNS_GROUP, MDNS_PORT)));
+    let mut served: Vec<Served> = Vec::new();
+    let mut next_scan = Instant::now();
     let mut buf = [MaybeUninit::<u8>::uninit(); RX_BUF];
+
     while !stop.load(Ordering::Relaxed) {
+        if Instant::now() >= next_scan {
+            next_scan = Instant::now() + RESCAN_INTERVAL;
+            let added = rescan(&sock, &adv, &mut served);
+            // Unsolicited announcements on each new interface: at least two,
+            // ~1s apart (RFC 6762 §8.3).
+            if !added.is_empty() {
+                for i in 0..2 {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    for &n in &added {
+                        served[n].multicast(
+                            &sock,
+                            &group,
+                            &served[n].wire.announce,
+                            "announcement",
+                        );
+                    }
+                    if i == 0 {
+                        nap(Duration::from_secs(1), &stop);
+                    }
+                }
+            }
+        }
+        // The read timeout bounds each iteration, so the stop flag (and hence
+        // the goodbye) is observed within `POLL_INTERVAL`.
         match sock.recv_from(&mut buf) {
             Ok((n, from)) => {
                 // SAFETY: `recv_from` initialised the first `n` bytes.
                 let datagram = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, n) };
-                if let Some((shape, unicast)) = query_match(datagram, &records) {
-                    let dest = if unicast { &from } else { &group };
-                    if let Err(e) = sock.send_to(wire.reply(shape), dest) {
+                let Some((shape, unicast)) = query_match(datagram, &records) else {
+                    continue;
+                };
+                let Some(s) = answering(&served, &from) else {
+                    continue;
+                };
+                if unicast {
+                    if let Err(e) = sock.send_to(s.wire.reply(shape), &from) {
                         tracing::debug!(error = %e, "mDNS response send failed");
                     }
+                } else {
+                    s.multicast(&sock, &group, s.wire.reply(shape), "response");
                 }
             }
             // Read timeout (the common case) or a transient error: just re-check
@@ -338,8 +518,11 @@ fn serve(sock: Socket, records: Records, wire: Wire, stop: Arc<AtomicBool>) {
         }
     }
 
-    // Goodbye: withdraw our records (TTL 0) so caches drop us promptly.
-    let _ = sock.send_to(&wire.goodbye, &group);
+    // Goodbye on every interface: withdraw our records (TTL 0) so caches drop us
+    // promptly.
+    for s in &served {
+        s.multicast(&sock, &group, &s.wire.goodbye, "goodbye");
+    }
 }
 
 /// Guard returned by [`start`]. On drop it signals the worker to stop, which
@@ -363,24 +546,25 @@ impl Drop for ResponderGuard {
 /// and stops the worker thread.
 pub fn start(adv: SovdAdvertiser) -> Result<ResponderGuard, AdvertiseError> {
     let sock = open_socket().map_err(|e| AdvertiseError(format!("mDNS socket: {e}")))?;
-    let addr = local_ipv4();
-    let records = Records::new(&adv, addr);
-    let wire = Wire::build(&records).map_err(AdvertiseError)?;
+    // The query-matching names do not depend on the address; each served
+    // interface encodes its own record set (`rescan`).
+    let records = Records::new(&adv, Ipv4Addr::UNSPECIFIED);
+    Wire::build(&records).map_err(AdvertiseError)?;
 
     let fullname = records.instance_fqdn.clone();
+    let (port, accessurl) = (adv.port, adv.accessurl.clone());
     let stop = Arc::new(AtomicBool::new(false));
     let stop_worker = Arc::clone(&stop);
     let handle = std::thread::Builder::new()
         .name("sovd-mdns".into())
-        .spawn(move || serve(sock, records, wire, stop_worker))
+        .spawn(move || serve(sock, adv, records, stop_worker))
         .map_err(|e| AdvertiseError(format!("spawn mDNS worker: {e}")))?;
 
     tracing::info!(
         service = %fullname,
-        port = adv.port,
-        accessurl = %adv.accessurl,
-        address = %addr,
-        "SOVD mDNS/DNS-SD responder started (pure-Rust backend)"
+        port,
+        accessurl = %accessurl,
+        "SOVD mDNS/DNS-SD responder started (pure-Rust backend, every IPv4 interface)"
     );
     Ok(ResponderGuard {
         stop,
@@ -404,6 +588,75 @@ mod tests {
 
     fn records() -> Records {
         Records::new(&sample(), Ipv4Addr::new(10, 1, 2, 3))
+    }
+
+    fn served(addr: [u8; 4], mask: [u8; 4]) -> Served {
+        let iface = Iface {
+            addr: Ipv4Addr::from(addr),
+            mask: Ipv4Addr::from(mask),
+        };
+        Served {
+            iface,
+            wire: Wire::build(&Records::new(&sample(), iface.addr)).unwrap(),
+        }
+    }
+
+    fn from(ip: [u8; 4]) -> SockAddr {
+        SockAddr::from(SocketAddr::from((Ipv4Addr::from(ip), MDNS_PORT)))
+    }
+
+    /// The `A` record a reply on `s` carries.
+    fn a_record(s: &Served) -> Ipv4Addr {
+        let pkt = Packet::parse(s.wire.reply(Shape::InstanceReply)).unwrap();
+        pkt.answers
+            .iter()
+            .find_map(|rr| match &rr.rdata {
+                RData::A(a) => Some(Ipv4Addr::from(a.address)),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn a_query_is_answered_with_the_address_of_its_senders_link() {
+        // The CVC host: the LAN, and a /30 to vm1.
+        let links = [
+            served([192, 168, 1, 20], [255, 255, 255, 0]),
+            served([10, 0, 101, 1], [255, 255, 255, 252]),
+        ];
+        let vm1 = answering(&links, &from([10, 0, 101, 2])).unwrap();
+        assert_eq!(a_record(vm1), Ipv4Addr::new(10, 0, 101, 1));
+        let lan = answering(&links, &from([192, 168, 1, 77])).unwrap();
+        assert_eq!(a_record(lan), Ipv4Addr::new(192, 168, 1, 20));
+        // A sender on no served subnet gets the first interface's address.
+        let other = answering(&links, &from([172, 16, 0, 9])).unwrap();
+        assert_eq!(a_record(other), Ipv4Addr::new(192, 168, 1, 20));
+        assert!(answering(&[], &from([10, 0, 101, 2])).is_none());
+    }
+
+    #[test]
+    fn an_interface_holds_the_addresses_of_its_subnet() {
+        let vp1 = Iface {
+            addr: Ipv4Addr::new(10, 0, 101, 1),
+            mask: Ipv4Addr::new(255, 255, 255, 252),
+        };
+        assert!(vp1.contains(Ipv4Addr::new(10, 0, 101, 2)));
+        assert!(!vp1.contains(Ipv4Addr::new(10, 0, 101, 5)));
+        // The egress fallback (no mask) holds every sender.
+        let fallback = Iface {
+            addr: Ipv4Addr::new(192, 168, 1, 20),
+            mask: Ipv4Addr::UNSPECIFIED,
+        };
+        assert!(fallback.contains(Ipv4Addr::new(10, 0, 101, 2)));
+    }
+
+    #[test]
+    fn the_served_interfaces_are_never_empty_and_never_loopback() {
+        let ifaces = interfaces();
+        assert!(!ifaces.is_empty());
+        assert!(ifaces
+            .iter()
+            .all(|i| !i.addr.is_loopback() || i.mask.is_unspecified()));
     }
 
     // ---- Deterministic wire-correctness tests (no networking) ----
