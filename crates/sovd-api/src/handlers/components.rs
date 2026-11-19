@@ -143,14 +143,7 @@ pub async fn list_components(
     if let Some(node) = state.node() {
         // A node is the server's one component. A client sees it when it may access
         // the node or any of its subcomponents.
-        let visible = match &client {
-            Some(c) => {
-                c.can_access_component(node.id())
-                    || state.backends().keys().any(|id| c.can_access_component(id))
-            }
-            None => true,
-        };
-        let items = visible
+        let items = node_visible(&state, node, client.as_ref())
             .then(|| ComponentInfo {
                 id: node.id().to_owned(),
                 name: node.name().to_owned(),
@@ -190,9 +183,17 @@ pub async fn get_component(
     State(state): State<AppState>,
     Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
+    client: Option<Extension<ClientContext>>,
 ) -> Result<axum::response::Response, ApiError> {
     use axum::response::IntoResponse;
     if let Some(node) = state.node().filter(|node| node.id() == component_id) {
+        // Scope-checked here, not by the authorizer: the node's document is open to the
+        // clients the listing shows the node to.
+        if !node_visible(&state, node, client.as_ref().map(|Extension(c)| c)) {
+            return Err(ApiError::Forbidden(format!(
+                "no scope for node {component_id} or any of its subcomponents"
+            )));
+        }
         // The node: its host backend's document under the node's own URL, or, without
         // a host, just the way to its subcomponents.
         let subcomponents = node.subcomponents_href(tree);
@@ -254,6 +255,19 @@ pub async fn list_subcomponents(
         .collect();
     items.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(Json(ComponentsResponse { items }))
+}
+
+/// Whether a client sees the node: when it may access the node or any of its
+/// subcomponents (no `ClientContext` ⇒ auth disabled ⇒ yes).
+fn node_visible(
+    state: &AppState,
+    node: &crate::NodeTopology,
+    client: Option<&ClientContext>,
+) -> bool {
+    client.is_none_or(|c| {
+        c.can_access_component(node.id())
+            || state.backends().keys().any(|id| c.can_access_component(id))
+    })
 }
 
 /// A node's entity type: its host backend's, or `node` without one.

@@ -206,6 +206,16 @@ async fn the_component_scope_applies_to_subcomponents() {
         .collect();
     assert_eq!(ids, vec![Value::from("ecu_a")]);
 
+    // ...and may follow the node's href, which a client with no scope may not.
+    let (status, body) = get(&server, "/v1/components/node", Some("token-a")).await;
+    assert_eq!(status, 200);
+    assert_eq!(json(&body)["id"], "node");
+    let (status, body) = get(&server, "/v1/components", Some("token-none")).await;
+    assert_eq!(status, 200);
+    assert_eq!(json(&body)["items"].as_array().unwrap().len(), 0);
+    let (status, _) = get(&server, "/v1/components/node", Some("token-none")).await;
+    assert_eq!(status, 403);
+
     let (status, _) = get(
         &server,
         "/v1/components/node/subcomponents/ecu_a/data",
