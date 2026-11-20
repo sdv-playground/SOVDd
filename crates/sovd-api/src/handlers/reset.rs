@@ -1,10 +1,15 @@
 //! ECU Reset handlers (UDS 0x11 ECUReset) — ISO 17978-3 §7.19.
 //!
 //! `PUT {entity}/status/restart` is async per spec line 552: returns
-//! 202 + `Location` header to a status sub-resource.  Reset is fire-
-//! and-forget — once the ECU is rebooting there's no observable
-//! progress — so the status sub-resource is a stateless stub that
-//! always reads `completed`.
+//! 202 + `Location` header to a status sub-resource.  The body's
+//! `status` is the backend's reported outcome
+//! ([`DiagnosticBackend::ecu_reset_outcome`]): `completed` when the
+//! reset has taken effect, `running` when it was only triggered (e.g. a
+//! VM relaunch) — callers then verify readiness via `GET {entity}/status`.
+//! The status sub-resource itself is not tracked yet (see
+//! [`status_restart_execution`]).
+//!
+//! [`DiagnosticBackend::ecu_reset_outcome`]: sovd_core::DiagnosticBackend::ecu_reset_outcome
 
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -13,7 +18,7 @@ use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use sovd_core::EntityStatusBody;
+use sovd_core::{EcuResetOutcome, EntityStatusBody, OperationStatus};
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -29,7 +34,7 @@ pub struct EcuResetRequest {
 /// Execution-resource body returned alongside the 202.
 #[derive(Debug, Serialize)]
 pub struct EcuResetExecution {
-    pub status: String,
+    pub status: OperationStatus,
     pub exec_id: String,
     pub reset_type: String,
     pub message: String,
@@ -41,7 +46,7 @@ pub struct EcuResetExecution {
 /// Status returned from `GET .../status/restart/{exec_id}`.
 #[derive(Debug, Serialize)]
 pub struct EcuResetExecutionStatus {
-    pub status: String,
+    pub status: OperationStatus,
     pub exec_id: String,
 }
 
@@ -93,7 +98,14 @@ pub async fn status_restart(
 ) -> Result<impl IntoResponse, ApiError> {
     let backend = state.get_backend(&component_id)?;
     let (reset_type_byte, reset_type_name) = parse_reset_type(&request.reset_type)?;
-    let power_down_time = backend.ecu_reset(reset_type_byte).await?;
+    let (status, power_down_time) = match backend.ecu_reset_outcome(reset_type_byte).await? {
+        EcuResetOutcome::Completed { power_down_time } => {
+            (OperationStatus::Completed, power_down_time)
+        }
+        EcuResetOutcome::Initiated { power_down_time } => {
+            (OperationStatus::Running, power_down_time)
+        }
+    };
 
     let exec_id = Uuid::new_v4().to_string();
     let href = format!(
@@ -110,7 +122,7 @@ pub async fn status_restart(
     );
 
     let body = EcuResetExecution {
-        status: "completed".to_string(),
+        status,
         exec_id,
         reset_type: reset_type_name.to_string(),
         message: match reset_type_name {
@@ -128,14 +140,15 @@ pub async fn status_restart(
 
 /// GET /vehicle/v1/components/:component_id/status/restart/:exec_id
 ///
-/// Stub status — reset is fire-and-forget; once the kernel takes
-/// over we have no observable progress to report.  Any well-formed
-/// `exec_id` returns `completed`.
+/// Stub: restart executions are not tracked, so this does not reflect
+/// the outcome reported by the PUT — any well-formed `exec_id` reads
+/// `completed`, even for a reset that was only `running` at PUT time.
+/// Use `GET {entity}/status` to verify a reset took effect.
 pub async fn status_restart_execution(
     Path((_component_id, exec_id)): Path<(String, String)>,
 ) -> Json<EcuResetExecutionStatus> {
     Json(EcuResetExecutionStatus {
-        status: "completed".to_string(),
+        status: OperationStatus::Completed,
         exec_id,
     })
 }

@@ -372,6 +372,21 @@ pub enum VerdictScope {
     Node,
 }
 
+/// What an ECU reset did, as reported by [`DiagnosticBackend::ecu_reset_outcome`].
+///
+/// `power_down_time` is the UDS 0x11 power-down time in seconds, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EcuResetOutcome {
+    /// The reset has taken effect: the entity restarted (or nothing needed
+    /// restarting) by the time the call returned. This is what a plain UDS
+    /// 0x11 positive response means, and the default for every backend.
+    Completed { power_down_time: Option<u8> },
+    /// The reset was triggered but is still running when the call returns
+    /// (e.g. a VM or container relaunch). Callers verify readiness through
+    /// `GET .../status` rather than assuming the entity is back.
+    Initiated { power_down_time: Option<u8> },
+}
+
 /// The core trait that all diagnostic backends implement.
 ///
 /// This abstraction allows the same SOVD REST API to be served by different backends:
@@ -454,6 +469,16 @@ pub trait DiagnosticBackend: Send + Sync {
         Err(crate::error::BackendError::NotSupported(
             "ecu_reset".to_string(),
         ))
+    }
+
+    /// Request ECU reset and report what it did. The `status/restart` handler
+    /// calls this. The default wraps [`Self::ecu_reset`] as
+    /// [`EcuResetOutcome::Completed`]; backends whose reset completes
+    /// asynchronously override it to return [`EcuResetOutcome::Initiated`].
+    async fn ecu_reset_outcome(&self, reset_type: u8) -> BackendResult<EcuResetOutcome> {
+        Ok(EcuResetOutcome::Completed {
+            power_down_time: self.ecu_reset(reset_type).await?,
+        })
     }
 
     /// Read the entity's runtime status — ISO 17978-3 §7.19.2 (`GET .../status`).

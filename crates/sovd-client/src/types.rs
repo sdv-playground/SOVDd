@@ -1000,7 +1000,8 @@ pub struct FinalizeDownloadResponse {
 /// this body lives at that sub-resource too.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EcuResetResponse {
-    /// Execution status (always `completed` for reset — fire-and-forget).
+    /// Execution status as reported by the backend: `completed` when the
+    /// reset has taken effect, `running` when it was only triggered.
     pub status: String,
     /// Server-allocated execution id (also embedded in `href`).
     pub exec_id: String,

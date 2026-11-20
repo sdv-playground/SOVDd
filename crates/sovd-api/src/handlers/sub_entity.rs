@@ -35,7 +35,7 @@ use super::modes::{
 };
 use super::operations::{OperationInfoResponse, OperationsResponse};
 use axum::response::IntoResponse;
-use sovd_core::{FaultFilter, FaultSeverity, OperationStatus, SecurityState};
+use sovd_core::{EcuResetOutcome, FaultFilter, FaultSeverity, OperationStatus, SecurityState};
 
 /// Resolve a sub-entity backend from a `(component_id, app_id)` path.
 ///
@@ -110,7 +110,14 @@ pub async fn status_restart(
         }
     };
 
-    let power_down_time = backend.ecu_reset(reset_type_byte).await?;
+    let (status, power_down_time) = match backend.ecu_reset_outcome(reset_type_byte).await? {
+        EcuResetOutcome::Completed { power_down_time } => {
+            (OperationStatus::Completed, power_down_time)
+        }
+        EcuResetOutcome::Initiated { power_down_time } => {
+            (OperationStatus::Running, power_down_time)
+        }
+    };
 
     let exec_id = Uuid::new_v4().to_string();
     let href = format!(
@@ -135,7 +142,7 @@ pub async fn status_restart(
     tracing::info!(app_id = %app_id, reset_type = %reset_type_name, "Sub-entity ECU reset");
 
     let body = super::reset::EcuResetExecution {
-        status: "completed".to_string(),
+        status,
         exec_id,
         reset_type: reset_type_name.to_string(),
         message,
@@ -151,7 +158,7 @@ pub async fn status_restart_execution(
     Path((_component_id, _app_id, exec_id)): Path<(String, String, String)>,
 ) -> Json<super::reset::EcuResetExecutionStatus> {
     Json(super::reset::EcuResetExecutionStatus {
-        status: "completed".to_string(),
+        status: OperationStatus::Completed,
         exec_id,
     })
 }

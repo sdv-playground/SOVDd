@@ -335,7 +335,8 @@ fn default_reset_type() -> String {
 /// ECU reset response — ISO 17978-3 §7.19 execution shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResetResponse {
-    /// Execution status (always `completed` for reset).
+    /// Execution status as reported by the backend: `completed` when the
+    /// reset has taken effect, `running` when it was only triggered.
     pub status: String,
 
     /// Server-allocated execution id.
