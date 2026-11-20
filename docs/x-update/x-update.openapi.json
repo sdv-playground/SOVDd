@@ -3,11 +3,14 @@
   "info": {
     "title": "SOVD x-update extension",
     "version": "0.5.0-draft",
-    "description": "The x-update vendor extensions to ISO 17978-3 §7.18 (software update) and §7.19 (entity status and restart), as in `docs/x-update.md`. Paths are relative to `/vehicle/v1`. The orchestrator addresses updates on the node level: `{entity}` is the node, the collection is `/updates` and every registration names its executor as `target`, one of the node's `x-update.update-targets` (`GET /`). Each executor is an entity of its own — a top-level component, or a subcomponent of the node where the server serves a tree — whose document reports `software_update` and `capabilities.x-update.verdict`. Executors here are said to be IDLE while they hold no update. Standard operations are shown only where x-update adds to them. The node operations and `data/x-update-state` are served by the embedding machine manager.\n\nNot in this version: executors that need a verdict refusing `automated` with 409; retiring the x-ota names; executor-side recording of the update id.\n\nNot implemented yet in SOVDd: adopting (until then a verdict, `prepare` or `execute` on an update only the executor holds answers 404) and keeping a transaction atomic (the backend's part)."
+    "description": "The x-update vendor extensions to ISO 17978-3 §7.18 (software update) and §7.19 (entity status and restart), as in `docs/x-update.md`. Paths are relative to `/vehicle/v1` or `/v1` (both served); where the trees differ, the operation says so. The orchestrator addresses updates on the node level: `{entity}` is the node, the collection is `/updates` and every registration names its executor as `target`, one of the node's `x-update.update-targets` (`GET /`). Each executor is an entity of its own — a top-level component, or a subcomponent of the node where the server serves a tree — whose document reports `software_update` and `capabilities.x-update.verdict`. Executors here are said to be IDLE while they hold no update. Standard operations are shown only where x-update adds to them. The node operations and `data/x-update-state` are served by the embedding machine manager.\n\nNot in this version: executors that need a verdict refusing `automated` with 409; retiring the x-ota names; executor-side recording of the update id.\n\nNot implemented yet in SOVDd: adopting (until then a verdict, `prepare` or `execute` on an update only the executor holds answers 404) and keeping a transaction atomic (the backend's part)."
   },
   "servers": [
     {
       "url": "/vehicle/v1"
+    },
+    {
+      "url": "/v1"
     }
   ],
   "paths": {
@@ -77,7 +80,7 @@
       },
       "post": {
         "summary": "Register an update (§7.18.9)",
-        "description": "The client gives the id; the server keeps it verbatim and never assigns, replaces or derives one. A registration with an id the executor still holds adopts that update instead of starting a new one (201, `x-update.adopted: true`); the same id with a different manifest is refused with 409.",
+        "description": "The client gives the id; the server keeps it verbatim and never replaces or derives one (under `/v1` it creates one when none is given). A registration with an id the executor still holds adopts that update instead of starting a new one (201, `x-update.adopted: true`); the same id with a different manifest is refused with 409.",
         "requestBody": {
           "required": true,
           "content": {
@@ -100,7 +103,7 @@
             }
           },
           "400": {
-            "description": "No id, or an invalid body",
+            "description": "No id (under `/vehicle/v1`), an empty id, or an invalid body",
             "content": {
               "application/json": {
                 "schema": {
@@ -163,7 +166,7 @@
       },
       "delete": {
         "summary": "Remove an update (§7.18.8)",
-        "description": "Accepted in REGISTERED and PREPARED, before `execute`, where it discards what the executor staged and the software in use is never touched, and once the update has settled (COMMITTED, ROLLED_BACK or FAILED). Synchronous: 204 once the update is gone. There is no finish verb and no revert verb.",
+        "description": "Before `execute` (REGISTERED, PREPARING, PREPARED) it discards what the executor staged, aborting a running `prepare`; the software in use is never touched. Once the update has settled (COMMITTED, ROLLED_BACK or FAILED) it removes the record. Synchronous: 204 once the update is gone. There is no finish verb and no revert verb. Under `/v1` it is refused with 405 while the update runs in phase execute (EXECUTING, EXECUTED, COMMITTING, ROLLING_BACK), ISO 17978-3 §7.18.8; `/vehicle/v1` deletes it, aborting the running step.",
         "responses": {
           "204": {
             "description": "Removed"
@@ -178,8 +181,8 @@
               }
             }
           },
-          "409": {
-            "description": "`precondition-not-fulfilled`: PREPARING, EXECUTING, EXECUTED, COMMITTING or ROLLING_BACK",
+          "405": {
+            "description": "`method-not-allowed` (under `/v1`): in phase execute and not settled; wait, or send the verdict first",
             "content": {
               "application/json": {
                 "schema": {
@@ -228,6 +231,93 @@
             }
           }
         }
+      },
+      "post": {
+        "summary": "Upload a part (§7.20, Tables 301-303)",
+        "description": "The body is the part's bytes, streamed as is (not multipart). `Content-Disposition` is required and names the part: its `filename` parameter, else its `name`; the name is the part's URL segment (not empty, no `/`, not `.` or `..`). `Content-Type` is recorded as the part's mimetype (default `application/octet-stream`). Uploading a part of the same name again replaces it. Parts are accepted while the update is registered or uploading.",
+        "parameters": [
+          {
+            "name": "Content-Disposition",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "form-data; name=\"manifest\"; filename=\"manifest\""
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Stored",
+            "headers": {
+              "Location": {
+                "description": "`{entity}/updates/{update_id}/bulk-data/{part}`",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "description": "The part's SHA-256",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`incomplete-request`: no `Content-Disposition`, or an unusable name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The update no longer accepts parts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/updates/{update_id}/bulk-data/{part_id}": {
@@ -252,7 +342,7 @@
         }
       ],
       "put": {
-        "summary": "Upload a part (the manifest or a payload)",
+        "summary": "Upload a part, named by the path (legacy alias of the POST; scheduled for deprecation)",
         "requestBody": {
           "required": true,
           "content": {
@@ -443,7 +533,7 @@
       ],
       "put": {
         "summary": "Commit this update",
-        "description": "Accepted in EXECUTED; again in COMMITTED, where it changes nothing. The update moves to COMMITTING. Valid for every update. Updates one executor switches together (one boot vector) form a transaction; each update reports its own state as it actually is, and the server checks nothing across members. What to send, and when, is the client's decision.",
+        "description": "Accepted in EXECUTED; again in COMMITTED, where it changes nothing. The update moves to COMMITTING. For an update whose `verdict_scope` is `update`. A member of a node transaction (`verdict_scope` `node`) is settled by the node operation; under `/v1` a per-update verdict on it answers 409 before any state check, naming the node operations, and `/vehicle/v1` accepts it for existing clients. Each update reports its own state as it actually is.",
         "responses": {
           "202": {
             "description": "Accepted; poll the status resource.",
@@ -467,7 +557,7 @@
             }
           },
           "409": {
-            "description": "`precondition-not-fulfilled`: not in a state the verb is accepted in",
+            "description": "`precondition-not-fulfilled`: not in a state the verb is accepted in, or (under `/v1`) a member of a node transaction",
             "content": {
               "application/json": {
                 "schema": {
@@ -518,7 +608,7 @@
             }
           },
           "409": {
-            "description": "`precondition-not-fulfilled`: not in a state the verb is accepted in",
+            "description": "`precondition-not-fulfilled`: not in a state the verb is accepted in, or (under `/v1`) a member of a node transaction",
             "content": {
               "application/json": {
                 "schema": {
@@ -533,7 +623,7 @@
     "/operations/x-update-commit/executions": {
       "post": {
         "summary": "Node commit: every component in the node's open transaction, all or nothing",
-        "description": "Beside the per-update verbs, with the same result as a per-update verdict on any one of its updates. Served by the embedding machine manager, not by SOVDd.",
+        "description": "Settles every component in the node's open transaction, all or nothing: the verdict for updates whose `verdict_scope` is `node`. Served by the embedding machine manager, not by SOVDd.",
         "requestBody": {
           "required": false,
           "content": {
@@ -586,7 +676,7 @@
     "/operations/x-update-rollback/executions": {
       "post": {
         "summary": "Node rollback: every component in the node's open transaction, all or nothing",
-        "description": "Beside the per-update verbs, with the same result as a per-update verdict on any one of its updates. Served by the embedding machine manager, not by SOVDd.",
+        "description": "Settles every component in the node's open transaction, all or nothing: the verdict for updates whose `verdict_scope` is `node`. Served by the embedding machine manager, not by SOVDd.",
         "requestBody": {
           "required": false,
           "content": {
@@ -661,6 +751,7 @@
         "type": "string",
         "enum": [
           "IDLE",
+          "READY",
           "REGISTERED",
           "PREPARING",
           "PREPARED",
@@ -672,7 +763,7 @@
           "ROLLED_BACK",
           "FAILED"
         ],
-        "description": "The update's state, named after the verb that leads to it (REGISTERED after registration). Total; the standard `phase`/`status` in the same body agree with it:\n\n| state | phase | status | meaning |\n|---|---|---|---|\n| IDLE | — | — | the entity holds no update; not an update's state, but the one its entity reports; `POST` registers one |\n| REGISTERED | prepare | pending | registered; manifest and parts may be uploaded; `prepare` or `DELETE` |\n| PREPARING | prepare | inProgress | verifying and staging |\n| PREPARED | prepare | completed | staged in the inactive bank; `execute` or `DELETE` |\n| EXECUTING | execute | inProgress | armed; the new software does not run yet (e.g. a restart is still to come) |\n| EXECUTED | execute | inProgress | the new software runs; a verdict is awaited |\n| COMMITTING | execute | inProgress | commit accepted and running |\n| COMMITTED | execute | completed | permanent; `DELETE` |\n| ROLLING_BACK | execute | inProgress | rollback accepted and running (the client's, or the executor's own, e.g. after failed trial boots) |\n| ROLLED_BACK | execute | failed | the previous software is in effect again; `DELETE` |\n| FAILED | prepare or execute | failed | see the standard error object; `DELETE` |"
+        "description": "The update's state, named after the verb that leads to it (REGISTERED after registration under `/v1`, READY under `/vehicle/v1`). Total; the standard `phase`/`status` in the same body agree with it:\n\n| state | phase | status | meaning |\n|---|---|---|---|\n| IDLE | — | — | the entity holds no update; not an update's state, but the one its entity reports; `POST` registers one |\n| REGISTERED | prepare | pending | registered; manifest and parts may be uploaded; `prepare` or `DELETE` |\n| PREPARING | prepare | inProgress | verifying and staging |\n| PREPARED | prepare | completed | staged in the inactive bank; `execute` or `DELETE` |\n| EXECUTING | execute | inProgress | armed; the restart named by `reset_kind` has not been observed yet |\n| EXECUTED | execute | inProgress | the new software runs; a verdict is awaited |\n| COMMITTING | execute | inProgress | commit accepted and running |\n| COMMITTED | execute | completed | permanent; `DELETE` |\n| ROLLING_BACK | execute | inProgress | rollback accepted and running (the client's, or the executor's own, e.g. after failed trial boots) |\n| ROLLED_BACK | execute | failed | the previous software is in effect again; `DELETE` |\n| FAILED | prepare or execute | failed | see the standard error object; `DELETE` |"
       },
       "StatusBody": {
         "type": "object",
@@ -721,6 +812,27 @@
               "adopted": {
                 "type": "boolean",
                 "description": "Present, and true, on an update a registration adopted."
+              },
+              "reset_kind": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "component",
+                  "node"
+                ],
+                "description": "What must restart to activate the update: none, a standard restart of this entity, or one restart of the node's entity for every update on the node that reports `node`. The x-ota member `x-ota-reset-kind` keeps its old vocabulary beside it."
+              },
+              "target": {
+                "type": "string",
+                "description": "Under `/v1` only: the component the update is registered on."
+              },
+              "verdict_scope": {
+                "type": "string",
+                "enum": [
+                  "update",
+                  "node"
+                ],
+                "description": "Under `/v1` only: `update`, settled by its own `x-update-commit` / `x-update-rollback`; `node`, a member of a node transaction, settled only by the node operations (a per-update verdict is refused with 409). Independent of `reset_kind`."
               }
             }
           }
@@ -743,14 +855,13 @@
       "Registration": {
         "type": "object",
         "required": [
-          "id",
           "target"
         ],
         "properties": {
           "id": {
             "type": "string",
             "minLength": 1,
-            "description": "Chosen by the client; kept verbatim."
+            "description": "Chosen by the client; kept verbatim. Under `/v1` a registration without it gets a server-created UUID (ISO 17978-3 §7.18.9), returned in `Location`, `id` and `update_id`; `/vehicle/v1` refuses it with 400. An empty `id` is refused with 400 on both trees."
           },
           "target": {
             "type": "string",
@@ -841,6 +952,14 @@
                   "verdict": {
                     "type": "boolean",
                     "description": "true: `execute` stops at EXECUTED and a verdict is required. false: `execute` commits on its own. Absent: the server cannot tell. There is no request option for it; `automated` asks the executor to decide for itself."
+                  },
+                  "verdict_scope": {
+                    "type": "string",
+                    "enum": [
+                      "update",
+                      "node"
+                    ],
+                    "description": "Under `/v1`: how this executor's updates are settled; see the status member."
                   }
                 }
               }
