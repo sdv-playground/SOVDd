@@ -17,7 +17,9 @@ use std::sync::Arc;
 
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
-use sovd_api::{create_router, AccessRequest, AppState, Authorizer, Capability, ClientContext};
+use sovd_api::{
+    create_router, AccessRequest, AppState, AuthError, Authorizer, Capability, ClientContext,
+};
 use sovd_client::testing::TestServer;
 use sovd_core::{
     BackendError, BackendResult, Capabilities, DataValue, DiagnosticBackend, EntityInfo,
@@ -95,7 +97,7 @@ fn capability_scope(cap: Capability) -> Option<&'static str> {
 
 #[async_trait::async_trait]
 impl Authorizer for TestAuthorizer {
-    async fn authorize(&self, req: &AccessRequest<'_>) -> Result<ClientContext, String> {
+    async fn authorize(&self, req: &AccessRequest<'_>) -> Result<ClientContext, AuthError> {
         // `AccessRequest.bearer` is the full `Authorization` header value — the
         // authorizer parses it (the built-in one strips `Bearer ` internally too).
         let token = req
@@ -119,14 +121,18 @@ impl Authorizer for TestAuthorizer {
         // Component scope (C-031): the route addresses a specific component.
         if let Some(component) = req.component {
             if !ctx.can_access_component(component) {
-                return Err(format!("token has no scope for component '{component}'"));
+                return Err(AuthError::Forbidden(format!(
+                    "token has no scope for component '{component}'"
+                )));
             }
         }
         // Capability (verb) scope — the dimension the built-in authorizer leaves
         // to an injected one (docs/design/authorization.md §5).
         if let Some(needed) = capability_scope(req.capability) {
             if !ctx.scopes.iter().any(|s| s == needed) {
-                return Err(format!("token lacks the '{needed}' capability"));
+                return Err(AuthError::Forbidden(format!(
+                    "token lacks the '{needed}' capability"
+                )));
             }
         }
         Ok(ctx)
@@ -268,7 +274,7 @@ async fn component_read_needs_only_component_scope() {
 async fn authorize_component_admin(
     authorizer: &TestAuthorizer,
     token: &str,
-) -> Result<ClientContext, String> {
+) -> Result<ClientContext, AuthError> {
     let header = format!("Bearer {token}");
     // `reqwest::Method` is the same `http::Method` axum re-exports.
     let method = reqwest::Method::POST;

@@ -7,7 +7,7 @@
 //! Definitions can be loaded from YAML files or registered dynamically.
 
 use axum::extract::{Path, Query, RawQuery, State};
-use axum::Json;
+use axum::{Extension, Json};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sovd_conv::format_did;
@@ -16,6 +16,7 @@ use sovd_core::DataCategory;
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::Tree;
 
 // =============================================================================
 // Query Parameters
@@ -198,12 +199,13 @@ fn apply_category_filter(items: &mut Vec<DidInfoResponse>, filter: &Option<Vec<D
 /// filter.
 pub async fn list_parameters(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
     RawQuery(raw_query): RawQuery,
 ) -> Result<Json<DidListResponse>, ApiError> {
     let category_filter = parse_category_filter(&raw_query);
 
-    let mut items = resolve_data_items(&state, &component_id).await?;
+    let mut items = resolve_data_items(&state, tree, &component_id).await?;
     apply_category_filter(&mut items, &category_filter);
 
     // Sort by id for consistent ordering
@@ -226,6 +228,7 @@ pub async fn list_parameters(
 ///   3. proxy backends with no local DIDs → backend `list_parameters` fallback.
 async fn resolve_data_items(
     state: &AppState,
+    tree: Tree,
     component_id: &str,
 ) -> Result<Vec<DidInfoResponse>, ApiError> {
     let backend = state.get_backend(component_id)?;
@@ -239,7 +242,7 @@ async fn resolve_data_items(
         let params = backend.list_parameters().await.unwrap_or_default();
         return Ok(params
             .into_iter()
-            .map(|p| param_info_to_did_info(p, component_id))
+            .map(|p| param_info_to_did_info(p, tree, component_id))
             .collect());
     }
 
@@ -253,7 +256,7 @@ async fn resolve_data_items(
             if !params.is_empty() {
                 return Ok(params
                     .into_iter()
-                    .map(|p| param_info_to_did_info(p, component_id))
+                    .map(|p| param_info_to_did_info(p, tree, component_id))
                     .collect());
             }
         }
@@ -277,7 +280,7 @@ async fn resolve_data_items(
                 unit: def.unit,
                 category,
                 writable: def.writable,
-                href: format!("/vehicle/v1/components/{}/data/{}", component_id, id),
+                href: format!("{}/data/{}", tree.component(component_id), id),
             }
         })
         .collect())
@@ -290,9 +293,10 @@ async fn resolve_data_items(
 /// `DataCategoryInformation` (`{item, category_translation_id?}`).
 pub async fn list_data_categories(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
 ) -> Result<Json<DataCategoryListResponse>, ApiError> {
-    let items = resolve_data_items(&state, &component_id).await?;
+    let items = resolve_data_items(&state, tree, &component_id).await?;
 
     // Distinct categories, in first-seen order for stable output.
     let mut seen: Vec<DataCategory> = Vec::new();
@@ -312,7 +316,11 @@ pub async fn list_data_categories(
 /// carrying the §7.9 category through. When a backend leaves `category`
 /// unset but exposes a hex DID, fall back to the DID-number default so the
 /// list item still satisfies `ValueMetaData.category` (M).
-fn param_info_to_did_info(p: sovd_core::ParameterInfo, component_id: &str) -> DidInfoResponse {
+fn param_info_to_did_info(
+    p: sovd_core::ParameterInfo,
+    tree: Tree,
+    component_id: &str,
+) -> DidInfoResponse {
     let did = p.did.unwrap_or_default();
     let category = p.category.or_else(|| {
         if did.is_empty() {
@@ -330,7 +338,7 @@ fn param_info_to_did_info(p: sovd_core::ParameterInfo, component_id: &str) -> Di
         unit: p.unit,
         category,
         writable: !p.read_only,
-        href: format!("/vehicle/v1/components/{}/data/{}", component_id, p.id),
+        href: format!("{}/data/{}", tree.component(component_id), p.id),
     }
 }
 
@@ -338,10 +346,11 @@ fn param_info_to_did_info(p: sovd_core::ParameterInfo, component_id: &str) -> Di
 /// Read a DID value (applies conversion if registered)
 pub async fn read_parameter(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, did)): Path<(String, String)>,
     Query(query): Query<ReadQuery>,
 ) -> Result<Json<DidResponse>, ApiError> {
-    read_did_internal(&state, &component_id, &did, query.raw).await
+    read_did_internal(&state, tree, &component_id, &did, query.raw).await
 }
 
 /// PUT /vehicle/v1/components/:component_id/data/:did — 204 No Content per spec.
@@ -360,6 +369,7 @@ pub async fn write_parameter(
 
 async fn read_did_internal(
     state: &AppState,
+    tree: Tree,
     component_id: &str,
     param_id: &str,
     raw_only: bool,
@@ -440,12 +450,13 @@ async fn read_did_internal(
                     timestamp: Utc::now().to_rfc3339(),
                 }));
             }
+            let base = tree.base();
             return Err(ApiError::NotFound(format!(
                 "DID '{param_id}' is not a readable data resource on entity \
                  '{component_id}'. This entity exposes no raw DID access (e.g. an \
                  aggregating gateway, which owns no DIDs of its own and forwards to \
                  children). Read it on the owning component via the sub-entity path: \
-                 /vehicle/v1/components/{component_id}/apps/<child>/data/{param_id}."
+                 {base}/components/{component_id}/apps/<child>/data/{param_id}."
             )));
         }
         Err(e) => return Err(e.into()),

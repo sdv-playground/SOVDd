@@ -9,7 +9,7 @@
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
-use axum::Json;
+use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -17,6 +17,7 @@ use sovd_core::EntityStatusBody;
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::Tree;
 
 /// Request for ECU reset
 #[derive(Debug, Deserialize)]
@@ -86,6 +87,7 @@ fn parse_reset_type(s: &str) -> Result<(u8, &'static str), ApiError> {
 /// backend layer.
 pub async fn status_restart(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
     Json(request): Json<EcuResetRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -95,8 +97,9 @@ pub async fn status_restart(
 
     let exec_id = Uuid::new_v4().to_string();
     let href = format!(
-        "/vehicle/v1/components/{}/status/restart/{}",
-        component_id, exec_id
+        "{}/status/restart/{}",
+        tree.component(&component_id),
+        exec_id
     );
 
     let mut headers = HeaderMap::new();
@@ -144,14 +147,13 @@ pub async fn status_restart_execution(
 /// The `restart` control link is filled in here since the route always exists.
 pub async fn status_read(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
 ) -> Result<Json<EntityStatusBody>, ApiError> {
     let backend = state.get_backend(&component_id)?;
     let mut status = backend.read_entity_status().await?;
     if status.restart.is_empty() {
-        status.restart = vec![format!(
-            "/vehicle/v1/components/{component_id}/status/restart"
-        )];
+        status.restart = vec![format!("{}/status/restart", tree.component(&component_id))];
     }
     Ok(Json(status))
 }

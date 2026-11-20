@@ -1130,6 +1130,7 @@ async fn test_streaming_through_gateway() {
 // =============================================================================
 
 #[tokio::test]
+#[serial_test::serial]
 async fn test_io_control_through_gateway() {
     require_vcan0!();
     let harness = GatewayTestHarness::new()

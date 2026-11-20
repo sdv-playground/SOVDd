@@ -4236,7 +4236,10 @@ async fn test_updates_register_and_part_upload() {
         .expect("Failed to create test harness");
 
     let (status, body) = harness
-        .post("/vehicle/v1/components/vtx_ecm/updates", json!({}))
+        .post(
+            "/vehicle/v1/components/vtx_ecm/updates",
+            json!({"id": "e2e-register-upload"}),
+        )
         .await
         .expect("POST /updates failed");
     assert_eq!(status, 201, "expected 201 Created, body = {body}");
@@ -4358,7 +4361,10 @@ async fn test_updates_verify_rejects_empty() {
         .expect("Failed to create test harness");
 
     let (status, body) = harness
-        .post("/vehicle/v1/components/vtx_ecm/updates", json!({}))
+        .post(
+            "/vehicle/v1/components/vtx_ecm/updates",
+            json!({"id": "e2e-verify-empty"}),
+        )
         .await
         .expect("POST /updates failed");
     assert_eq!(status, 201, "expected 201, body = {body}");
@@ -4399,7 +4405,7 @@ async fn test_updates_target_validation() {
     let (status, body) = harness
         .post(
             "/vehicle/v1/components/vtx_ecm/updates",
-            json!({"target": "vtx_ecm"}),
+            json!({"id": "e2e-target-match", "target": "vtx_ecm"}),
         )
         .await
         .expect("POST /updates matching target failed");
@@ -4414,7 +4420,7 @@ async fn test_updates_target_validation() {
     let (status, body) = harness
         .post(
             "/vehicle/v1/components/vtx_ecm/updates",
-            json!({"target": "vm-other"}),
+            json!({"id": "e2e-target-mismatch", "target": "vm-other"}),
         )
         .await
         .expect("POST /updates mismatched target failed");

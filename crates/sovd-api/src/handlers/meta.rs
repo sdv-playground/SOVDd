@@ -7,11 +7,12 @@
 use axum::extract::State;
 use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::state::{AppState, CapabilityExtensions};
+use crate::Tree;
 
 /// One entry of `/version-info`'s `sovd_info[]` array — ISO 17978-3
 /// §7.4.2 Table 37 (SOVDInfo). Describes one supported SOVD version.
@@ -51,24 +52,30 @@ pub struct VersionInfoResponse {
     pub sovd_info: Vec<SovdInfo>,
 }
 
-/// Single source of truth for the SOVD API edition(s) this server mounts.
+/// Single source of truth for the SOVD API base paths this server mounts.
 ///
-/// `version_info` (§7.4) derives its `versions` array from this slice, and
-/// the router in `lib.rs::create_router` mounts every base path listed here,
-/// so the advertised list can't drift from the actual surface (C-005).  Add a
-/// row here (and the matching routes) when introducing a new API edition.
+/// `version_info` (§7.4) derives its `sovd_info` array from this slice.  The
+/// router in `lib.rs::create_router` mounts the identical entity API under
+/// both bases — `/v1` (the spec base, §5.6) and `/vehicle/v1` (the original
+/// base, kept for existing clients) — one row per [`crate::Tree`], in
+/// [`crate::Tree::ALL`] order, so `/v1` is advertised first and the list can't
+/// drift from the actual surface (C-005).  Add a row here (and a `Tree`
+/// variant) when introducing a new base or API edition.
 ///
 /// Each tuple is `(version_identifier, base_uri, sovd_version)`:
 ///   * `version_identifier` — the URI version segment (§5.6 rule: value `v1`
 ///     for this edition). Not serialized on its own — it is carried inside
 ///     `base_uri`; kept here as the internal routing key.
-///   * `base_uri` — the version-specific base URI (`/vehicle/{version}`),
+///   * `base_uri` — the version-specific base URI (`/v1` or `/vehicle/v1`),
 ///     emitted as SOVDInfo `base_uri` (§7.4.2 Table 37).
 ///   * `sovd_version` — the SOVD standard version this maps to, as a SemVer
 ///     2.0.0 string, emitted as SOVDInfo `version` (Table 37). Aligned with
 ///     ASAM SOVD 1.1 (info.x-sovd-version) but expressed as `1.1.0` so it is
 ///     valid SemVer 2.0.0.
-pub const API_VERSIONS: &[(&str, &str, &str)] = &[("v1", "/vehicle/v1", "1.1.0")];
+pub const API_VERSIONS: &[(&str, &str, &str)] = &[
+    ("v1", Tree::V1.base(), "1.1.0"),
+    ("v1", Tree::Legacy.base(), "1.1.0"),
+];
 
 /// Build the `version-info` body from [`API_VERSIONS`].
 pub fn build_version_info() -> VersionInfoResponse {
@@ -103,7 +110,8 @@ pub async fn version_info() -> Json<VersionInfoResponse> {
 ///    path.  This is handled here in the fallback rather than as a real
 ///    route because axum's `{*wildcard}` must be the final path segment,
 ///    so a `/{*path}/docs` route is inexpressible.  The global
-///    `/vehicle/v1/docs` is a real route and never reaches this fallback.
+///    `{base}/docs` (both bases) is a real route and never reaches this
+///    fallback.
 ///    Scope is computed purely by path-template matching — entity
 ///    existence is not validated, and an empty scope still yields a valid
 ///    OpenAPI doc with empty `paths` (never a 404).
@@ -119,7 +127,11 @@ pub async fn not_found_fallback(State(state): State<AppState>, uri: Uri) -> Resp
         // request still 404s rather than aliasing the global doc.
         let entity = entity.strip_suffix('/').unwrap_or(entity);
         if !entity.is_empty() {
-            return Json(build_capability_doc_ext(
+            // Render under the entity's own tree; a path under no base keeps
+            // the `/vehicle/v1` rendering it always had.
+            let tree = Tree::split_path(entity).map_or(Tree::Legacy, |(tree, _)| tree);
+            return Json(build_capability_doc_for(
+                tree,
                 Some(entity),
                 state.capability_extensions(),
             ))
@@ -182,6 +194,10 @@ fn x_sovd_data_category_for(path: &str) -> Option<&'static str> {
 /// Curated path inventory.  Maintained alongside the router in
 /// `lib.rs::create_router`; the doc emitter walks this slice rather
 /// than the axum Router (axum 0.8 doesn't expose its routing table).
+///
+/// Templates are base-relative (`/components/...`) and prefixed with the
+/// requested tree's base at render time ([`render_template`]), except the
+/// [`ROOT_PATHS`], which are served at the server root under no base.
 const PATHS: &[PathEntry] = &[
     // health + meta
     PathEntry {
@@ -196,282 +212,328 @@ const PATHS: &[PathEntry] = &[
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/docs",
+        path: "/docs",
         summary: "OpenAPI capability description (§7.5).",
+    },
+    // SOVDServer entity (§7.6.3)
+    PathEntry {
+        method: "GET",
+        path: "/",
+        summary: "Read the SOVD server's capabilities (§7.6.3).",
     },
     // components / entities
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components",
+        path: "/components",
         summary: "List components (§7.6).",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}",
+        path: "/components/{component_id}",
         summary: "Read component capabilities (§7.6).",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/apps",
+        path: "/components/{component_id}/apps",
         summary: "List apps hosted on a component (§7.6).",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/apps/{app_id}",
+        path: "/components/{component_id}/apps/{app_id}",
         summary: "Read app capabilities.",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/apps/{app_id}/apps",
+        path: "/components/{component_id}/apps/{app_id}/apps",
         summary: "List nested sub-apps.",
     },
     // data (§7.10)
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/data",
+        path: "/components/{component_id}/data",
         summary: "List data parameters (§7.10).",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/data/{param_id}",
+        path: "/components/{component_id}/data/{param_id}",
         summary: "Read a parameter; `?raw=true` for raw bytes.",
     },
     PathEntry {
         method: "PUT",
-        path: "/vehicle/v1/components/{component_id}/data/{param_id}",
+        path: "/components/{component_id}/data/{param_id}",
         summary: "Write a parameter — 204 No Content.",
     },
     // dynamic data lists (§5.3.6 + §7.14)
     PathEntry {
         method: "POST",
-        path: "/vehicle/v1/components/{component_id}/operations/define-data/executions",
+        path: "/components/{component_id}/operations/define-data/executions",
         summary: "Define a dynamic data list (UDS 0x2C 0x02).",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/data-lists",
+        path: "/components/{component_id}/data-lists",
         summary: "List dynamic data lists.",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/data-lists/{list_id}",
+        path: "/components/{component_id}/data-lists/{list_id}",
         summary: "Read a dynamic data list value (UDS 0x22).",
     },
     PathEntry {
         method: "DELETE",
-        path: "/vehicle/v1/components/{component_id}/data-lists/{list_id}",
+        path: "/components/{component_id}/data-lists/{list_id}",
         summary: "Clear a dynamic data list (UDS 0x2C 0x03).",
     },
     // faults (§7.8)
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/faults",
+        path: "/components/{component_id}/faults",
         summary: "List faults / DTCs (§7.8).",
     },
     PathEntry {
         method: "DELETE",
-        path: "/vehicle/v1/components/{component_id}/faults",
+        path: "/components/{component_id}/faults",
         summary: "Clear all faults — 204.",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/faults/{fault_id}",
+        path: "/components/{component_id}/faults/{fault_id}",
         summary: "Read one fault.",
     },
     // operations (§7.14)
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/operations",
+        path: "/components/{component_id}/operations",
         summary: "List operations (§7.14). Includes IO controls (C-133).",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/operations/{operation_id}",
+        path: "/components/{component_id}/operations/{operation_id}",
         summary: "Get operation detail (IO state for outputs).",
     },
     PathEntry {
         method: "POST",
-        path: "/vehicle/v1/components/{component_id}/operations/{operation_id}/executions",
+        path: "/components/{component_id}/operations/{operation_id}/executions",
         summary: "Start an operation execution — 200/202 + Location.",
     },
     PathEntry {
         method: "GET",
-        path:
-            "/vehicle/v1/components/{component_id}/operations/{operation_id}/executions/{exec_id}",
+        path: "/components/{component_id}/operations/{operation_id}/executions/{exec_id}",
         summary: "Poll an execution.",
     },
     PathEntry {
         method: "DELETE",
-        path:
-            "/vehicle/v1/components/{component_id}/operations/{operation_id}/executions/{exec_id}",
+        path: "/components/{component_id}/operations/{operation_id}/executions/{exec_id}",
         summary: "Stop an execution — 204.",
     },
     // I/O controls share the /operations collection (ISO 17978-3 C-133).
     // updates (§7.13) — spec-compliant SW update wire (F.D2 thin alias).
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/updates",
+        path: "/components/{component_id}/updates",
         summary: "List available SW updates (§7.13).",
     },
     PathEntry {
         method: "POST",
-        path: "/vehicle/v1/components/{component_id}/updates",
+        path: "/components/{component_id}/updates",
         summary: "Register a new SW update — 201 + Location.",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/updates/{update_id}",
+        path: "/components/{component_id}/updates/{update_id}",
         summary: "Update status (state, parts, manifest).",
     },
     PathEntry {
         method: "DELETE",
-        path: "/vehicle/v1/components/{component_id}/updates/{update_id}",
+        path: "/components/{component_id}/updates/{update_id}",
         summary: "Abort update and discard staging — 204.",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data",
+        path: "/components/{component_id}/updates/{update_id}/bulk-data",
         summary: "List uploaded parts.",
     },
     PathEntry {
+        method: "POST",
+        path: "/components/{component_id}/updates/{update_id}/bulk-data",
+        summary: "Upload a part named by Content-Disposition (§7.20). 201 + Location + ETag.",
+    },
+    PathEntry {
         method: "PUT",
-        path: "/vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data/{part_id}",
-        summary: "Upload a part (manifest or detached payload). 201 + ETag.",
+        path: "/components/{component_id}/updates/{update_id}/bulk-data/{part_id}",
+        summary: "Upload a part (legacy alias of POST bulk-data). 201 + ETag.",
+    },
+    // Node-level updates (§7.18.1.1) — alias of the per-component collection;
+    // a registration names its component in `target`.
+    PathEntry {
+        method: "GET",
+        path: "/updates",
+        summary: "List available SW updates (§7.13).",
+    },
+    PathEntry {
+        method: "POST",
+        path: "/updates",
+        summary: "Register a new SW update — 201 + Location.",
+    },
+    PathEntry {
+        method: "GET",
+        path: "/updates/{update_id}",
+        summary: "Update status (state, parts, manifest).",
+    },
+    PathEntry {
+        method: "DELETE",
+        path: "/updates/{update_id}",
+        summary: "Abort update and discard staging — 204.",
+    },
+    PathEntry {
+        method: "GET",
+        path: "/updates/{update_id}/bulk-data",
+        summary: "List uploaded parts.",
+    },
+    PathEntry {
+        method: "POST",
+        path: "/updates/{update_id}/bulk-data",
+        summary: "Upload a part named by Content-Disposition (§7.20). 201 + Location + ETag.",
+    },
+    PathEntry {
+        method: "PUT",
+        path: "/updates/{update_id}/bulk-data/{part_id}",
+        summary: "Upload a part (legacy alias of POST bulk-data). 201 + ETag.",
     },
     // logs (§7.21)
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/logs",
+        path: "/components/{component_id}/logs",
         summary: "List logs.",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/logs/entries",
+        path: "/components/{component_id}/logs/entries",
         summary: "List log entries (§7.21).",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/logs/config",
+        path: "/components/{component_id}/logs/config",
         summary: "Read log configuration.",
     },
     PathEntry {
         method: "PUT",
-        path: "/vehicle/v1/components/{component_id}/logs/config",
+        path: "/components/{component_id}/logs/config",
         summary: "Set log configuration — 204.",
     },
     PathEntry {
         method: "DELETE",
-        path: "/vehicle/v1/components/{component_id}/logs/config",
+        path: "/components/{component_id}/logs/config",
         summary: "Reset log configuration — 204.",
     },
     // bulk-data (§7.20)
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/bulk-data",
+        path: "/components/{component_id}/bulk-data",
         summary: "List bulk-data categories (§7.20).",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/bulk-data/{category}",
+        path: "/components/{component_id}/bulk-data/{category}",
         summary: "List bulk-data items; q: created-before/after.",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/bulk-data/{category}/{bulk_data_id}",
+        path: "/components/{component_id}/bulk-data/{category}/{bulk_data_id}",
         summary: "Download a bulk-data item (200/202/307).",
     },
     // scripts (§7.15) — developer-registered tests (discovery + execution wired)
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/scripts",
+        path: "/components/{component_id}/scripts",
         summary: "List registered tests (§7.15); q: tags.",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/scripts/{script_id}",
+        path: "/components/{component_id}/scripts/{script_id}",
         summary: "Read one registered test's metadata.",
     },
     PathEntry {
         method: "POST",
-        path: "/vehicle/v1/components/{component_id}/scripts/{script_id}/executions",
+        path: "/components/{component_id}/scripts/{script_id}/executions",
         summary: "Run a registered test — 202 + Location.",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/scripts/{script_id}/executions",
+        path: "/components/{component_id}/scripts/{script_id}/executions",
         summary: "List a test's execution ids.",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/scripts/{script_id}/executions/{exec_id}",
+        path: "/components/{component_id}/scripts/{script_id}/executions/{exec_id}",
         summary: "Poll a test run: status, verdict, log-cursor bracket.",
     },
     // configurations (§7.12)
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/configurations",
+        path: "/components/{component_id}/configurations",
         summary: "List configurations (§7.12.2); q: include-schema.",
     },
     PathEntry {
         method: "DELETE",
-        path: "/vehicle/v1/components/{component_id}/configurations",
+        path: "/components/{component_id}/configurations",
         summary: "Reset all configurations to default — 204.",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/configurations/{configuration_id}",
+        path: "/components/{component_id}/configurations/{configuration_id}",
         summary: "Read a configuration — JSON parameters or bulk (406 on Accept mismatch).",
     },
     PathEntry {
         method: "PUT",
-        path: "/vehicle/v1/components/{component_id}/configurations/{configuration_id}",
+        path: "/components/{component_id}/configurations/{configuration_id}",
         summary: "Write a configuration as a whole — 204.",
     },
     PathEntry {
         method: "DELETE",
-        path: "/vehicle/v1/components/{component_id}/configurations/{configuration_id}",
+        path: "/components/{component_id}/configurations/{configuration_id}",
         summary: "Reset one configuration to default — 204.",
     },
     // clear-data (§7.13)
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/clear-data",
+        path: "/components/{component_id}/clear-data",
         summary: "List supported clear-data types (§7.13).",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/clear-data/status",
+        path: "/components/{component_id}/clear-data/status",
         summary: "Read clear-data status.",
     },
     PathEntry {
         method: "PUT",
-        path: "/vehicle/v1/components/{component_id}/clear-data/{action}",
+        path: "/components/{component_id}/clear-data/{action}",
         summary: "Run a clear-data action — 202.",
     },
     // cyclic-subscriptions (§7.10)
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/cyclic-subscriptions",
+        path: "/components/{component_id}/cyclic-subscriptions",
         summary: "List cyclic subscriptions.",
     },
     PathEntry {
         method: "POST",
-        path: "/vehicle/v1/components/{component_id}/cyclic-subscriptions",
+        path: "/components/{component_id}/cyclic-subscriptions",
         summary: "Create a cyclic subscription — 201 + Location.",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/cyclic-subscriptions/{subscription_id}",
+        path: "/components/{component_id}/cyclic-subscriptions/{subscription_id}",
         summary: "Read a subscription.",
     },
     PathEntry {
         method: "PUT",
-        path: "/vehicle/v1/components/{component_id}/cyclic-subscriptions/{subscription_id}",
+        path: "/components/{component_id}/cyclic-subscriptions/{subscription_id}",
         summary: "Update subscription cadence/duration.",
     },
     PathEntry {
         method: "DELETE",
-        path: "/vehicle/v1/components/{component_id}/cyclic-subscriptions/{subscription_id}",
+        path: "/components/{component_id}/cyclic-subscriptions/{subscription_id}",
         summary: "Cancel a subscription — 204.",
     },
     // C-025: no `streams/{id}` entry — SSE delivery is the
@@ -480,58 +542,70 @@ const PATHS: &[PathEntry] = &[
     // reset (§7.19)
     PathEntry {
         method: "PUT",
-        path: "/vehicle/v1/components/{component_id}/status/restart",
+        path: "/components/{component_id}/status/restart",
         summary: "Restart the entity — 202 + Location.",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/status/restart/{exec_id}",
+        path: "/components/{component_id}/status/restart/{exec_id}",
         summary: "Poll restart status.",
     },
     // modes (§7.16)
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/modes/session",
+        path: "/components/{component_id}/modes/session",
         summary: "Read session mode.",
     },
     PathEntry {
         method: "PUT",
-        path: "/vehicle/v1/components/{component_id}/modes/session",
+        path: "/components/{component_id}/modes/session",
         summary: "Change session mode.",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/modes/security",
+        path: "/components/{component_id}/modes/security",
         summary: "Read security mode.",
     },
     PathEntry {
         method: "PUT",
-        path: "/vehicle/v1/components/{component_id}/modes/security",
+        path: "/components/{component_id}/modes/security",
         summary: "Request seed / send key (UDS 0x27).",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/modes/comm-ctrl",
+        path: "/components/{component_id}/modes/comm-ctrl",
         summary: "Read communication-control mode.",
     },
     PathEntry {
         method: "PUT",
-        path: "/vehicle/v1/components/{component_id}/modes/comm-ctrl",
+        path: "/components/{component_id}/modes/comm-ctrl",
         summary: "Set communication-control mode (UDS 0x28).",
     },
     PathEntry {
         method: "GET",
-        path: "/vehicle/v1/components/{component_id}/modes/dtcsetting",
+        path: "/components/{component_id}/modes/dtcsetting",
         summary: "Read DTC-setting mode.",
     },
     PathEntry {
         method: "PUT",
-        path: "/vehicle/v1/components/{component_id}/modes/dtcsetting",
+        path: "/components/{component_id}/modes/dtcsetting",
         summary: "Set DTC-setting mode on/off (UDS 0x85).",
     },
 ];
 
-/// GET /vehicle/v1/docs — capability description (§7.5).
+/// `PATHS` entries served at the server root rather than under a base.
+const ROOT_PATHS: &[&str] = &["/health", "/version-info"];
+
+/// The absolute path of a `PATHS` template under `tree`.
+fn render_template(tree: Tree, template: &str) -> String {
+    if ROOT_PATHS.contains(&template) {
+        template.to_string()
+    } else {
+        format!("{}{template}", tree.base())
+    }
+}
+
+/// GET {base}/docs — capability description (§7.5).
 ///
 /// Curated OpenAPI 3.1.0 document built from the `PATHS` table above +
 /// a small set of reusable schemas (`GenericError`, `Fault`,
@@ -540,27 +614,45 @@ const PATHS: &[PathEntry] = &[
 /// [`not_found_fallback`] on `{entity}/docs`.  A full path-walker that
 /// introspects the axum router is a TODO — axum 0.8 doesn't expose its
 /// routing table.
-pub async fn capability_description(State(state): State<AppState>) -> Json<serde_json::Value> {
-    Json(build_capability_doc_ext(
+pub async fn capability_description(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+) -> Json<serde_json::Value> {
+    Json(build_capability_doc_for(
+        tree,
         None,
         state.capability_extensions(),
     ))
 }
 
-/// Build the OpenAPI 3.1.0 capability description (§7.5, C-063) with no
-/// embedder extensions — a thin wrapper over [`build_capability_doc_ext`].
+/// Build the `/vehicle/v1` OpenAPI 3.1.0 capability description (§7.5,
+/// C-063) with no embedder extensions — a thin wrapper over
+/// [`build_capability_doc_for`].
 pub fn build_capability_doc(scope: Option<&str>) -> serde_json::Value {
     build_capability_doc_ext(scope, &CapabilityExtensions::default())
 }
 
-/// Build the OpenAPI 3.1.0 capability description (§7.5, C-063), merging any
-/// embedder-contributed `extensions` (opaque to SOVDd — see
+/// Build the `/vehicle/v1` capability description — [`build_capability_doc_for`]
+/// with [`Tree::Legacy`].
+pub fn build_capability_doc_ext(
+    scope: Option<&str>,
+    extensions: &CapabilityExtensions,
+) -> serde_json::Value {
+    build_capability_doc_for(Tree::Legacy, scope, extensions)
+}
+
+/// Build the OpenAPI 3.1.0 capability description (§7.5, C-063) for `tree`,
+/// merging any embedder-contributed `extensions` (opaque to SOVDd — see
 /// [`CapabilityExtensions`]).
+///
+/// `servers` is `tree`'s base and every `PATHS` template is rendered under
+/// it ([`render_template`]). A contributed path under either base is rebased
+/// onto `tree`; any other contributed path is kept verbatim.
 ///
 /// `scope == None` → the global document: every entry in `PATHS`.
 ///
 /// `scope == Some(entity_path)` → the document scoped to that entity
-/// path (e.g. `/vehicle/v1/components/vtx_ecm`).  Only `PATHS` whose
+/// path under `tree` (e.g. `/v1/components/vtx_ecm`).  Only `PATHS` whose
 /// template is *at or under* that entity path are emitted, with the
 /// concrete ids substituted in for the matched prefix.  The envelope
 /// (`openapi`/`info`/`servers`/`components`) is identical in both modes.
@@ -573,15 +665,15 @@ pub fn build_capability_doc(scope: Option<&str>) -> serde_json::Value {
 /// ## Scoping algorithm
 ///
 /// Split `entity_path` into segments `E`.  For each `PathEntry`, split
-/// its template into segments `T`.  The entry is in-scope iff
+/// its rendered template into segments `T`.  The entry is in-scope iff
 /// `T.len() >= E.len()` and for every `i in 0..E.len()`, `T[i] == E[i]`
 /// **or** `T[i]` is a `{param}` placeholder.  The emitted path is the
 /// concrete `E[..]` prefix joined with the template tail `T[E.len()..]`
 /// (placeholders in the tail are preserved).  E.g. template
-/// `/vehicle/v1/components/{component_id}/data/{param_id}` scoped to
-/// `/vehicle/v1/components/vtx_ecm` emits
-/// `/vehicle/v1/components/vtx_ecm/data/{param_id}`.
-pub fn build_capability_doc_ext(
+/// `/v1/components/{component_id}/data/{param_id}` scoped to
+/// `/v1/components/vtx_ecm` emits `/v1/components/vtx_ecm/data/{param_id}`.
+pub fn build_capability_doc_for(
+    tree: Tree,
     scope: Option<&str>,
     extensions: &CapabilityExtensions,
 ) -> serde_json::Value {
@@ -593,7 +685,7 @@ pub fn build_capability_doc_ext(
 
     let mut paths = serde_json::Map::new();
     for entry in PATHS {
-        let emitted = match emit_scoped_path(entry.path, &scope_segs) {
+        let emitted = match emit_scoped_path(&render_template(tree, entry.path), &scope_segs) {
             Some(p) => p,
             None => continue, // out of scope for this entity path
         };
@@ -612,7 +704,7 @@ pub fn build_capability_doc_ext(
         });
         // Public resources (§5.4.4) override the global bearer requirement
         // with an empty security set — they need no authentication.
-        if matches!(entry.path, "/health" | "/version-info" | "/vehicle/v1/docs") {
+        if matches!(entry.path, "/health" | "/version-info" | "/docs") {
             op.as_object_mut()
                 .unwrap()
                 .insert("security".to_string(), serde_json::json!([]));
@@ -636,7 +728,11 @@ pub fn build_capability_doc_ext(
     // Merge embedder-contributed path items, scoped identically to native
     // paths. Their content is opaque here — the embedder owns its meaning.
     for (template, item) in &extensions.paths {
-        let Some(emitted) = emit_scoped_path(template, &scope_segs) else {
+        let template = match Tree::split_path(template) {
+            Some((_, rest)) => format!("{}{rest}", tree.base()),
+            None => template.clone(),
+        };
+        let Some(emitted) = emit_scoped_path(&template, &scope_segs) else {
             continue;
         };
         let slot = paths
@@ -658,7 +754,7 @@ pub fn build_capability_doc_ext(
             "x-sovd-version": "1.1",
         },
         "servers": [
-            {"url": "/vehicle/v1"},
+            {"url": tree.base()},
         ],
         "security": [{ "bearerAuth": [] }],
         "paths": paths,
@@ -811,18 +907,23 @@ fn emit_scoped_path(template: &str, scope_segs: &[&str]) -> Option<String> {
 /// conformance scanners enumerate documented deviations rather than
 /// flagging them as unknown surface.  See
 /// `tasks/spec-aligned-updates-wire.md` §4.1.
+///
+/// The route is root-level (no tree), so the paths below are written under a
+/// `{base}` placeholder, standing for each of the listed `base_uris`.
 pub async fn sovd_extensions() -> Json<serde_json::Value> {
+    let base_uris: Vec<&str> = Tree::ALL.iter().map(|tree| tree.base()).collect();
     Json(serde_json::json!({
         "vendor": "sumo",
+        "base_uris": base_uris,
         "extensions": {
             "x-ota-control": {
                 "kind":   "query-param + lifecycle verbs",
-                "where":  "PUT /vehicle/v1/components/{id}/updates/{update_id}/execute",
+                "where":  "PUT {base}/components/{id}/updates/{update_id}/execute",
                 "values": ["orchestrated"],
                 "verbs": [
-                    "PUT /vehicle/v1/components/{id}/updates/{update_id}/x-ota-commit",
-                    "PUT /vehicle/v1/components/{id}/updates/{update_id}/x-ota-rollback",
-                    "PUT /vehicle/v1/components/{id}/x-ota-force-rollback"
+                    "PUT {base}/components/{id}/updates/{update_id}/x-ota-commit",
+                    "PUT {base}/components/{id}/updates/{update_id}/x-ota-rollback",
+                    "PUT {base}/components/{id}/x-ota-force-rollback"
                 ],
                 "fields": ["x-ota-substate"],
                 "spec":   "tasks/spec-aligned-updates-wire.md sec 2.2",
@@ -836,10 +937,10 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
             "x-update": {
                 "kind":   "lifecycle verb + status member + capability flag",
                 "verbs": [
-                    "PUT /vehicle/v1/components/{id}/updates/{update_id}/x-update-commit",
-                    "PUT /vehicle/v1/components/{id}/updates/{update_id}/x-update-rollback",
-                    "POST /vehicle/v1/operations/x-update-commit/executions (served by the embedding machine manager)",
-                    "POST /vehicle/v1/operations/x-update-rollback/executions (served by the embedding machine manager)"
+                    "PUT {base}/components/{id}/updates/{update_id}/x-update-commit",
+                    "PUT {base}/components/{id}/updates/{update_id}/x-update-rollback",
+                    "POST {base}/operations/x-update-commit/executions (served by the embedding machine manager)",
+                    "POST {base}/operations/x-update-rollback/executions (served by the embedding machine manager)"
                 ],
                 "fields": ["x-update.state", "x-update.reset_kind", "capabilities.x-update.verdict"],
                 "spec":   "docs/x-update.md",
@@ -852,8 +953,9 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
             "x-ota-bulk-data": {
                 "kind":      "sub-resource",
                 "endpoints": [
-                    "PUT /vehicle/v1/components/{id}/updates/{update_id}/bulk-data/{part_id}",
-                    "GET /vehicle/v1/components/{id}/updates/{update_id}/bulk-data"
+                    "POST {base}/components/{id}/updates/{update_id}/bulk-data",
+                    "PUT {base}/components/{id}/updates/{update_id}/bulk-data/{part_id}",
+                    "GET {base}/components/{id}/updates/{update_id}/bulk-data"
                 ],
                 "spec":      "tasks/spec-aligned-updates-wire.md sec 2.3",
                 "summary": "Client streams update bytes to the server. \
@@ -865,7 +967,7 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
                 "kind":  "value token",
                 "where": "x-sovd-data-category on the templated \
                           /data/{param_id} path item in the capability \
-                          description (GET /vehicle/v1/docs)",
+                          description (GET {base}/docs)",
                 "summary": "Placeholder category meaning 'varies per DID' — \
                             the shared path template covers DIDs of \
                             different categories; read the precise \

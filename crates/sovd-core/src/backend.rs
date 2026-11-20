@@ -360,6 +360,18 @@ pub struct FlashProgress {
     pub percent: f64,
 }
 
+/// Where a verdict (commit / rollback) on this entity's updates is settled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VerdictScope {
+    /// Each update is settled on its own (`PUT .../updates/{id}/x-update-commit|rollback`).
+    #[default]
+    Update,
+    /// The entity is a member of a node transaction: its updates are settled together
+    /// by the node operation (`POST {base}/operations/x-update-commit|rollback/executions`);
+    /// per-update verdicts are refused.
+    Node,
+}
+
 /// The core trait that all diagnostic backends implement.
 ///
 /// This abstraction allows the same SOVD REST API to be served by different backends:
@@ -1026,6 +1038,12 @@ pub trait DiagnosticBackend: Send + Sync {
         "unknown"
     }
 
+    /// Where a verdict on this entity's updates is settled. The default
+    /// settles each update on its own.
+    fn verdict_scope(&self) -> VerdictScope {
+        VerdictScope::Update
+    }
+
     /// Get status of a flash transfer
     async fn get_flash_status(&self, transfer_id: &str) -> BackendResult<FlashStatus> {
         let _ = transfer_id;
@@ -1516,5 +1534,11 @@ mod held_update_tests {
         assert_eq!(json["parts"][0]["name"], "manifest");
         let back: HeldUpdate = serde_json::from_value(json).unwrap();
         assert_eq!(back, held);
+    }
+
+    #[test]
+    fn verdict_scope_defaults_to_update() {
+        assert_eq!(VerdictScope::default(), VerdictScope::Update);
+        assert_eq!(plain().verdict_scope(), VerdictScope::Update);
     }
 }

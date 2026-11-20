@@ -2,12 +2,13 @@
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
+use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 use sovd_core::{Fault, FaultFilter, FaultSeverity};
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::Tree;
 
 #[derive(Serialize)]
 pub struct FaultsResponse {
@@ -61,8 +62,10 @@ pub struct FaultFilterQuery {
     pub limit: Option<usize>,
 }
 
-impl From<&Fault> for FaultInfoResponse {
-    fn from(fault: &Fault) -> Self {
+impl FaultInfoResponse {
+    /// `href` is rebuilt under the request's tree from `fault.id`; the
+    /// backend-supplied `fault.href` never reaches the wire.
+    fn new(fault: &Fault, tree: Tree, component_id: &str) -> Self {
         Self {
             code: fault.code.clone(),
             fault_name: fault.message.clone(),
@@ -73,7 +76,7 @@ impl From<&Fault> for FaultInfoResponse {
             fault_translation_id: None,
             symptom_translation_id: None,
             status: fault.status.clone(),
-            href: fault.href.clone(),
+            href: format!("{}/faults/{}", tree.component(component_id), fault.id),
         }
     }
 }
@@ -82,6 +85,7 @@ impl From<&Fault> for FaultInfoResponse {
 /// List all faults
 pub async fn list_faults(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
     Query(query): Query<FaultFilterQuery>,
 ) -> Result<Json<FaultsResponse>, ApiError> {
@@ -106,7 +110,11 @@ pub async fn list_faults(
     let result = backend.get_faults(filter.as_ref()).await?;
     let total_count = result.faults.len();
 
-    let items: Vec<FaultInfoResponse> = result.faults.iter().map(FaultInfoResponse::from).collect();
+    let items: Vec<FaultInfoResponse> = result
+        .faults
+        .iter()
+        .map(|f| FaultInfoResponse::new(f, tree, &component_id))
+        .collect();
 
     Ok(Json(FaultsResponse { items, total_count }))
 }
@@ -115,12 +123,13 @@ pub async fn list_faults(
 /// Get detailed fault information
 pub async fn get_fault(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, fault_id)): Path<(String, String)>,
 ) -> Result<Json<FaultInfoResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
     let fault = backend.get_fault_detail(&fault_id).await?;
 
-    Ok(Json(FaultInfoResponse::from(&fault)))
+    Ok(Json(FaultInfoResponse::new(&fault, tree, &component_id)))
 }
 
 /// DELETE /vehicle/v1/components/:component_id/faults

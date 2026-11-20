@@ -188,6 +188,8 @@ pub struct UpdatePart {
     pub part_id: String,
     pub size: u64,
     pub sha256: String,
+    /// The upload's `Content-Type`; `None` when the upload sent none.
+    pub mimetype: Option<String>,
     /// Backend's file_id from `receive_package_stream`; needed by the
     /// `verify` step which calls `verify_package(file_id)` per part.
     pub file_id: String,

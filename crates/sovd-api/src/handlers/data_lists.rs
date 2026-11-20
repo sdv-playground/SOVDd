@@ -19,13 +19,14 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
+use axum::{Extension, Json};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sovd_conv::format_did;
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::Tree;
 
 #[derive(Debug, Deserialize)]
 pub struct DefineDataRequest {
@@ -97,6 +98,7 @@ fn list_id_for(ddid: u16) -> String {
 /// POST /vehicle/v1/components/:component_id/operations/define-data/executions
 pub async fn define_data(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
     Json(request): Json<DefineDataRequest>,
 ) -> Result<(StatusCode, Json<DefineDataExecution>), ApiError> {
@@ -126,10 +128,7 @@ pub async fn define_data(
     backend.define_data_identifier(ddid, &sources).await?;
 
     let list_id = list_id_for(ddid);
-    let href = format!(
-        "/vehicle/v1/components/{}/data-lists/{}",
-        component_id, list_id
-    );
+    let href = format!("{}/data-lists/{}", tree.component(&component_id), list_id);
 
     Ok((
         StatusCode::CREATED,
