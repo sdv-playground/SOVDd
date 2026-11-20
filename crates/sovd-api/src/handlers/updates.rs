@@ -1339,75 +1339,14 @@ async fn put_execute_inner(
             }
         };
 
-        match verdict {
-            crate::state::Verdict::Commit => {
-                let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
-                    entry.step = Some("committing".into());
-                    entry.substate = Some("committing");
-                });
-                if let Err(e) = backend.commit_flash().await {
-                    let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
-                        entry.status = Status::Failed;
-                        entry.step = Some("commit_flash failed".into());
-                        entry.substate = None;
-                        entry.verdict_tx = None;
-                        entry.error = Some(crate::state::UpdateError {
-                            error_code: "update-execution-failed".into(),
-                            message: format!("commit: {e}"),
-                            parameters: None,
-                        });
-                        entry.task_handle = None;
-                    });
-                    return;
-                }
-                let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
-                    entry.status = Status::Completed;
-                    entry.progress = Some(100);
-                    entry.step = Some("completed".into());
-                    entry.substate = None;
-                    entry.verdict_tx = None;
-                    entry.state = UpdateState::Committed;
-                    entry.task_handle = None;
-                });
-            }
-            crate::state::Verdict::Rollback => {
-                let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
-                    entry.step = Some("rolling back".into());
-                    entry.substate = Some("rolling-back");
-                });
-                let rb_result = backend.rollback_flash().await;
-                let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
-                    entry.status = Status::Failed;
-                    entry.substate = None;
-                    entry.verdict_tx = None;
-                    entry.error = Some(crate::state::UpdateError {
-                        error_code: "x-ota-verdict-rollback".into(),
-                        message: match rb_result {
-                            Ok(()) => "rolled back by orchestrator verdict".into(),
-                            Err(e) => format!("rollback_flash failed: {e}"),
-                        },
-                        parameters: None,
-                    });
-                    entry.state = UpdateState::RolledBack;
-                    entry.task_handle = None;
-                });
-            }
-            crate::state::Verdict::Pending => {
-                // Should never happen — changed() only returns when
-                // the value transitions away from the initial state.
-                let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
-                    entry.status = Status::Failed;
-                    entry.substate = None;
-                    entry.verdict_tx = None;
-                    entry.error = Some(crate::state::UpdateError {
-                        error_code: "internal-server-error".into(),
-                        message: "verdict channel woke without transition".into(),
-                        parameters: None,
-                    });
-                    entry.task_handle = None;
-                });
-            }
-        }
+        apply_verdict(
+            &task_state,
+            &task_key,
+            registration_token,
+            backend.as_ref(),
+            verdict,
+        )
+        .await;
     });
 
     {
@@ -1784,6 +1723,100 @@ pub async fn put_x_ota_force_rollback(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Carry out a claimed verdict on the backend and record its outcome on the
+/// entry: the orchestrated execute task once its verdict arrives, and a
+/// standard-mode execute's verdict (`claim_verdict`), which has no task waiting.
+async fn apply_verdict(
+    task_state: &AppState,
+    task_key: &UpdateKey,
+    registration_token: Uuid,
+    backend: &dyn sovd_core::DiagnosticBackend,
+    verdict: crate::state::Verdict,
+) {
+    match verdict {
+        crate::state::Verdict::Commit => {
+            let _ = mutate_entry(task_state, task_key, registration_token, |entry| {
+                entry.step = Some("committing".into());
+                entry.substate = Some("committing");
+            });
+            if let Err(e) = backend.commit_flash().await {
+                let _ = mutate_entry(task_state, task_key, registration_token, |entry| {
+                    entry.status = Status::Failed;
+                    entry.step = Some("commit_flash failed".into());
+                    entry.substate = None;
+                    entry.verdict_tx = None;
+                    entry.error = Some(crate::state::UpdateError {
+                        error_code: "update-execution-failed".into(),
+                        message: format!("commit: {e}"),
+                        parameters: None,
+                    });
+                    entry.task_handle = None;
+                });
+                return;
+            }
+            let _ = mutate_entry(task_state, task_key, registration_token, |entry| {
+                entry.status = Status::Completed;
+                entry.progress = Some(100);
+                entry.step = Some("completed".into());
+                entry.substate = None;
+                entry.verdict_tx = None;
+                entry.state = UpdateState::Committed;
+                entry.task_handle = None;
+            });
+        }
+        crate::state::Verdict::Rollback => {
+            let _ = mutate_entry(task_state, task_key, registration_token, |entry| {
+                entry.step = Some("rolling back".into());
+                entry.substate = Some("rolling-back");
+            });
+            let rb_result = backend.rollback_flash().await;
+            let _ = mutate_entry(task_state, task_key, registration_token, |entry| {
+                entry.status = Status::Failed;
+                entry.substate = None;
+                entry.verdict_tx = None;
+                entry.error = Some(crate::state::UpdateError {
+                    error_code: "x-ota-verdict-rollback".into(),
+                    message: match rb_result {
+                        Ok(()) => "rolled back by orchestrator verdict".into(),
+                        Err(e) => format!("rollback_flash failed: {e}"),
+                    },
+                    parameters: None,
+                });
+                entry.state = UpdateState::RolledBack;
+                entry.task_handle = None;
+            });
+        }
+        crate::state::Verdict::Pending => {
+            // Should never happen — changed() only returns when
+            // the value transitions away from the initial state.
+            let _ = mutate_entry(task_state, task_key, registration_token, |entry| {
+                entry.status = Status::Failed;
+                entry.substate = None;
+                entry.verdict_tx = None;
+                entry.error = Some(crate::state::UpdateError {
+                    error_code: "internal-server-error".into(),
+                    message: "verdict channel woke without transition".into(),
+                    parameters: None,
+                });
+                entry.task_handle = None;
+            });
+        }
+    }
+}
+
+/// Whether an entry was executed in standard mode and is staged for its reset:
+/// execute completed with nothing left running and no verdict channel. Its
+/// verdict is carried out by `claim_verdict` itself (x-update: accepted in
+/// EXECUTING and EXECUTED whichever mode execute ran in).
+fn staged_for_verdict(entry: &UpdatesEntry) -> bool {
+    entry.phase == Phase::Execute
+        && entry.status == Status::Completed
+        && entry.state == UpdateState::Finalized
+        && entry.substate.is_none()
+        && entry.verdict_tx.is_none()
+        && entry.task_handle.is_none()
+}
+
 /// Validate without claiming so commit can query activation state while
 /// preserving 404 / lifecycle-error precedence and leaving query failures
 /// retryable.
@@ -1797,6 +1830,9 @@ fn validate_verdict(
     let entry = store
         .get(&UpdateKey::new(component_id, update_id))
         .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+    if staged_for_verdict(entry) {
+        return Ok(entry.registration_token);
+    }
     if entry.substate != Some("awaiting-verdict") {
         return Err(ApiError::Conflict(format!(
             "x-ota verdict requires execute/awaiting-verdict, got {}/{} substate={:?}",
@@ -1831,6 +1867,30 @@ fn claim_verdict(
         return Err(ApiError::Conflict(format!(
             "update {update_id} was replaced while validating the verdict"
         )));
+    }
+    if staged_for_verdict(entry) {
+        // Standard mode: no execute task waits for this verdict. Claim it by
+        // moving the entry on (a second verdict is then refused), then carry
+        // it out on a task of its own.
+        let commit = verdict == crate::state::Verdict::Commit;
+        entry.status = Status::InProgress;
+        entry.substate = Some(if commit { "committing" } else { "rolling-back" });
+        entry.step = Some(if commit { "committing" } else { "rolling back" }.into());
+        let backend = state.get_backend(component_id)?.clone();
+        let task_state = state.clone();
+        let key = UpdateKey::new(component_id, update_id);
+        let handle = tokio::spawn(async move {
+            apply_verdict(
+                &task_state,
+                &key,
+                registration_token,
+                backend.as_ref(),
+                verdict,
+            )
+            .await;
+        });
+        entry.task_handle = Some(handle.abort_handle());
+        return Ok(());
     }
     if entry.substate != Some("awaiting-verdict") {
         return Err(ApiError::Conflict(format!(
