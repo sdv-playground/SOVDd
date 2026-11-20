@@ -1560,6 +1560,7 @@ async fn x_update_commit(
     update_id: &str,
 ) -> Result<(StatusCode, HeaderMap), ApiError> {
     refuse_node_verdict(state, tree, component_id, Some(update_id))?;
+    adopt_held_for_verdict(state, component_id, update_id).await?;
     if settled_as(state, component_id, update_id, XUpdateState::Committed).await? {
         return accepted_with_status_location(tree, at, component_id, update_id);
     }
@@ -1594,6 +1595,7 @@ async fn x_update_rollback(
     update_id: &str,
 ) -> Result<(StatusCode, HeaderMap), ApiError> {
     refuse_node_verdict(state, tree, component_id, Some(update_id))?;
+    adopt_held_for_verdict(state, component_id, update_id).await?;
     if settled_as(state, component_id, update_id, XUpdateState::RolledBack).await? {
         return accepted_with_status_location(tree, at, component_id, update_id);
     }
@@ -1802,6 +1804,61 @@ async fn apply_verdict(
             });
         }
     }
+}
+
+/// Adopt an update only the executor holds, for a verdict on it: after a
+/// server restart (a node power cycle is a component's reset too) the
+/// executor still holds the update it staged, EXECUTING until the restart is
+/// seen and EXECUTED while its trial runs, but this server's registration is
+/// gone. A verdict on such an update registers it again as executed in
+/// standard mode and staged for its reset, so the verdict then settles it as
+/// it would have before the restart. An update registered here, held in
+/// another state, or not held at all is left as it is (a verdict on it
+/// answers what it did before). See docs/x-update.md.
+async fn adopt_held_for_verdict(
+    state: &AppState,
+    component_id: &str,
+    update_id: &str,
+) -> Result<(), ApiError> {
+    let key = UpdateKey::new(component_id, update_id);
+    if state.updates.0.lock().contains_key(&key) {
+        return Ok(());
+    }
+    let backend = state.get_backend(component_id)?;
+    let held = match held_update(backend, update_id).await {
+        Ok(held) => held,
+        Err(ApiError::NotFound(_)) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if !matches!(held.state, HeldState::Executing | HeldState::Executed) {
+        return Ok(());
+    }
+    let reset_kind = backend
+        .get_activation_state()
+        .await
+        .ok()
+        .map(|a| a.reset_kind);
+    let mut store = state.updates.0.lock();
+    store.entry(key).or_insert_with(|| {
+        tracing::info!(
+            component = %component_id,
+            update_id = %update_id,
+            bank = %held.bank,
+            "adopting the update the executor holds, for a verdict"
+        );
+        UpdatesEntry {
+            component_id: component_id.to_string(),
+            registration_token: Uuid::new_v4(),
+            state: UpdateState::Finalized,
+            phase: Phase::Execute,
+            status: Status::Completed,
+            progress: Some(100),
+            step: Some("adopted from the executor after a restart".into()),
+            reset_kind,
+            ..UpdatesEntry::default()
+        }
+    });
+    Ok(())
 }
 
 /// Whether an entry was executed in standard mode and is staged for its reset:
