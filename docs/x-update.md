@@ -170,7 +170,10 @@ Keeping a transaction atomic is the backend's part (in sumo, the machine manager
 
 ### Per node (operations)
 
-`POST /vehicle/v1/operations/x-update-commit/executions` and `…/x-update-rollback/executions`,
+`POST /vehicle/v1/operations/x-update-commit/executions` and `…/x-update-rollback/executions`
+(on a server configured as one node, the node's own: `POST {base}/components/{node}/operations/…`;
+the embedding machine manager mounts them there and not at the root, and the `/v1` 409 above names
+that path),
 body `{"nonce"?: string}`, commit or roll back every component in the node's open transaction,
 all or nothing. The answer is an ISO §7.14 OperationExecution:
 
@@ -227,7 +230,7 @@ An executor still busy answers the next `prepare` or `execute` with 409, as the 
 | PUT | `{entity}/updates/{id}/execute` | §7.18.6 | PREPARED | EXECUTING → EXECUTED, EXECUTING → ROLLING_BACK → ROLLED_BACK |
 | PUT | `{entity}/updates/{id}/x-update-commit` | Commit the trial (`verdict_scope` `update`) | EXECUTED | COMMITTING → COMMITTED |
 | PUT | `{entity}/updates/{id}/x-update-rollback` | Roll back the trial (`verdict_scope` `update`) | EXECUTING, EXECUTED | ROLLING_BACK → ROLLED_BACK |
-| POST | `/operations/x-update-commit/executions`, `…/x-update-rollback/executions` | Settle a node transaction (`verdict_scope` `node`) | EXECUTED (every member) | COMMITTED, ROLLED_BACK |
+| POST | `/operations/x-update-commit/executions`, `…/x-update-rollback/executions` (on a server configured as one node: `/components/{node}/operations/…`) | Settle a node transaction (`verdict_scope` `node`) | EXECUTED (every member) | COMMITTED, ROLLED_BACK |
 | GET | `{entity}` | Component body with `capabilities.x-update.verdict` | — | — |
 
 | State | Transient / Settled | What the client may do |

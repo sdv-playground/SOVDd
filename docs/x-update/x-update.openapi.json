@@ -668,7 +668,7 @@
     "/operations/x-update-commit/executions": {
       "post": {
         "summary": "Node commit: every component in the node's open transaction, all or nothing",
-        "description": "Settles every component in the node's open transaction, all or nothing: the verdict for updates whose `verdict_scope` is `node`. Served by the embedding machine manager, not by SOVDd.",
+        "description": "Settles every component in the node's open transaction, all or nothing: the verdict for updates whose `verdict_scope` is `node`. Served by the embedding machine manager, not by SOVDd. On a server configured as one node they are the node's own, `/components/{node}/operations/x-update-commit/executions`: the embedding machine manager mounts them there and not at the root, and the `/v1` 409 of a per-update verdict on a member names that path.",
         "requestBody": {
           "required": false,
           "content": {
@@ -721,7 +721,7 @@
     "/operations/x-update-rollback/executions": {
       "post": {
         "summary": "Node rollback: every component in the node's open transaction, all or nothing",
-        "description": "Settles every component in the node's open transaction, all or nothing: the verdict for updates whose `verdict_scope` is `node`. Served by the embedding machine manager, not by SOVDd.",
+        "description": "Settles every component in the node's open transaction, all or nothing: the verdict for updates whose `verdict_scope` is `node`. Served by the embedding machine manager, not by SOVDd. On a server configured as one node they are the node's own, `/components/{node}/operations/x-update-rollback/executions`: the embedding machine manager mounts them there and not at the root, and the `/v1` 409 of a per-update verdict on a member names that path.",
         "requestBody": {
           "required": false,
           "content": {
