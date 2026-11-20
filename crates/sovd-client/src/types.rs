@@ -994,10 +994,10 @@ pub struct FinalizeDownloadResponse {
     pub crc32: Option<String>,
 }
 
-/// Response from ECU reset — ISO 17978-3 §7.19 execution shape.
+/// Response from ECU reset on the legacy `/vehicle/v1` tree — a vendor
+/// legacy body, not an ISO 17978-3 shape (`/v1` answers 202 with no body).
 ///
-/// Server returns 202 + `Location` header to a status sub-resource;
-/// this body lives at that sub-resource too.
+/// Server returns 202 + `Location` header to a status sub-resource.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EcuResetResponse {
     /// Execution status as reported by the backend: `completed` when the

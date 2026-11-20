@@ -10,14 +10,25 @@ use sovd_core::routing;
 use sovd_core::{
     ActivationState, BackendError, BackendResult, BulkConfiguration, Capabilities,
     ClearFaultsResult, ConfigurationMetaData, ConfigurationValue, ConfigurationWrite, DataCategory,
-    DataValue, DiagnosticBackend, EntityInfo, Fault, FaultFilter, FaultsResult, FlashStatus,
-    IoControlAction, IoControlResult, LogEntry, LogFilter, OperationExecution, OperationInfo,
-    OutputDetail, OutputInfo, PackageInfo, PackageStream, ParameterInfo, SecurityMode,
-    SecurityState, SessionMode, VerifyResult,
+    DataValue, DiagnosticBackend, EcuResetOutcome, EntityInfo, Fault, FaultFilter, FaultsResult,
+    FlashStatus, IoControlAction, IoControlResult, LogEntry, LogFilter, OperationExecution,
+    OperationInfo, OutputDetail, OutputInfo, PackageInfo, PackageStream, ParameterInfo,
+    SecurityMode, SecurityState, SessionMode, VerifyResult,
 };
 
 /// Convert client-side capabilities to core Capabilities.
 /// The upstream is authoritative — no local overrides.
+/// Map an upstream restart body's `status` to an [`EcuResetOutcome`]:
+/// `running` means the reset was triggered and is still in progress;
+/// anything else (`completed`, or no status) means it has taken effect.
+fn reset_outcome(status: &str, power_down_time: Option<u8>) -> EcuResetOutcome {
+    if status == "running" {
+        EcuResetOutcome::Initiated { power_down_time }
+    } else {
+        EcuResetOutcome::Completed { power_down_time }
+    }
+}
+
 fn to_capabilities(rc: sovd_client::ComponentCapabilities) -> Capabilities {
     Capabilities {
         read_data: rc.read_data,
@@ -552,6 +563,15 @@ impl DiagnosticBackend for SovdProxyBackend {
     }
 
     async fn ecu_reset(&self, reset_type: u8) -> BackendResult<Option<u8>> {
+        match self.ecu_reset_outcome(reset_type).await? {
+            EcuResetOutcome::Completed { power_down_time }
+            | EcuResetOutcome::Initiated { power_down_time } => Ok(power_down_time),
+        }
+    }
+
+    /// Forwards the upstream's reported outcome: its legacy body's
+    /// `status == "running"` means the reset is still in progress.
+    async fn ecu_reset_outcome(&self, reset_type: u8) -> BackendResult<EcuResetOutcome> {
         let type_str = match reset_type {
             0x01 => "hard",
             0x02 => "key_off_on",
@@ -581,13 +601,15 @@ impl DiagnosticBackend for SovdProxyBackend {
 
             #[derive(Deserialize)]
             struct ResetResp {
+                #[serde(default)]
+                status: String,
                 power_down_time: Option<u8>,
             }
             let resp: ResetResp = response.json().await.map_err(|e| {
                 BackendError::Protocol(format!("Failed to parse reset response: {}", e))
             })?;
 
-            Ok(resp.power_down_time)
+            Ok(reset_outcome(&resp.status, resp.power_down_time))
         } else {
             let resp = self
                 .client
@@ -595,7 +617,7 @@ impl DiagnosticBackend for SovdProxyBackend {
                 .await
                 .map_err(Self::map_err)?;
 
-            Ok(resp.power_down_time)
+            Ok(reset_outcome(&resp.status, resp.power_down_time))
         }
     }
 

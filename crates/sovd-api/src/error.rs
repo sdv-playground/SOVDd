@@ -73,7 +73,7 @@ pub enum ApiError {
     /// 503 Service Unavailable — rate-limited or backpressured.
     /// Spec §5.8 503 may include a `Retry-After` header.
     Throttled(String),
-    /// 501 Not Implemented — `sovd-server-misconfigured`.
+    /// 501 Not Implemented — `vendor-specific` error_code with vendor `not-supported`.
     NotImplemented(String),
     /// 503 Service Unavailable — upstream protocol problem
     /// (`not-responding`, no parseable answer from the ECU).
@@ -163,9 +163,11 @@ impl IntoResponse for ApiError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 GenericError::vendor("rate-limited", msg),
             ),
+            // Not `sovd-server-misconfigured`: Table 18 makes that fatal to
+            // clients, while an unsupported feature is not.
             ApiError::NotImplemented(msg) => (
                 StatusCode::NOT_IMPLEMENTED,
-                GenericError::new(error_code::SOVD_SERVER_MISCONFIGURED, msg),
+                GenericError::vendor("not-supported", msg),
             ),
             ApiError::ServiceUnavailable(msg) => (
                 StatusCode::SERVICE_UNAVAILABLE,

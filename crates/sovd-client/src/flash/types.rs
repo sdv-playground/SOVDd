@@ -332,7 +332,7 @@ fn default_reset_type() -> String {
     "hard".to_string()
 }
 
-/// ECU reset response — ISO 17978-3 §7.19 execution shape.
+/// ECU reset response — the legacy tree's vendor body, not an ISO 17978-3 shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResetResponse {
     /// Execution status as reported by the backend: `completed` when the

@@ -481,6 +481,15 @@ pub trait DiagnosticBackend: Send + Sync {
         })
     }
 
+    /// Whether this entity's own `status/restart` controls its restart —
+    /// ISO 17978-3 §7.19.2 Table 280 C2: the `restart` link is only present if
+    /// controlling the restart of the entity is supported. Entities that are
+    /// only restarted along with their node (via the node-level
+    /// `status/restart`) return `false`. Defaults to `true`.
+    fn supports_restart(&self) -> bool {
+        true
+    }
+
     /// Read the entity's runtime status — ISO 17978-3 §7.19.2 (`GET .../status`).
     /// Backends that can report readiness (and optionally vendor `x-<vendor>-*`
     /// runtime fields like a monotonic boot/restart counter) override this; the

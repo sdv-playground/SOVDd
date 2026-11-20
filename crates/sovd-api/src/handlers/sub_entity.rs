@@ -35,7 +35,7 @@ use super::modes::{
 };
 use super::operations::{OperationInfoResponse, OperationsResponse};
 use axum::response::IntoResponse;
-use sovd_core::{EcuResetOutcome, FaultFilter, FaultSeverity, OperationStatus, SecurityState};
+use sovd_core::{FaultFilter, FaultSeverity, OperationStatus, SecurityState};
 
 /// Resolve a sub-entity backend from a `(component_id, app_id)` path.
 ///
@@ -66,20 +66,17 @@ pub(super) async fn resolve(
 }
 
 // =========================================================================
-// ECU Reset — ISO 17978-3 §7.19 PUT status/restart
+// ECU Reset — PUT status/restart (see `reset` for the per-tree response)
 // =========================================================================
 
-/// PUT .../apps/:app_id/status/restart — sub-entity reset (spec §7.19).
+/// PUT .../apps/:app_id/status/restart — sub-entity reset; same per-tree
+/// response as the component route ([`super::reset`]).
 pub async fn status_restart(
     State(state): State<AppState>,
     Extension(tree): Extension<Tree>,
     Path((component_id, app_id)): Path<(String, String)>,
     Json(request): Json<super::reset::EcuResetRequest>,
 ) -> Result<axum::response::Response, ApiError> {
-    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
-    use axum::response::IntoResponse;
-    use uuid::Uuid;
-
     let backend = resolve(&state, &component_id, &app_id).await?;
 
     let reset_type_str = request.reset_type.to_lowercase();
@@ -110,50 +107,33 @@ pub async fn status_restart(
         }
     };
 
-    let (status, power_down_time) = match backend.ecu_reset_outcome(reset_type_byte).await? {
-        EcuResetOutcome::Completed { power_down_time } => {
-            (OperationStatus::Completed, power_down_time)
-        }
-        EcuResetOutcome::Initiated { power_down_time } => {
-            (OperationStatus::Running, power_down_time)
-        }
-    };
-
-    let exec_id = Uuid::new_v4().to_string();
-    let href = format!(
-        "{}/status/restart/{}",
-        tree.app(&component_id, &app_id),
-        exec_id
-    );
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::LOCATION,
-        HeaderValue::from_str(&href)
-            .map_err(|e| ApiError::Internal(format!("bad Location header: {e}")))?,
-    );
-
-    let message = match reset_type_name {
-        "hard" => "hard reset initiated".to_string(),
-        "soft" => "soft reset initiated".to_string(),
-        "key_off_on" => "key_off_on reset initiated".to_string(),
-        _ => format!("Reset type 0x{:02X} initiated", reset_type_byte),
-    };
-
     tracing::info!(app_id = %app_id, reset_type = %reset_type_name, "Sub-entity ECU reset");
 
-    let body = super::reset::EcuResetExecution {
-        status,
-        exec_id,
-        reset_type: reset_type_name.to_string(),
-        message,
-        power_down_time,
-        href,
-    };
-
-    Ok((StatusCode::ACCEPTED, headers, Json(body)).into_response())
+    super::reset::restart_entity(
+        backend.as_ref(),
+        tree,
+        &tree.app(&component_id, &app_id),
+        reset_type_byte,
+        reset_type_name,
+    )
+    .await
 }
 
-/// GET .../apps/:app_id/status/restart/:exec_id — stub status.
+/// GET .../apps/:app_id/status — the app's runtime status (§7.19.2), `/v1`
+/// only; the `Location` target of a `/v1` app restart.
+pub async fn status_read(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    Path((component_id, app_id)): Path<(String, String)>,
+) -> Result<Json<sovd_core::EntityStatusBody>, ApiError> {
+    let backend = resolve(&state, &component_id, &app_id).await?;
+    super::reset::entity_status(backend.as_ref(), &tree.app(&component_id, &app_id))
+        .await
+        .map(Json)
+}
+
+/// GET .../apps/:app_id/status/restart/:exec_id — legacy tree only; stub
+/// status, see [`super::reset::status_restart_execution`].
 pub async fn status_restart_execution(
     Path((_component_id, _app_id, exec_id)): Path<(String, String, String)>,
 ) -> Json<super::reset::EcuResetExecutionStatus> {

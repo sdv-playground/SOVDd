@@ -153,6 +153,9 @@ pub async fn method_not_allowed_fallback(
     (StatusCode::METHOD_NOT_ALLOWED, axum::Json(err))
 }
 
+/// The legacy-only restart execution stub (see `restart_status_routes`).
+const LEGACY_RESTART_EXECUTION: &str = "/components/{component_id}/status/restart/{exec_id}";
+
 /// One row of the path inventory consumed by [`capability_description`].
 struct PathEntry {
     /// HTTP method (uppercase).
@@ -547,7 +550,7 @@ const PATHS: &[PathEntry] = &[
     },
     PathEntry {
         method: "GET",
-        path: "/components/{component_id}/status/restart/{exec_id}",
+        path: LEGACY_RESTART_EXECUTION,
         summary: "Poll restart status.",
     },
     // modes (§7.16)
@@ -685,6 +688,10 @@ pub fn build_capability_doc_for(
 
     let mut paths = serde_json::Map::new();
     for entry in PATHS {
+        // The restart execution stub is mounted on the legacy tree only.
+        if tree == Tree::V1 && entry.path == LEGACY_RESTART_EXECUTION {
+            continue;
+        }
         let emitted = match emit_scoped_path(&render_template(tree, entry.path), &scope_segs) {
             Some(p) => p,
             None => continue, // out of scope for this entity path

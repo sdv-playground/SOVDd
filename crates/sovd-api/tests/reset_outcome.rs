@@ -1,14 +1,16 @@
-//! ISO 17978-3 §7.19 `PUT {entity}/status/restart` — in-process router tests.
+//! `PUT {entity}/status/restart` and `GET {entity}/status` — in-process
+//! router tests, per tree.
 //!
-//! The 202 body's `status` reflects what the backend reported through
-//! `DiagnosticBackend::ecu_reset_outcome`:
-//!   * a backend that only implements `ecu_reset` gets the trait default
-//!     (`Completed`) → `completed`, as before;
-//!   * a backend reporting `Initiated` → `running`, with its
-//!     `power_down_time` forwarded;
-//!   * a backend without reset support → 501.
+//! `/v1` (ISO 17978-3 §7.19.4): 202 with no body and
+//! `Location: {entity}/status`; an entity whose backend does not control its
+//! own restart (`supports_restart() == false`) gets 405
+//! `precondition-not-fulfilled`, and its `GET status` carries no `restart`
+//! link (Table 280 C2).
 //!
-//! The app-level route (`.../apps/{app_id}/status/restart`) maps the same way.
+//! Legacy (`/vehicle/v1`, frozen): 202 with the vendor legacy body; its
+//! `status` reflects `DiagnosticBackend::ecu_reset_outcome` (`completed`, or
+//! `running` for an `Initiated` reset).  A backend without reset support →
+//! 501 with the non-fatal vendor code `not-supported`.
 //!
 //! Same in-process `TestServer` pattern as `configurations.rs`.
 
@@ -38,12 +40,23 @@ fn entity_info(id: &str) -> EntityInfo {
     }
 }
 
-/// Implements only `ecu_reset`; with `supports_reset: false` it refuses with
-/// `NotSupported`, as the trait default does.
+/// How a [`LegacyBackend`] answers a restart.
+#[derive(Clone, Copy)]
+enum Reset {
+    /// `ecu_reset` succeeds with power-down time 2.
+    Supported,
+    /// `ecu_reset` refuses with `NotSupported`, as the trait default does.
+    NotSupported,
+    /// Restarted only with its node: `supports_restart() == false`, and
+    /// `ecu_reset` keeps refusing.
+    NodeOnly,
+}
+
+/// Never overrides `ecu_reset_outcome`, so the trait default applies.
 struct LegacyBackend {
     info: EntityInfo,
     capabilities: Capabilities,
-    supports_reset: bool,
+    reset: Reset,
 }
 
 #[async_trait::async_trait]
@@ -74,15 +87,21 @@ impl DiagnosticBackend for LegacyBackend {
     }
 
     async fn ecu_reset(&self, _reset_type: u8) -> BackendResult<Option<u8>> {
-        if self.supports_reset {
-            Ok(Some(2))
-        } else {
-            Err(BackendError::NotSupported("ecu_reset".to_string()))
+        match self.reset {
+            Reset::Supported => Ok(Some(2)),
+            Reset::NotSupported | Reset::NodeOnly => {
+                Err(BackendError::NotSupported("ecu_reset".to_string()))
+            }
         }
+    }
+
+    fn supports_restart(&self) -> bool {
+        !matches!(self.reset, Reset::NodeOnly)
     }
 }
 
 /// Opts in: reports that its reset was only triggered (e.g. a VM relaunch).
+/// Has one app, `vm`, that behaves the same.
 struct RelaunchBackend {
     info: EntityInfo,
     capabilities: Capabilities,
@@ -136,15 +155,22 @@ impl DiagnosticBackend for RelaunchBackend {
 // Helpers
 // ---------------------------------------------------------------------------
 
+const V1: &str = "/v1";
+const LEGACY: &str = "/vehicle/v1";
+
 async fn server() -> TestServer {
     let mut backends: HashMap<String, Arc<dyn DiagnosticBackend>> = HashMap::new();
-    for (id, supports_reset) in [("legacy", true), ("noreset", false)] {
+    for (id, reset) in [
+        ("legacy", Reset::Supported),
+        ("noreset", Reset::NotSupported),
+        ("member", Reset::NodeOnly),
+    ] {
         backends.insert(
             id.to_string(),
             Arc::new(LegacyBackend {
                 info: entity_info(id),
                 capabilities: Capabilities::default(),
-                supports_reset,
+                reset,
             }),
         );
     }
@@ -161,10 +187,10 @@ async fn server() -> TestServer {
 }
 
 /// `entity` is a component id, optionally followed by `/apps/{app_id}`.
-async fn restart(server: &TestServer, entity: &str) -> reqwest::Response {
+async fn restart(server: &TestServer, base: &str, entity: &str) -> reqwest::Response {
     reqwest::Client::new()
         .put(format!(
-            "{}/vehicle/v1/components/{entity}/status/restart",
+            "{}{base}/components/{entity}/status/restart",
             server.base_url()
         ))
         .json(&serde_json::json!({ "reset_type": "hard" }))
@@ -173,46 +199,149 @@ async fn restart(server: &TestServer, entity: &str) -> reqwest::Response {
         .expect("put")
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+async fn get(server: &TestServer, path: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .get(format!("{}{path}", server.base_url()))
+        .send()
+        .await
+        .expect("get")
+}
 
-#[tokio::test]
-async fn ecu_reset_only_backend_reports_completed() {
-    let server = server().await;
-    let resp = restart(&server, "legacy").await;
-
-    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
-    let location = resp
-        .headers()
+fn location(resp: &reqwest::Response) -> String {
+    resp.headers()
         .get(reqwest::header::LOCATION)
         .expect("Location header")
         .to_str()
         .expect("ascii")
-        .to_string();
+        .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// /v1 — ISO 17978-3 §7.19.4
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn v1_restart_is_202_without_body_pointing_at_status() {
+    let server = server().await;
+    // Whatever the backend's outcome, the `/v1` response is the same.
+    for entity in ["legacy", "relaunch"] {
+        let resp = restart(&server, V1, entity).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED, "{entity}");
+        assert_eq!(location(&resp), format!("/v1/components/{entity}/status"));
+        assert!(resp.bytes().await.expect("body").is_empty(), "{entity}");
+    }
+}
+
+#[tokio::test]
+async fn v1_app_restart_points_at_the_app_status() {
+    let server = server().await;
+    let resp = restart(&server, V1, "relaunch/apps/vm").await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let status_path = location(&resp);
+    assert_eq!(status_path, "/v1/components/relaunch/apps/vm/status");
+    assert!(resp.bytes().await.expect("body").is_empty());
+
+    // The Location resolves to the app's runtime status.
+    let resp = get(&server, &status_path).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["status"], "ready");
+    assert_eq!(
+        body["restart"][0],
+        "/v1/components/relaunch/apps/vm/status/restart"
+    );
+}
+
+#[tokio::test]
+async fn v1_has_no_restart_execution_stub() {
+    let server = server().await;
+    let resp = get(&server, "/v1/components/legacy/status/restart/some-id").await;
+    assert!(resp.status().is_client_error(), "got {}", resp.status());
+    let resp = get(
+        &server,
+        "/v1/components/relaunch/apps/vm/status/restart/some-id",
+    )
+    .await;
+    assert!(resp.status().is_client_error(), "got {}", resp.status());
+}
+
+#[tokio::test]
+async fn v1_node_only_entity_is_405_precondition_not_fulfilled() {
+    let server = server().await;
+    let resp = restart(&server, V1, "member").await;
+    assert_eq!(resp.status(), reqwest::StatusCode::METHOD_NOT_ALLOWED);
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(body["error_code"], "precondition-not-fulfilled");
+    assert_eq!(
+        body["message"],
+        "this entity is restarted by the node-level status/restart"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GET status — Table 280 C2 `restart` link, both trees
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn restart_link_only_when_the_entity_controls_its_restart() {
+    let server = server().await;
+    for base in [V1, LEGACY] {
+        let body: serde_json::Value = get(&server, &format!("{base}/components/legacy/status"))
+            .await
+            .json()
+            .await
+            .expect("json");
+        assert_eq!(
+            body["restart"][0],
+            format!("{base}/components/legacy/status/restart")
+        );
+
+        let resp = get(&server, &format!("{base}/components/member/status")).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::OK, "{base}");
+        let body: serde_json::Value = resp.json().await.expect("json");
+        assert_eq!(body["status"], "ready");
+        assert!(body.get("restart").is_none(), "{base}: {body}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy tree — frozen vendor body
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn legacy_ecu_reset_only_backend_reports_completed() {
+    let server = server().await;
+    let resp = restart(&server, LEGACY, "legacy").await;
+
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let location = location(&resp);
+    assert!(location.starts_with("/vehicle/v1/components/legacy/status/restart/"));
     let body: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(body["status"], "completed");
     assert_eq!(body["reset_type"], "hard");
     assert_eq!(body["power_down_time"], 2);
     assert_eq!(body["href"], location);
+
+    // The execution stub stays on the legacy tree.
+    let resp = get(&server, &location).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
 }
 
 #[tokio::test]
-async fn initiated_outcome_reports_running() {
+async fn legacy_initiated_outcome_reports_running() {
     let server = server().await;
-    let resp = restart(&server, "relaunch").await;
+    let resp = restart(&server, LEGACY, "relaunch").await;
 
     assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
-    assert!(resp.headers().contains_key(reqwest::header::LOCATION));
     let body: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(body["status"], "running");
     assert_eq!(body["power_down_time"], 5);
 }
 
 #[tokio::test]
-async fn app_route_initiated_outcome_reports_running() {
+async fn legacy_app_route_initiated_outcome_reports_running() {
     let server = server().await;
-    let resp = restart(&server, "relaunch/apps/vm").await;
+    let resp = restart(&server, LEGACY, "relaunch/apps/vm").await;
 
     assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
     let body: serde_json::Value = resp.json().await.expect("json");
@@ -221,12 +350,22 @@ async fn app_route_initiated_outcome_reports_running() {
     assert!(body["href"]
         .as_str()
         .expect("href")
-        .contains("/apps/vm/status/restart/"));
+        .starts_with("/vehicle/v1/components/relaunch/apps/vm/status/restart/"));
 }
 
 #[tokio::test]
-async fn unsupported_reset_is_501() {
+async fn legacy_unsupported_reset_is_501_not_fatal() {
     let server = server().await;
-    let resp = restart(&server, "noreset").await;
-    assert_eq!(resp.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+    // Includes the node-only entity: the legacy tree keeps calling the backend.
+    for entity in ["noreset", "member"] {
+        let resp = restart(&server, LEGACY, entity).await;
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::NOT_IMPLEMENTED,
+            "{entity}"
+        );
+        let body: serde_json::Value = resp.json().await.expect("json");
+        assert_eq!(body["error_code"], "vendor-specific", "{entity}: {body}");
+        assert_eq!(body["vendor_code"], "not-supported", "{entity}: {body}");
+    }
 }

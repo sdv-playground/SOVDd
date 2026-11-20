@@ -27,6 +27,17 @@ fn as_v1(body: &[u8]) -> String {
         .replace("/vehicle/v1", "/v1")
 }
 
+/// A legacy capability doc mapped onto `/v1`, minus the paths only the legacy
+/// tree mounts (the untracked `status/restart/{exec_id}` stub).
+fn legacy_docs_as_v1(body: &[u8]) -> serde_json::Value {
+    let mut doc: serde_json::Value = serde_json::from_str(&as_v1(body)).expect("JSON doc");
+    doc["paths"]
+        .as_object_mut()
+        .expect("paths")
+        .retain(|path, _| !path.ends_with("/status/restart/{exec_id}"));
+    doc
+}
+
 // ---------------------------------------------------------------------------
 // a. version-info
 // ---------------------------------------------------------------------------
@@ -101,10 +112,7 @@ async fn docs_are_public_under_both_bases() {
         assert_eq!(json(&body)["openapi"], "3.1.0");
         globals.push(body);
     }
-    assert_eq!(
-        String::from_utf8(globals[0].clone()).unwrap(),
-        as_v1(&globals[1])
-    );
+    assert_eq!(json(&globals[0]), legacy_docs_as_v1(&globals[1]));
 
     // Entity-scoped docs (router fallback) — public, and scoped the same way
     // under both bases.
@@ -119,7 +127,10 @@ async fn docs_are_public_under_both_bases() {
         );
         scoped.push(body.to_string());
     }
-    assert_eq!(scoped[0], scoped[1].replace("/vehicle/v1", "/v1"));
+    assert_eq!(
+        json(scoped[0].as_bytes()),
+        legacy_docs_as_v1(scoped[1].as_bytes())
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -355,10 +366,7 @@ async fn capability_docs_use_request_base() {
         }
         scoped.push(body);
     }
-    assert_eq!(
-        String::from_utf8(scoped[0].clone()).unwrap(),
-        as_v1(&scoped[1])
-    );
+    assert_eq!(json(&scoped[0]), legacy_docs_as_v1(&scoped[1]));
 }
 
 // ---------------------------------------------------------------------------
