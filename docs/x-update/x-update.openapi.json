@@ -578,7 +578,7 @@
       ],
       "put": {
         "summary": "Commit this update",
-        "description": "Accepted in EXECUTED; again in COMMITTED, where it changes nothing. The update moves to COMMITTING. For an update whose `verdict_scope` is `update`. A member of a node transaction (`verdict_scope` `node`) is settled by the node operation; under `/v1` a per-update verdict on it answers 409 before any state check, naming the node operations, and `/vehicle/v1` accepts it for existing clients. Each update reports its own state as it actually is.",
+        "description": "Accepted in EXECUTED; again in COMMITTED, where it changes nothing. The update moves to COMMITTING. For an update whose `verdict_scope` is `update`. A member of a node transaction (`verdict_scope` `node`) is settled by the node operation; under `/v1` a per-update verdict on it answers 409 before any state check, naming the node operations, and `/vehicle/v1` accepts it for existing clients. Each update reports its own state as it actually is. On an update only the executor holds (after a server restart), EXECUTING or EXECUTED, it adopts the update: the server registers it again as executed and staged for its reset, and the verdict then settles it; held in another state, it answers 404.",
         "responses": {
           "202": {
             "description": "Accepted; poll the status resource.",
@@ -592,7 +592,7 @@
             }
           },
           "404": {
-            "description": "Unknown update",
+            "description": "Unknown update, or one the executor holds in a state no verdict adopts",
             "content": {
               "application/json": {
                 "schema": {
@@ -629,7 +629,7 @@
       ],
       "put": {
         "summary": "Roll back this update",
-        "description": "Accepted in EXECUTING and EXECUTED; again in ROLLED_BACK, where it changes nothing. The update moves to ROLLING_BACK. Valid for every update; see `x-update-commit` on transactions.",
+        "description": "Accepted in EXECUTING and EXECUTED; again in ROLLED_BACK, where it changes nothing. The update moves to ROLLING_BACK. Valid for every update; see `x-update-commit` on transactions. On an update only the executor holds (after a server restart), EXECUTING or EXECUTED, it adopts the update: the server registers it again as executed and staged for its reset, and the verdict then settles it; held in another state, it answers 404.",
         "responses": {
           "202": {
             "description": "Accepted; poll the status resource.",
@@ -643,7 +643,7 @@
             }
           },
           "404": {
-            "description": "Unknown update",
+            "description": "Unknown update, or one the executor holds in a state no verdict adopts",
             "content": {
               "application/json": {
                 "schema": {

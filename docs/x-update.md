@@ -42,18 +42,24 @@ that list from its executor, so a client that lost its state finds its updates b
 server or executor restart; SOVDd does, merging the updates its executor holds into the ones it
 has registered. An update only the executor holds is described (`GET {entity}/updates/{id}`, with
 the id as its name and the size of its held parts), reports its status (the held state, per the
-table under "Status member") and lists its held parts; a verdict, `prepare` or `execute` on it
-answers 404 until it is adopted (below).
+table under "Status member") and lists its held parts; `prepare` or `execute` on it answers 404
+until it is adopted (below).
 
 A registration with an id the executor still holds adopts that update instead of starting a new
 one: 201, with `x-update.adopted: true` in the details and status bodies. A registration with
 the same id but a different manifest is refused with 409.
 
+A verdict on an update only the executor holds adopts it too, when it is EXECUTING or EXECUTED:
+the server registers it again as executed and staged for its reset, and the verdict settles it as
+it would have before the restart. A node power cycle is how a node's components are reset, and it
+restarts the server too, so a client that kept its state and polls its update by id across the
+reboot settles it without registering again. Held in another state, a verdict on it answers 404.
+
 How a client recovers is its own choice; recovering from the node's facts instead of by id is
 equally valid. The listing and adopting are required regardless: without them, a client that lost
 its state cannot find and settle its updates, and those recovery cases cannot be tested.
 
-Not implemented yet: SOVDd does not adopt.
+SOVDd adopts on a verdict; adopting a re-registration is not implemented yet.
 
 ## Bulk data
 
@@ -228,8 +234,8 @@ An executor still busy answers the next `prepare` or `execute` with 409, as the 
 | GET | `{entity}/updates/{id}/bulk-data/{part_id}` | Read a part back as uploaded (up to 1 MiB of an update's parts together) | — | — |
 | PUT | `{entity}/updates/{id}/prepare` | §7.18.5 | REGISTERED | PREPARING → PREPARED, PREPARING → FAILED |
 | PUT | `{entity}/updates/{id}/execute` | §7.18.6 | PREPARED | EXECUTING → EXECUTED, EXECUTING → ROLLING_BACK → ROLLED_BACK |
-| PUT | `{entity}/updates/{id}/x-update-commit` | Commit the trial (`verdict_scope` `update`) | EXECUTED | COMMITTING → COMMITTED |
-| PUT | `{entity}/updates/{id}/x-update-rollback` | Roll back the trial (`verdict_scope` `update`) | EXECUTING, EXECUTED | ROLLING_BACK → ROLLED_BACK |
+| PUT | `{entity}/updates/{id}/x-update-commit` | Commit the trial (`verdict_scope` `update`); adopts an update only the executor holds | EXECUTED | COMMITTING → COMMITTED |
+| PUT | `{entity}/updates/{id}/x-update-rollback` | Roll back the trial (`verdict_scope` `update`); adopts an update only the executor holds | EXECUTING, EXECUTED | ROLLING_BACK → ROLLED_BACK |
 | POST | `/operations/x-update-commit/executions`, `…/x-update-rollback/executions` (on a server configured as one node: `/components/{node}/operations/…`) | Settle a node transaction (`verdict_scope` `node`) | EXECUTED (every member) | COMMITTED, ROLLED_BACK |
 | GET | `{entity}` | Component body with `capabilities.x-update.verdict` | — | — |
 
