@@ -39,6 +39,18 @@
 //! - No known-answer suppression (RFC 6762 §7.1) and no response delay/dedup.
 //! - The interface a query arrived on is inferred from its sender's subnet, not
 //!   read from the packet (`IP_PKTINFO` has no `nto` path).
+//!
+//! ## Each interface sends from its own address
+//! Every listed interface sends through its own socket, bound to its address on
+//! :5353 ([`interface_socket`]). A socket bound to `0.0.0.0` has the stack pick
+//! each datagram's source address, and QNX's stack picks it by a route lookup
+//! toward the destination even for multicast with `IP_MULTICAST_IF` set: with a
+//! default route through a gateway that does not answer ARP, every send then
+//! fails with `EHOSTUNREACH` for as long as ARP holds the gateway down (about
+//! 20 s at a time), on the guests' links as on the LAN. Bound, the source is
+//! fixed and no route is consulted. The shared `0.0.0.0:5353` socket still
+//! receives the multicast queries; unicast ones addressed to an interface land
+//! on that interface's socket, which the serve loop reads too.
 
 use crate::{AdvertiseError, SovdAdvertiser};
 use simple_dns::rdata::{RData, A, PTR, SRV, TXT};
@@ -393,10 +405,16 @@ fn nap(dur: Duration, stop: &AtomicBool) {
     }
 }
 
-/// One served interface and its encoded record set.
+/// One served interface, its encoded record set and the socket it sends from.
 struct Served {
     iface: Iface,
     wire: Wire,
+    /// Bound to the interface's address on :5353 ([`interface_socket`]); `None`
+    /// for the egress-address fallback, or when the bind failed: the shared
+    /// socket sends instead.
+    sock: Option<Socket>,
+    /// Whether the last send failed, so a failing stretch logs once.
+    failing: AtomicBool,
 }
 
 impl Served {
@@ -413,15 +431,82 @@ impl Served {
         }
     }
 
-    /// Multicast `bytes` out of this interface.
-    fn multicast(&self, sock: &Socket, group: &SockAddr, bytes: &[u8], what: &str) {
-        if !self.iface.mask.is_unspecified() {
-            let _ = sock.set_multicast_if_v4(&self.iface.addr);
-        }
-        if let Err(e) = sock.send_to(bytes, group) {
-            tracing::debug!(address = %self.iface.addr, error = %e, "mDNS {what} send failed");
+    fn new(iface: Iface, wire: Wire) -> Self {
+        // The egress-address fallback (no listed interface) has no address of
+        // its own to bind: it sends through the shared socket.
+        let sock = if iface.mask.is_unspecified() {
+            None
+        } else {
+            interface_socket(iface.addr, MDNS_PORT)
+                .map_err(|e| {
+                    tracing::warn!(address = %iface.addr, error = %e,
+                        "mDNS: cannot bind the interface's socket; sending through the shared one")
+                })
+                .ok()
+        };
+        Served {
+            iface,
+            wire,
+            sock,
+            failing: AtomicBool::new(false),
         }
     }
+
+    /// Multicast `bytes` out of this interface.
+    fn multicast(&self, shared: &Socket, group: &SockAddr, bytes: &[u8], what: &str) {
+        let sent = match &self.sock {
+            Some(own) => own.send_to(bytes, group),
+            None => {
+                if !self.iface.mask.is_unspecified() {
+                    let _ = shared.set_multicast_if_v4(&self.iface.addr);
+                }
+                shared.send_to(bytes, group)
+            }
+        };
+        self.note(sent, what);
+    }
+
+    /// Unicast `bytes` to `to` from this interface's address (a QU reply).
+    fn unicast(&self, shared: &Socket, to: &SockAddr, bytes: &[u8]) {
+        let sent = self.sock.as_ref().unwrap_or(shared).send_to(bytes, to);
+        self.note(sent, "unicast response");
+    }
+
+    /// Log a send failure once per failing stretch, and the recovery.
+    fn note(&self, sent: std::io::Result<usize>, what: &str) {
+        match sent {
+            Ok(_) => {
+                if self.failing.swap(false, Ordering::Relaxed) {
+                    tracing::info!(address = %self.iface.addr, "mDNS sends work again");
+                }
+            }
+            Err(e) => {
+                if !self.failing.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(address = %self.iface.addr, error = %e, "mDNS {what} send failed");
+                } else {
+                    tracing::debug!(address = %self.iface.addr, error = %e, "mDNS {what} send failed");
+                }
+            }
+        }
+    }
+}
+
+/// The socket one interface sends from: bound to its address on `port` beside
+/// the shared `0.0.0.0` socket (`SO_REUSEADDR`), so the stack never picks the
+/// source by a route lookup; multicast out of the interface at IP TTL 255,
+/// looped back like the shared socket's; nonblocking, as the serve loop only
+/// drains it.
+fn interface_socket(addr: Ipv4Addr, port: u16) -> std::io::Result<Socket> {
+    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    sock.set_reuse_address(true)?;
+    #[cfg(all(unix, not(target_os = "nto")))]
+    let _ = sock.set_reuse_port(true);
+    sock.bind(&SockAddr::from(SocketAddr::from((addr, port))))?;
+    sock.set_multicast_if_v4(&addr)?;
+    let _ = sock.set_multicast_loop_v4(true);
+    let _ = sock.set_multicast_ttl_v4(255); // RFC 6762 §11
+    sock.set_nonblocking(true)?;
+    Ok(sock)
 }
 
 /// Bring `served` in line with the host's interfaces now: serve the new ones
@@ -436,7 +521,7 @@ fn rescan(sock: &Socket, adv: &SovdAdvertiser, served: &mut Vec<Served>) -> Vec<
         }
         match Wire::build(&Records::new(adv, iface.addr)) {
             Ok(wire) => {
-                let s = Served { iface, wire };
+                let s = Served::new(iface, wire);
                 s.join(sock);
                 tracing::info!(address = %iface.addr, "SOVD mDNS: serving interface");
                 served.push(s);
@@ -457,6 +542,29 @@ fn answering<'a>(served: &'a [Served], from: &SockAddr) -> Option<&'a Served> {
     sender
         .and_then(|ip| served.iter().find(|s| s.iface.contains(ip)))
         .or_else(|| served.first())
+}
+
+/// Answer `datagram` from `from` if it is a query for us: unicast when it asks
+/// (QU), else multicast, from the interface whose subnet holds the sender.
+fn respond(
+    shared: &Socket,
+    group: &SockAddr,
+    served: &[Served],
+    records: &Records,
+    datagram: &[u8],
+    from: &SockAddr,
+) {
+    let Some((shape, unicast)) = query_match(datagram, records) else {
+        return;
+    };
+    let Some(s) = answering(served, from) else {
+        return;
+    };
+    if unicast {
+        s.unicast(shared, from, s.wire.reply(shape));
+    } else {
+        s.multicast(shared, group, s.wire.reply(shape), "response");
+    }
 }
 
 /// The worker thread: announce on every interface, serve queries, rescan the
@@ -494,27 +602,23 @@ fn serve(sock: Socket, adv: SovdAdvertiser, records: Records, stop: Arc<AtomicBo
         }
         // The read timeout bounds each iteration, so the stop flag (and hence
         // the goodbye) is observed within `POLL_INTERVAL`.
-        match sock.recv_from(&mut buf) {
-            Ok((n, from)) => {
+        // Read timeout (the common case) or a transient error: just re-check the
+        // stop flag and loop. The timeout paces this; it does not spin.
+        if let Ok((n, from)) = sock.recv_from(&mut buf) {
+            // SAFETY: `recv_from` initialised the first `n` bytes.
+            let datagram = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, n) };
+            respond(&sock, &group, &served, &records, datagram, &from);
+        }
+        // Unicast queries addressed to an interface land on its own socket.
+        for i in 0..served.len() {
+            let Some(own) = &served[i].sock else {
+                continue;
+            };
+            while let Ok((n, from)) = own.recv_from(&mut buf) {
                 // SAFETY: `recv_from` initialised the first `n` bytes.
                 let datagram = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, n) };
-                let Some((shape, unicast)) = query_match(datagram, &records) else {
-                    continue;
-                };
-                let Some(s) = answering(&served, &from) else {
-                    continue;
-                };
-                if unicast {
-                    if let Err(e) = sock.send_to(s.wire.reply(shape), &from) {
-                        tracing::debug!(error = %e, "mDNS response send failed");
-                    }
-                } else {
-                    s.multicast(&sock, &group, s.wire.reply(shape), "response");
-                }
+                respond(&sock, &group, &served, &records, datagram, &from);
             }
-            // Read timeout (the common case) or a transient error: just re-check
-            // the stop flag and loop. The timeout paces this; it does not spin.
-            Err(_) => continue,
         }
     }
 
@@ -598,7 +702,43 @@ mod tests {
         Served {
             iface,
             wire: Wire::build(&Records::new(&sample(), iface.addr)).unwrap(),
+            sock: None,
+            failing: AtomicBool::new(false),
         }
+    }
+
+    /// An interface socket binds beside a wildcard socket on the same port and
+    /// sends from the interface's address and that port: the source a reply
+    /// carries no longer depends on a route lookup.
+    #[test]
+    fn an_interface_sends_from_its_own_address_beside_the_shared_socket() {
+        let shared = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        shared.set_reuse_address(true).unwrap();
+        #[cfg(all(unix, not(target_os = "nto")))]
+        let _ = shared.set_reuse_port(true);
+        shared
+            .bind(&SockAddr::from(SocketAddr::from((
+                Ipv4Addr::UNSPECIFIED,
+                0,
+            ))))
+            .unwrap();
+        let port = shared
+            .local_addr()
+            .unwrap()
+            .as_socket_ipv4()
+            .unwrap()
+            .port();
+
+        let own = interface_socket(Ipv4Addr::LOCALHOST, port).expect("binds beside the wildcard");
+        let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        own.send_to(b"q", &SockAddr::from(receiver.local_addr().unwrap()))
+            .unwrap();
+        let mut b = [0u8; 4];
+        let (_, from) = receiver.recv_from(&mut b).unwrap();
+        assert_eq!(from, SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
     }
 
     fn from(ip: [u8; 4]) -> SockAddr {
