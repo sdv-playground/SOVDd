@@ -75,6 +75,13 @@ forms are used here unchanged.
 - `PUT {entity}/updates/{update_id}/bulk-data/{part_id}` is the legacy alias of the `POST`, the
   part named by the path; it records `Content-Type` alike and answers 201, the `ETag` and
   `{part_id, size, sha256, href}`. It is scheduled for deprecation.
+- `GET {entity}/updates/{update_id}/bulk-data/{part_id}` reads a part back as it was uploaded:
+  200 with its bytes, its recorded `Content-Type` and the `ETag`; 404 while the update has no such
+  part (or there is no such update). A client retrying an upload checks with it whether its last
+  one landed: lib-orchestrate reads `{update}/bulk-data/manifest` before it uploads the L2, and
+  accepts only 200 (the same bytes) or 404. SOVD keeps the bytes of an update's parts up to 1 MiB
+  together, enough for a manifest; a part beyond that, whose bytes only the executor holds,
+  answers 501.
 
 `GET {entity}/updates/{update_id}/bulk-data` items carry, beside `part_id`, `size`, `sha256` and
 `href`, a `present` flag: whether the executor already holds the part. It is matched by name (the
@@ -215,6 +222,7 @@ An executor still busy answers the next `prepare` or `execute` with 409, as the 
 | DELETE | `{entity}/updates/{id}` | Remove an update. Before execute it discards what was staged; the software in use is not touched. Under `/v1` refused (405) while running in phase execute | REGISTERED, PREPARING, PREPARED, COMMITTED, ROLLED_BACK, FAILED | — |
 | POST | `{entity}/updates/{id}/bulk-data` | Upload a part (`PUT …/bulk-data/{part_id}` is the legacy alias) | REGISTERED | REGISTERED |
 | GET | `{entity}/updates/{id}/bulk-data` | List parts; `present` tells if the executor holds each one | — | — |
+| GET | `{entity}/updates/{id}/bulk-data/{part_id}` | Read a part back as uploaded (up to 1 MiB of an update's parts together) | — | — |
 | PUT | `{entity}/updates/{id}/prepare` | §7.18.5 | REGISTERED | PREPARING → PREPARED, PREPARING → FAILED |
 | PUT | `{entity}/updates/{id}/execute` | §7.18.6 | PREPARED | EXECUTING → EXECUTED, EXECUTING → ROLLING_BACK → ROLLED_BACK |
 | PUT | `{entity}/updates/{id}/x-update-commit` | Commit the trial (`verdict_scope` `update`) | EXECUTED | COMMITTING → COMMITTED |

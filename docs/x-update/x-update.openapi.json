@@ -376,6 +376,51 @@
             }
           }
         }
+      },
+      "get": {
+        "summary": "Read a part back as it was uploaded",
+        "description": "A client retrying an upload checks with it whether its last one landed (lib-orchestrate reads `bulk-data/manifest` before it uploads the L2, and accepts only 200 with the same bytes, or 404). The server keeps the bytes of an update's parts up to 1 MiB together, enough for a manifest.",
+        "responses": {
+          "200": {
+            "description": "The part's bytes, with its recorded `Content-Type`",
+            "headers": {
+              "ETag": {
+                "description": "The part's SHA-256",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such part, or no such update",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "A part beyond what the server keeps: only the executor holds its bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/updates/{update_id}/prepare": {
