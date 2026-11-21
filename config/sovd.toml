@@ -7,6 +7,7 @@
 [server]
 host = "0.0.0.0"
 port = 9080
+# identification = "cvc"   # mDNS instance / <id>.local hostname; defaults to the TLS leaf's SAN, then the OS hostname
 request_timeout_ms = 5000
 
 # Transport configuration
