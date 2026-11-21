@@ -7,7 +7,7 @@
 //! Common shape:
 //!   * `GET /…` on a collection → empty `{items: []}`
 //!   * `GET /…/{id}` → 404 (collection is empty)
-//!   * `POST /…` → 501 `sovd-server-misconfigured` (no backend wired)
+//!   * `POST /…` → 501 vendor `not-supported` (no backend wired)
 //!   * `PUT /…/{id}` → 204 (idempotent accept — no state to store)
 //!   * `DELETE /…/{id}` → 204
 //!
@@ -74,7 +74,7 @@ pub async fn acquire_lock(
 ) -> Result<StatusCode, ApiError> {
     require_component(&state, &component_id)?;
     // Spec 201 on create when a lock subsystem exists.  Until then,
-    // be honest: 501 sovd-server-misconfigured.
+    // be honest: 501 (vendor `not-supported`).
     Err(ApiError::NotImplemented(
         "locks.acquire not yet wired to a lock subsystem".into(),
     ))

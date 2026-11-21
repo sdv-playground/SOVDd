@@ -438,16 +438,11 @@ fn api_routes(tree: Tree) -> Router<AppState> {
         // the /updates collection isn't yet plumbed under /apps; when
         // a real sub-entity OTA need shows up, /apps/{app_id}/updates
         // will be added per the F.D2 wire shape.
-        // Sub-entity ECU reset — same shape as the entity-root form
-        // (PUT status/restart returns 202 + Location; GET on the
-        // exec sub-resource is the stateless `completed` stub).
+        // Sub-entity ECU reset — same per-tree shape as the entity-root
+        // form; the tree-specific status routes are in `restart_status_routes`.
         .route(
             &format!("{}{}", tree.base(), "/components/{component_id}/apps/{app_id}/status/restart"),
             put(handlers::sub_entity::status_restart),
-        )
-        .route(
-            &format!("{}{}", tree.base(), "/components/{component_id}/apps/{app_id}/status/restart/{exec_id}"),
-            get(handlers::sub_entity::status_restart_execution),
         )
         // Sub-entity mode routes
         .route(
@@ -527,10 +522,10 @@ fn api_routes(tree: Tree) -> Router<AppState> {
                 .put(handlers::subscriptions::update_cyclic_subscription)
                 .delete(handlers::subscriptions::delete_cyclic_subscription),
         )
-        // ECU Reset — ISO 17978-3 §7.19. PUT returns 202 + Location to
-        // the status sub-resource; the GET on the sub-resource is a stub
-        // that reads `completed` (reset is fire-and-forget, the ECU is
-        // rebooting by the time we'd report progress).
+        // ECU Reset — PUT status/restart; per-tree response shape in
+        // `handlers::reset` (`/v1`: ISO 17978-3 §7.19.4, 202 + Location to
+        // `{entity}/status`; legacy: vendor body).  Tree-specific status
+        // routes are in `restart_status_routes`.
         // §7.19.2 — read an entity's runtime status (EntityStatus ready/notReady
         // + control links + vendor x-<vendor>-* runtime fields). Orchestrators read
         // this to verify a reset actually took effect (boot counter incremented).
@@ -541,10 +536,6 @@ fn api_routes(tree: Tree) -> Router<AppState> {
         .route(
             &format!("{}{}", tree.base(), "/components/{component_id}/status/restart"),
             put(handlers::reset::status_restart),
-        )
-        .route(
-            &format!("{}{}", tree.base(), "/components/{component_id}/status/restart/{exec_id}"),
-            get(handlers::reset::status_restart_execution),
         )
         // Mode routes (session, security).  Per ISO 17978-3 Table 343 /
         // C-130 the UDS service→mode mapping covers session (0x10),
@@ -697,7 +688,41 @@ fn api_routes(tree: Tree) -> Router<AppState> {
             &format!("{}{}", tree.base(), "/updates/{update_id}/x-update-rollback"),
             put(handlers::updates::put_node_x_update_rollback),
         )
+        .merge(restart_status_routes(tree))
         .layer(axum::Extension(tree))
+}
+
+/// Tree-specific restart status routes.  `/v1` serves the app's `status`
+/// (the `Location` of an app restart, ISO 17978-3 §7.19.4); the frozen
+/// legacy tree keeps its untracked `status/restart/{exec_id}` stubs.
+fn restart_status_routes(tree: Tree) -> Router<AppState> {
+    match tree {
+        Tree::V1 => Router::new().route(
+            &format!(
+                "{}{}",
+                tree.base(),
+                "/components/{component_id}/apps/{app_id}/status"
+            ),
+            get(handlers::sub_entity::status_read),
+        ),
+        Tree::Legacy => Router::new()
+            .route(
+                &format!(
+                    "{}{}",
+                    tree.base(),
+                    "/components/{component_id}/status/restart/{exec_id}"
+                ),
+                get(handlers::reset::status_restart_execution),
+            )
+            .route(
+                &format!(
+                    "{}{}",
+                    tree.base(),
+                    "/components/{component_id}/apps/{app_id}/status/restart/{exec_id}"
+                ),
+                get(handlers::sub_entity::status_restart_execution),
+            ),
+    }
 }
 
 // F.D8b: `legacy_flash_files_router` + the SetResponseHeaderLayer

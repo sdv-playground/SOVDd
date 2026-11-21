@@ -523,7 +523,7 @@ async fn post_is_not_a_configurations_verb() {
 #[tokio::test]
 async fn routes_are_gated_on_the_capability() {
     let (server, _backend) = server(false).await;
-    // Same gate as `bulk_data` / `logs`: 501 sovd-server-misconfigured.
+    // Same gate as `bulk_data` / `logs`: 501 (vendor `not-supported`).
     for path in [
         "/configurations",
         "/configurations/ALKConfig",

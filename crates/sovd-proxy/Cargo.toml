@@ -15,3 +15,8 @@ serde_json.workspace = true
 reqwest.workspace = true
 hex.workspace = true
 chrono.workspace = true
+
+[dev-dependencies]
+sovd-api.workspace = true
+sovd-client = { workspace = true, features = ["test-util"] }
+tokio.workspace = true
