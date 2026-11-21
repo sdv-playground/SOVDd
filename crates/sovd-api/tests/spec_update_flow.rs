@@ -2263,6 +2263,103 @@ async fn banked_awaiting_verdict() -> (TestServer, Arc<MockBackend>, String) {
     (server, backend, id)
 }
 
+/// Banked server with an update executed in standard mode (no
+/// `x-ota-control`, as an x-update client executes): staged for its reset,
+/// no verdict task waiting.
+async fn banked_staged_for_reset() -> (TestServer, Arc<MockBackend>, String) {
+    let (server, backend) = spawn_with("banked").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"banked").await;
+    upload_part(&server, &id, "#kernel", b"\xCAfake").await;
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/prepare"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(poll_terminal(&server, &id).await["status"], "completed");
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/execute"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let executed = poll_terminal(&server, &id).await;
+    assert_eq!(executed["step"], "staged for reset", "{executed}");
+    (server, backend, id)
+}
+
+#[tokio::test]
+async fn x_update_commit_after_a_standard_execute_once_the_component_restarted() {
+    let (server, backend, id) = banked_staged_for_reset().await;
+    assert_eq!(
+        get_status(&server, &id).await["x-update"]["state"],
+        "EXECUTING"
+    );
+
+    // Not restarted onto the new software yet: commit is not accepted.
+    let resp = put(&server, &x_update_path(&id, "x-update-commit")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::AwaitingReboot);
+
+    *backend.flash_state.lock() = CoreFlashState::Activated;
+    assert_eq!(
+        get_status(&server, &id).await["x-update"]["state"],
+        "EXECUTED"
+    );
+
+    let resp = put(&server, &x_update_path(&id, "x-update-commit")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let loc = resp.headers()["location"].to_str().unwrap().to_string();
+    assert!(loc.ends_with("/status"), "location was {loc}");
+    let done = poll_terminal(&server, &id).await;
+    assert_eq!(done["status"], "completed", "{done}");
+    assert_eq!(done["x-update"]["state"], "COMMITTED", "{done}");
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::Committed);
+
+    // Repeated on a committed update it changes nothing.
+    let resp = put(&server, &x_update_path(&id, "x-update-commit")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(
+        get_status(&server, &id).await["x-update"]["state"],
+        "COMMITTED"
+    );
+}
+
+#[tokio::test]
+async fn x_update_rollback_after_a_standard_execute_before_the_restart() {
+    let (server, backend, id) = banked_staged_for_reset().await;
+
+    let resp = put(&server, &x_update_path(&id, "x-update-rollback")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let done = poll_terminal(&server, &id).await;
+    assert_eq!(done["x-update"]["state"], "ROLLED_BACK", "{done}");
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
+}
+
+#[tokio::test]
+async fn a_claimed_standard_verdict_refuses_the_opposite_one() {
+    let (server, backend, id) = banked_staged_for_reset().await;
+    *backend.flash_state.lock() = CoreFlashState::Activated;
+    // A rollback held in the backend; a commit posted while it runs.
+    backend
+        .rollback_flash_gate
+        .enabled
+        .store(true, Ordering::SeqCst);
+    let resp = put(&server, &x_update_path(&id, "x-update-rollback")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    backend.rollback_flash_gate.entered.notified().await;
+    let body = get_status(&server, &id).await;
+    assert_eq!(body["x-update"]["state"], "ROLLING_BACK", "{body}");
+
+    let resp = put(&server, &x_update_path(&id, "x-update-commit")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+
+    backend.rollback_flash_gate.release.notify_one();
+    let done = poll_terminal(&server, &id).await;
+    assert_eq!(done["x-update"]["state"], "ROLLED_BACK", "{done}");
+}
+
 #[tokio::test]
 async fn x_update_commit_mirrors_x_ota_commit() {
     let (server, backend, id) = banked_awaiting_verdict().await;
@@ -2622,11 +2719,54 @@ async fn held_state_maps_to_phase_status_and_x_update_state() {
 }
 
 #[tokio::test]
-async fn verbs_on_a_held_only_update_are_404() {
+async fn prepare_and_execute_on_a_held_only_update_are_404() {
     let (server, backend) = spawn_with("banked").await;
     *backend.held.lock() = vec![held("pkg-held", HeldState::Executed, &[("kernel", 1)])];
-    for verb in ["x-update-commit", "x-update-rollback", "prepare", "execute"] {
+    for verb in ["prepare", "execute"] {
         let resp = put(&server, &x_update_path("pkg-held", verb)).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND, "{verb}");
+    }
+}
+
+#[tokio::test]
+async fn a_commit_adopts_the_executed_update_the_executor_held_through_a_restart() {
+    // The server restarted during the trial: nothing registered, the
+    // executor holds the update as EXECUTED and the component is Activated.
+    let (server, backend) = spawn_with("banked").await;
+    *backend.held.lock() = vec![held("pkg-held", HeldState::Executed, &[("kernel", 1)])];
+    *backend.flash_state.lock() = CoreFlashState::Activated;
+
+    let resp = put(&server, &x_update_path("pkg-held", "x-update-commit")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let done = poll_terminal(&server, "pkg-held").await;
+    assert_eq!(done["x-update"]["state"], "COMMITTED", "{done}");
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::Committed);
+}
+
+#[tokio::test]
+async fn a_rollback_adopts_the_update_still_executing_through_a_restart() {
+    let (server, backend) = spawn_with("banked").await;
+    *backend.held.lock() = vec![held("pkg-held", HeldState::Executing, &[("kernel", 1)])];
+    *backend.flash_state.lock() = CoreFlashState::AwaitingReboot;
+
+    // Not restarted onto it: commit is not accepted, rollback is.
+    let resp = put(&server, &x_update_path("pkg-held", "x-update-commit")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+    let resp = put(&server, &x_update_path("pkg-held", "x-update-rollback")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let done = poll_terminal(&server, "pkg-held").await;
+    assert_eq!(done["x-update"]["state"], "ROLLED_BACK", "{done}");
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
+}
+
+#[tokio::test]
+async fn a_verdict_adopts_nothing_held_before_execute_or_not_held() {
+    let (server, backend) = spawn_with("banked").await;
+    *backend.held.lock() = vec![held("pkg-held", HeldState::Prepared, &[("kernel", 1)])];
+    for verb in ["x-update-commit", "x-update-rollback"] {
+        let resp = put(&server, &x_update_path("pkg-held", verb)).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND, "{verb}");
+        let resp = put(&server, &x_update_path("pkg-none", verb)).await;
         assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND, "{verb}");
     }
 }
