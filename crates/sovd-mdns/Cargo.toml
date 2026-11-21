@@ -26,6 +26,9 @@ tracing = { workspace = true }
 # `cargo tree -p sovd-mdns --target aarch64-unknown-nto-qnx710`.
 simple-dns = "0.11"
 socket2 = "0.6"
+# `getifaddrs` / `if_nametoindex`, so the responder serves every interface.
+# Already socket2's only dep, and it has both for nto.
+libc = "0.2"
 
 # Off-QNX only: enable socket2's `all` feature (for SO_REUSEPORT) and pull the
 # mature `mdns-sd` stack as the live backend.
