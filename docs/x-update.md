@@ -4,6 +4,8 @@ The contract for the `x-update` vendor extensions to ISO 17978-3 §7.18 (softwar
 §7.19 (entity status and restart). Everything here sits beside the standard members and verbs;
 nothing replaces them.
 
+The same contract as OpenAPI: [`x-update/x-update.openapi.json`](x-update/x-update.openapi.json).
+
 ## Principles
 
 The node reports facts and never vetoes; the client decides the verdict. Whether a verdict is
@@ -14,6 +16,19 @@ holding a suitable token, a workshop tester, the vehicle's state management and 
 cycle are all valid. The client owns the update ids. Every verb is explicit and
 addressed to the update's executor. `x-update` is served beside `x-ota` as a set of aliases; the
 `x-ota` names will be deprecated later.
+
+## Entities
+
+The orchestrator addresses updates on the node level. `{entity}` in this document is the node — the
+server's root scope — so the collection is `/updates`, and every registration names the executor
+the update is for as `target`, one of the executors the node lists as `x-update.update-targets`
+in its capability document (`GET /`, beside the `updates` link). A node without update executors
+advertises neither. Each executor is an entity of its own — a top-level component, or a
+subcomponent of the node where the server serves an entity tree — whose document reports the
+standard `software_update` capability and `capabilities.x-update.verdict`; the `apps` executor,
+where a node has one, is an update target like any other. A server may also offer an executor's
+own collection, `{executor}/updates`, for entity-level updates; the lifecycle below is the same
+there, with `target` naming that entity. An executor is IDLE while it holds no update.
 
 ## Update ids and listing
 
@@ -27,8 +42,24 @@ that list from its executor, so a client that lost its state finds its updates b
 server or executor restart; SOVDd does, merging the updates its executor holds into the ones it
 has registered. An update only the executor holds is described (`GET {entity}/updates/{id}`, with
 the id as its name and the size of its held parts), reports its status (the held state, per the
-table under "Status member") and lists its held parts; a verdict, `prepare` or `execute` on it
-answers 404 until it is adopted (see "Not in this version").
+table under "Status member") and lists its held parts; `prepare` or `execute` on it answers 404
+until it is adopted (below).
+
+A registration with an id the executor still holds adopts that update instead of starting a new
+one: 201, with `x-update.adopted: true` in the details and status bodies. A registration with
+the same id but a different manifest is refused with 409.
+
+A verdict on an update only the executor holds adopts it too, when it is EXECUTING or EXECUTED:
+the server registers it again as executed and staged for its reset, and the verdict settles it as
+it would have before the restart. A node power cycle is how a node's components are reset, and it
+restarts the server too, so a client that kept its state and polls its update by id across the
+reboot settles it without registering again. Held in another state, a verdict on it answers 404.
+
+How a client recovers is its own choice; recovering from the node's facts instead of by id is
+equally valid. The listing and adopting are required regardless: without them, a client that lost
+its state cannot find and settle its updates, and those recovery cases cannot be tested.
+
+SOVDd adopts on a verdict; adopting a re-registration is not implemented yet.
 
 ## Bulk data
 
@@ -50,6 +81,13 @@ forms are used here unchanged.
 - `PUT {entity}/updates/{update_id}/bulk-data/{part_id}` is the legacy alias of the `POST`, the
   part named by the path; it records `Content-Type` alike and answers 201, the `ETag` and
   `{part_id, size, sha256, href}`. It is scheduled for deprecation.
+- `GET {entity}/updates/{update_id}/bulk-data/{part_id}` reads a part back as it was uploaded:
+  200 with its bytes, its recorded `Content-Type` and the `ETag`; 404 while the update has no such
+  part (or there is no such update). A client retrying an upload checks with it whether its last
+  one landed: lib-orchestrate reads `{update}/bulk-data/manifest` before it uploads the L2, and
+  accepts only 200 (the same bytes) or 404. SOVD keeps the bytes of an update's parts up to 1 MiB
+  together, enough for a manifest; a part beyond that, whose bytes only the executor holds,
+  answers 501.
 
 `GET {entity}/updates/{update_id}/bulk-data` items carry, beside `part_id`, `size`, `sha256` and
 `href`, a `present` flag: whether the executor already holds the part. It is matched by name (the
@@ -121,9 +159,27 @@ the component's capabilities tells a client so before it sends a verdict.
 Served by this crate, which forwards the verdict to the update's executor and reports what it
 answers.
 
+### Transactions
+
+Updates whose banks one executor switches together (one boot vector, all or nothing) form a
+transaction. A transaction need not span the node: an ECU whose SoCs boot from separate boot
+vectors has one transaction per vector. Updates in different transactions settle independently;
+keeping them consistent with each other is the client's job. The node transaction above is the
+one whose members report `verdict_scope` `node`.
+
+Each update reports its own state, as it actually is; the server does not align the members of
+a transaction. When the executor commits or rolls back, by a verdict or on its own (e.g. the boot
+stage after failed trial boots), each update it commits reports COMMITTING, then COMMITTED, and
+each update it rolls back reports ROLLING_BACK, then ROLLED_BACK.
+
+Keeping a transaction atomic is the backend's part (in sumo, the machine manager).
+
 ### Per node (operations)
 
-`POST /vehicle/v1/operations/x-update-commit/executions` and `…/x-update-rollback/executions`,
+`POST /vehicle/v1/operations/x-update-commit/executions` and `…/x-update-rollback/executions`
+(on a server configured as one node, the node's own: `POST {base}/components/{node}/operations/…`;
+the embedding machine manager mounts them there and not at the root, and the `/v1` 409 above names
+that path),
 body `{"nonce"?: string}`, commit or roll back every component in the node's open transaction,
 all or nothing. The answer is an ISO §7.14 OperationExecution:
 
@@ -149,27 +205,71 @@ Served by the embedding machine manager, not by this crate.
 
 ## Delete
 
-Once an update has settled (COMMITTED, ROLLED_BACK or FAILED), the client removes it with the
-standard `DELETE {entity}/updates/{update_id}`; before `execute`, the same `DELETE` discards a
-prepared update. There is no finish verb. Under `/v1`, a `DELETE` while the update is still
-running in phase execute (EXECUTING, EXECUTED, COMMITTING, ROLLING_BACK) answers 405
-(ISO 17978-3 §7.18.8); `/vehicle/v1` deletes it, aborting the running step.
+The standard `DELETE {entity}/updates/{update_id}` removes an update. Before `execute`
+(REGISTERED, PREPARING, PREPARED) it discards what the executor staged, aborting a running
+`prepare`; the software in use is never touched. Once the update has settled (COMMITTED,
+ROLLED_BACK or FAILED) it removes the record. It is synchronous: 204 once the update is gone.
+There is no finish verb and no revert verb: DELETE is both. Under `/v1`, a `DELETE` while the
+update is still running in phase execute (EXECUTING, EXECUTED, COMMITTING, ROLLING_BACK) answers
+405 (ISO 17978-3 §7.18.8); `/vehicle/v1` deletes it, aborting the running step.
+
+| answer | when |
+|---|---|
+| 204 | removed |
+| 404 | unknown update |
+| 405 `method-not-allowed` | under `/v1`, in phase execute and not settled: wait, or send the verdict first |
+
+An executor still busy answers the next `prepare` or `execute` with 409, as the standard does.
+
+## Lifecycle
+
+| Method | Path | Verb / Notes | From states | To state |
+|---|---|---|---|---|
+| POST | `{entity}/updates` | Register; the client gives the id (under `/v1` the server creates one when it is missing). Re-registering an id the executor holds adopts it (`adopted: true`) | IDLE | REGISTERED |
+| GET | `{entity}/updates` | List held updates by the client's id; rebuilt from the executor after a restart | — | — |
+| GET | `{entity}/updates/{id}` | Descriptor | — | — |
+| DELETE | `{entity}/updates/{id}` | Remove an update. Before execute it discards what was staged; the software in use is not touched. Under `/v1` refused (405) while running in phase execute | REGISTERED, PREPARING, PREPARED, COMMITTED, ROLLED_BACK, FAILED | — |
+| POST | `{entity}/updates/{id}/bulk-data` | Upload a part (`PUT …/bulk-data/{part_id}` is the legacy alias) | REGISTERED | REGISTERED |
+| GET | `{entity}/updates/{id}/bulk-data` | List parts; `present` tells if the executor holds each one | — | — |
+| GET | `{entity}/updates/{id}/bulk-data/{part_id}` | Read a part back as uploaded (up to 1 MiB of an update's parts together) | — | — |
+| PUT | `{entity}/updates/{id}/prepare` | §7.18.5 | REGISTERED | PREPARING → PREPARED, PREPARING → FAILED |
+| PUT | `{entity}/updates/{id}/execute` | §7.18.6 | PREPARED | EXECUTING → EXECUTED, EXECUTING → ROLLING_BACK → ROLLED_BACK |
+| PUT | `{entity}/updates/{id}/x-update-commit` | Commit the trial (`verdict_scope` `update`); adopts an update only the executor holds | EXECUTED | COMMITTING → COMMITTED |
+| PUT | `{entity}/updates/{id}/x-update-rollback` | Roll back the trial (`verdict_scope` `update`); adopts an update only the executor holds | EXECUTING, EXECUTED | ROLLING_BACK → ROLLED_BACK |
+| POST | `/operations/x-update-commit/executions`, `…/x-update-rollback/executions` (on a server configured as one node: `/components/{node}/operations/…`) | Settle a node transaction (`verdict_scope` `node`) | EXECUTED (every member) | COMMITTED, ROLLED_BACK |
+| GET | `{entity}` | Component body with `capabilities.x-update.verdict` | — | — |
+
+| State | Transient / Settled | What the client may do |
+|---|---|---|
+| IDLE | Settled | register an update |
+| REGISTERED | Settled | Upload parts, prepare, DELETE |
+| PREPARING | Transient | Wait, or DELETE |
+| PREPARED | Settled (pre-execute) | execute, DELETE |
+| EXECUTING | Transient | Wait; x-update-rollback accepted |
+| EXECUTED | Settled (awaiting verdict) | x-update-commit, x-update-rollback, or the node operation |
+| COMMITTING | Transient | Wait |
+| COMMITTED | Settled | DELETE |
+| ROLLING_BACK | Transient | Wait |
+| ROLLED_BACK | Settled | DELETE |
+| FAILED | Settled | DELETE |
 
 ## Status member
 
 `GET {entity}/updates/{update_id}/status` carries, beside the standard Table 270 members:
 
 ```json
-"x-update": { "state": "<State>", "reset_kind": "none" | "component" | "node", "target": "<component id>", "verdict_scope": "update" | "node" }
+"x-update": { "state": "<State>", "reset_kind": "none" | "component" | "node", "target": "<component id>", "verdict_scope": "update" | "node", "adopted": true }
 ```
 
-`target` and `verdict_scope` are served under `/v1` only (see "Node-level collection").
+`target` and `verdict_scope` are served under `/v1` only (see "Node-level collection"). `adopted`
+is present, and true, on an update a registration adopted.
 
 The states are named after the verbs that lead to them. The state is total, and the standard
 `phase`/`status` in the same body agree with it:
 
 | state | phase | status | meaning |
 |---|---|---|---|
+| IDLE | — | — | the entity holds no update: not an update's state, but the one its entity reports; `POST` registers one |
 | REGISTERED (`/v1`), READY (`/vehicle/v1`) | prepare | pending | registered; manifest and parts may be uploaded; `prepare` may be sent |
 | PREPARING | prepare | inProgress | verifying and staging |
 | PREPARED | prepare | completed | staged in the inactive bank; `execute` or `DELETE` |
@@ -241,9 +341,10 @@ restart and the verdict.
 
 ## Orchestrator sequence
 
-1. Register one update per component (`POST {entity}/updates`).
+1. Register one update per executor on the node's collection (`POST /updates`, `target` naming the executor).
 2. Upload the manifest and parts.
-3. `PUT prepare` on each; wait for PREPARED.
+3. `PUT prepare` on each; wait for PREPARED. If any fails, or the client decides not to go on:
+   `DELETE` each update not yet executed.
 4. `PUT execute` on each; each goes EXECUTING.
 5. The restart named by `reset_kind` happens: whoever is authorized issues
    `PUT {entity}/status/restart`, or a power cycle does it. The client awaits EXECUTED.
@@ -252,6 +353,9 @@ restart and the verdict.
    update; a node transaction takes the node operation once, for all of its updates. A rollback
    may also be sent while an update is still EXECUTING.
 7. `DELETE` each update.
+
+A client that restarted lists `GET {entity}/updates`, recognises its ids, and continues from each
+update's state.
 
 ## Aliases
 
@@ -269,5 +373,4 @@ restart and the verdict.
 
 - Executors that need a verdict refusing `automated` with 409.
 - Retiring the x-ota names.
-- Adopting a re-registration the executor still holds.
 - Executor-side recording of the update id (which the listing needs).
