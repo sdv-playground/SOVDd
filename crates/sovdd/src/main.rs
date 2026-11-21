@@ -18,7 +18,9 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
-use sovd_api::{create_router, AppState, AuthConfig, AuthContext};
+use sovd_api::{
+    create_router, with_node_topology, AppState, AuthConfig, AuthContext, NodeTopology,
+};
 use sovd_conv::DidStore;
 use sovd_gateway::GatewayBackend;
 use sovd_proxy::SovdProxyBackend;
@@ -199,11 +201,21 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Create the app state with DID store, output configs, and auth context
-    let state = AppState::with_output_configs(backends, Arc::new(did_store), output_configs)
+    let mut state = AppState::with_output_configs(backends, Arc::new(did_store), output_configs)
         .with_auth(Arc::new(auth));
+    // `[server.node]`: serve the components as the subcomponents of one node.
+    if let Some(node) = load_node_config(&config_path)? {
+        tracing::info!(
+            node = node.id(),
+            "serving the components as the subcomponents of node"
+        );
+        state = state
+            .with_node(node)
+            .map_err(|e| anyhow::anyhow!("[server.node] {e}"))?;
+    }
 
-    // Create the router
-    let app = create_router(state);
+    // Create the router; the node topology wraps it last.
+    let app = with_node_topology(create_router(state.clone()), &state);
 
     // Bind to address
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -348,6 +360,26 @@ fn load_auth_config(path: &str) -> anyhow::Result<AuthConfig> {
         Some(auth) => Ok(auth.clone().try_into()?),
         None => Ok(AuthConfig::default()),
     }
+}
+
+/// Parse the optional `[server.node]` section: `id` (required), `name` (default: the id) and
+/// `host`, the component whose resources are the node's own.
+fn load_node_config(path: &str) -> anyhow::Result<Option<NodeTopology>> {
+    let content = std::fs::read_to_string(path)?;
+    let config: toml::Value = toml::from_str(&content)?;
+    let Some(node) = config.get("server").and_then(|s| s.get("node")) else {
+        return Ok(None);
+    };
+    let id = node
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("[server.node] missing 'id' (the node's component id)"))?;
+    let name = node.get("name").and_then(|v| v.as_str()).unwrap_or(id);
+    let topology = NodeTopology::new(id, name);
+    Ok(Some(match node.get("host").and_then(|v| v.as_str()) {
+        Some(host) => topology.with_host(host),
+        None => topology,
+    }))
 }
 
 /// In-process TLS settings parsed from `[server.tls]`.

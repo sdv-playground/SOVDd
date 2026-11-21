@@ -17,19 +17,30 @@
 //! - SRV port = the SOVD server's actual bind port (a parameter, never
 //!   hardcoded).
 //!
-//! The instance id is derived from the TLS leaf certificate (see
-//! [`instance_from_cert_der`]) so the advertised hostname is guaranteed to match
-//! what TLS clients verify. An unprovisioned device (no leaf) is not a
-//! discoverable SOVD server and must not advertise — the integration only calls
-//! the advertiser on the provisioned HTTPS path.
+//! A provisioned server derives the instance id from its TLS leaf certificate
+//! (see [`instance_from_cert_der`]) so the advertised hostname is guaranteed to
+//! match what TLS clients verify, and advertises an `https` `accessurl`.
+//!
+//! An unprovisioned server (no leaf yet) advertises too: enrollment runs over
+//! its plain-HTTP endpoint, so a client has to be able to find it. It announces
+//! its node identity ([`node_identity_from_spki_der`], the device key's digest)
+//! with an `http` `accessurl` ([`SovdAdvertiser::from_node_identity_and_bind`]).
+//! The node identity is a name the device holds from first boot, unique per
+//! device, so fresh devices on one link never collide.
 //!
 //! ## Usage
 //! ```no_run
 //! # fn leaf_der() -> Vec<u8> { Vec::new() }
-//! // On the provisioned HTTPS path, with the TLS leaf DER and the bind addr:
-//! if let Some(adv) =
+//! # fn device_key_spki_der() -> Vec<u8> { Vec::new() }
+//! # let provisioned = true;
+//! // HTTPS with the TLS leaf DER, or HTTP with the node identity; plus the bind addr.
+//! let adv = if provisioned {
 //!     sovd_mdns::SovdAdvertiser::from_leaf_and_bind(&leaf_der(), "0.0.0.0:4000")
-//! {
+//! } else {
+//!     let identity = sovd_mdns::node_identity_from_spki_der(&device_key_spki_der());
+//!     sovd_mdns::SovdAdvertiser::from_node_identity_and_bind(&identity, "0.0.0.0:4000")
+//! };
+//! if let Some(adv) = adv {
 //!     match adv.start() {
 //!         Ok(guard) => { /* hold `guard` for the server's lifetime */ }
 //!         Err(e) => tracing::warn!(error = %e, "SOVD mDNS advertise failed"),
@@ -129,15 +140,64 @@ impl SovdAdvertiser {
             port,
         })
     }
+
+    /// Build the advertiser of a server that has no TLS leaf yet and serves
+    /// plain HTTP: the instance / hostname is its node identity (see
+    /// [`node_identity_from_spki_der`]), `identification` the same, and
+    /// `accessurl` is `http://<identity>.local:<port>/vehicle`.
+    ///
+    /// Returns `None` for an empty identity or a bind address without a port.
+    pub fn from_node_identity_and_bind(identity: &str, bind: &str) -> Option<SovdAdvertiser> {
+        if identity.is_empty() {
+            return None;
+        }
+        let port = port_from_bind(bind)?;
+        Some(SovdAdvertiser {
+            instance: identity.to_string(),
+            port,
+            identification: identity.to_string(),
+            accessurl: format!("http://{identity}.local:{port}{ACCESS_URL_PATH}"),
+        })
+    }
+}
+
+/// The node identity: the SHA-256 of the device key's DER SubjectPublicKeyInfo
+/// (the digest an ECU id is, in hex) in RFC 4648 Base32, lowercase and unpadded
+/// — 52 characters of `a-z2-7`, one DNS label. The name a server announces
+/// before its TLS leaf exists, and the CN it asks the issuer for.
+pub fn node_identity_from_spki_der(spki_der: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    base32_lower_unpadded(&Sha256::digest(spki_der))
+}
+
+/// RFC 4648 Base32, lowercase alphabet, no padding.
+fn base32_lower_unpadded(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut out = String::with_capacity(bytes.len().div_ceil(5) * 8);
+    let (mut buffer, mut bits) = (0u32, 0u32);
+    for &byte in bytes {
+        buffer = (buffer << 8) | u32::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(ALPHABET[((buffer >> bits) & 0x1f) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        out.push(ALPHABET[((buffer << (5 - bits)) & 0x1f) as usize] as char);
+    }
+    out
 }
 
 /// Derive the DNS-SD instance id from a TLS leaf certificate (DER).
 ///
-/// Prefers the `<id>.local` `subjectAltName` dNSName (stripping the `.local`
-/// suffix): that is exactly the hostname a discovery client dials and verifies
-/// against the certificate. Falls back to the subject CommonName (the
-/// identity-tower CA sets both `CN=<device_id>` and the `<device_id>.local`
-/// SAN). Returns `None` if neither is present / parseable.
+/// The host label of the first `subjectAltName` dNSName of a shape the minters
+/// name devices with — `<id>`, `<id>.local` or `<id>._sovd._tcp.local`, `<id>`
+/// one DNS label of letters, digits and `-` — the hostname a discovery client
+/// dials and verifies against the certificate. drive-security lists
+/// `<id>._sovd._tcp.local` first, the identity-tower CA a bare `<id>`. Other
+/// shapes (wildcards, other domains) never name the node. Falls back to the
+/// subject CommonName if it is such a label. Returns `None` otherwise.
 pub fn instance_from_cert_der(der: &[u8]) -> Option<String> {
     use const_oid::db::rfc4519::COMMON_NAME;
     use x509_cert::der::Decode;
@@ -146,14 +206,12 @@ pub fn instance_from_cert_der(der: &[u8]) -> Option<String> {
 
     let cert = Certificate::from_der(der).ok()?;
 
-    // 1) Prefer the `<id>.local` SAN dNSName (what TLS clients verify).
+    // 1) The host label of the first device-shaped SAN dNSName (what TLS clients verify).
     if let Ok(Some((_critical, san))) = cert.tbs_certificate.get::<SubjectAltName>() {
         for name in san.0.iter() {
             if let GeneralName::DnsName(dns) = name {
-                if let Some(id) = dns.as_str().strip_suffix(".local") {
-                    if !id.is_empty() {
-                        return Some(id.to_string());
-                    }
+                if let Some(label) = device_label(dns.as_str()) {
+                    return Some(label.to_string());
                 }
             }
         }
@@ -167,8 +225,19 @@ pub fn instance_from_cert_der(der: &[u8]) -> Option<String> {
         .flat_map(|rdn| rdn.0.iter())
         .find(|atv| atv.oid == COMMON_NAME)
         .and_then(|atv| std::str::from_utf8(atv.value.value()).ok())
-        .filter(|s| !s.is_empty())
+        .filter(|s| is_dns_label(s))
         .map(|s| s.to_string())
+}
+
+/// `<id>`, `<id>.local` or `<id>._sovd._tcp.local` → `<id>`, if `<id>` is a DNS label.
+fn device_label(name: &str) -> Option<&str> {
+    let (label, suffix) = name.split_at(name.find('.').unwrap_or(name.len()));
+    (is_dns_label(label) && matches!(suffix, "" | ".local" | "._sovd._tcp.local")).then_some(label)
+}
+
+/// One DNS label: 1–63 ASCII letters, digits and `-`.
+fn is_dns_label(s: &str) -> bool {
+    (1..=63).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 /// Parse the port from a bind address like `"0.0.0.0:4000"` or `"[::]:4000"`.
@@ -203,9 +272,95 @@ mod tests {
         "/tests/fixtures/leaf-cvc-host-rig1.der"
     ));
 
+    // A drive-security-shaped leaf: CN=4c6ff3d8a60d6655 with SAN dNSNames
+    // [4c6ff3d8a60d6655._sovd._tcp.local, 4c6ff3d8a60d6655.local], service SAN first.
+    const SERVICE_SAN_FIRST_DER: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/leaf-drive-security-service-san-first.der"
+    ));
+
+    #[test]
+    fn instance_is_the_host_label_of_a_service_instance_san() {
+        assert_eq!(
+            instance_from_cert_der(SERVICE_SAN_FIRST_DER).as_deref(),
+            Some("4c6ff3d8a60d6655")
+        );
+    }
+
+    #[test]
+    fn only_device_shaped_names_name_the_node() {
+        for (name, label) in [
+            ("cvc-host-rig1", Some("cvc-host-rig1")),
+            ("cvc-host-rig1.local", Some("cvc-host-rig1")),
+            (
+                "4c6ff3d8a60d6655._sovd._tcp.local",
+                Some("4c6ff3d8a60d6655"),
+            ),
+            ("*.local", None),
+            ("cvc.example.com", None),
+            ("cvc.local.", None),
+            (".local", None),
+            ("", None),
+            ("under_score.local", None),
+            (&"a".repeat(64), None),
+        ] {
+            assert_eq!(device_label(name), label, "{name:?}");
+        }
+        assert!(is_dns_label(&"a".repeat(63)));
+    }
+
+    #[test]
+    fn base32_matches_rfc4648() {
+        // RFC 4648 §10 test vectors, lowercase and without padding.
+        for (input, encoded) in [
+            ("", ""),
+            ("f", "my"),
+            ("fo", "mzxq"),
+            ("foo", "mzxw6"),
+            ("foob", "mzxw6yq"),
+            ("fooba", "mzxw6ytb"),
+            ("foobar", "mzxw6ytboi"),
+        ] {
+            assert_eq!(
+                base32_lower_unpadded(input.as_bytes()),
+                encoded,
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn node_identity_is_the_whole_digest_in_base32() {
+        // The digests of "" and "abc", as the traton-one-os SOVD server names them.
+        assert_eq!(
+            node_identity_from_spki_der(b""),
+            "4oymiquy7qobjgx36tejs35zeqt24qpemsnzgtfeswmrw6csxbkq"
+        );
+        assert_eq!(
+            node_identity_from_spki_der(b"abc"),
+            "xj4bnp4pahh6uqkbidpf3lrceoyagyndsylxvhfucd7wd4qacwwq"
+        );
+    }
+
+    #[test]
+    fn from_node_identity_and_bind_advertises_plain_http() {
+        let identity = node_identity_from_spki_der(b"abc");
+        let adv = SovdAdvertiser::from_node_identity_and_bind(&identity, "0.0.0.0:4000")
+            .expect("identity and port");
+        assert_eq!(adv.instance, identity);
+        assert_eq!(adv.port, 4000);
+        assert_eq!(adv.identification, identity);
+        assert_eq!(
+            adv.accessurl,
+            format!("http://{identity}.local:4000/vehicle")
+        );
+        assert!(SovdAdvertiser::from_node_identity_and_bind("", "0.0.0.0:4000").is_none());
+        assert!(SovdAdvertiser::from_node_identity_and_bind(&identity, "0.0.0.0").is_none());
+    }
+
     #[test]
     fn instance_parsed_from_local_san() {
-        // The `.local` SAN is preferred and the `.local` suffix is stripped.
+        // The first SAN's host label.
         assert_eq!(
             instance_from_cert_der(LEAF_DER).as_deref(),
             Some("cvc-host-rig1")

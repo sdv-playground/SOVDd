@@ -51,6 +51,20 @@ pub struct ComponentDetailResponse {
     pub bulk_data: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub configurations: Option<String>,
+    /// A node's subcomponents collection (node topology only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subcomponents: Option<String>,
+}
+
+/// The document of a node without a host backend: it has no resources of its own,
+/// only its subcomponents.
+#[derive(Serialize)]
+pub struct NodeDetailResponse {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub entity_type: String,
+    pub subcomponents: String,
 }
 
 #[derive(Serialize)]
@@ -126,6 +140,21 @@ pub async fn list_components(
     client: Option<Extension<ClientContext>>,
 ) -> Json<ComponentsResponse> {
     let client = client.map(|Extension(c)| c);
+    if let Some(node) = state.node() {
+        // A node is the server's one component. A client sees it when it may access
+        // the node or any of its subcomponents.
+        let items = node_visible(&state, node, client.as_ref())
+            .then(|| ComponentInfo {
+                id: node.id().to_owned(),
+                name: node.name().to_owned(),
+                description: None,
+                entity_type: node_entity_type(&state, node),
+                href: node.href(tree),
+            })
+            .into_iter()
+            .collect();
+        return Json(ComponentsResponse { items });
+    }
     let items: Vec<ComponentInfo> = state
         .backends()
         .iter()
@@ -154,8 +183,111 @@ pub async fn get_component(
     State(state): State<AppState>,
     Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
-) -> Result<Json<ComponentDetailResponse>, ApiError> {
-    let backend = state.get_backend(&component_id)?;
+    client: Option<Extension<ClientContext>>,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::response::IntoResponse;
+    if let Some(node) = state.node().filter(|node| node.id() == component_id) {
+        // Scope-checked here, not by the authorizer: the node's document is open to the
+        // clients the listing shows the node to.
+        if !node_visible(&state, node, client.as_ref().map(|Extension(c)| c)) {
+            return Err(ApiError::Forbidden(format!(
+                "no scope for node {component_id} or any of its subcomponents"
+            )));
+        }
+        // The node: its host backend's document under the node's own URL, or, without
+        // a host, just the way to its subcomponents.
+        let subcomponents = node.subcomponents_href(tree);
+        return Ok(match node.host() {
+            Some(host) => {
+                let mut detail = component_detail(&state, tree, host, node.href(tree))?;
+                detail.id = node.id().to_owned();
+                detail.name = node.name().to_owned();
+                detail.subcomponents = Some(subcomponents);
+                Json(detail).into_response()
+            }
+            None => Json(NodeDetailResponse {
+                id: node.id().to_owned(),
+                name: node.name().to_owned(),
+                entity_type: node_entity_type(&state, node),
+                subcomponents,
+            })
+            .into_response(),
+        });
+    }
+    let base = tree.component(&component_id);
+    Ok(Json(component_detail(&state, tree, &component_id, base)?).into_response())
+}
+
+/// GET {base}/components/{node}/subcomponents — the backends, as the node's subcomponents.
+/// Scope-filtered like the components collection (C-031 non-leakage). 404 for any other
+/// component, and on a server that is not a node.
+pub async fn list_subcomponents(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    Path(component_id): Path<String>,
+    client: Option<Extension<ClientContext>>,
+) -> Result<Json<ComponentsResponse>, ApiError> {
+    let node = state
+        .node()
+        .filter(|node| node.id() == component_id)
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("Component has no subcomponents: {component_id}"))
+        })?;
+    let client = client.map(|Extension(c)| c);
+    let mut items: Vec<ComponentInfo> = state
+        .backends()
+        .iter()
+        .filter(|(id, _)| {
+            client
+                .as_ref()
+                .is_none_or(|c| c.can_access_component(id.as_str()))
+        })
+        .map(|(id, backend)| {
+            let info = backend.entity_info();
+            ComponentInfo {
+                id: id.clone(),
+                name: info.name.clone(),
+                description: info.description.clone(),
+                entity_type: info.entity_type.clone(),
+                href: node.subcomponent_href(tree, id),
+            }
+        })
+        .collect();
+    items.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(Json(ComponentsResponse { items }))
+}
+
+/// Whether a client sees the node: when it may access the node or any of its
+/// subcomponents (no `ClientContext` ⇒ auth disabled ⇒ yes).
+fn node_visible(
+    state: &AppState,
+    node: &crate::NodeTopology,
+    client: Option<&ClientContext>,
+) -> bool {
+    client.is_none_or(|c| {
+        c.can_access_component(node.id())
+            || state.backends().keys().any(|id| c.can_access_component(id))
+    })
+}
+
+/// A node's entity type: its host backend's, or `node` without one.
+fn node_entity_type(state: &AppState, node: &crate::NodeTopology) -> String {
+    node.host()
+        .and_then(|host| state.backends().get(host))
+        .map_or_else(
+            || "node".to_owned(),
+            |backend| backend.entity_info().entity_type.clone(),
+        )
+}
+
+/// The document of backend `component_id`, its resource URLs under `base`.
+fn component_detail(
+    state: &AppState,
+    tree: Tree,
+    component_id: &str,
+    base: String,
+) -> Result<ComponentDetailResponse, ApiError> {
+    let backend = state.get_backend(component_id)?;
     let info = backend.entity_info();
     let caps = backend.capabilities();
     let mut capabilities = CapabilitiesResponse::from(caps);
@@ -172,9 +304,8 @@ pub async fn get_component(
         _ => None,
     };
 
-    let base = tree.component(&component_id);
     let response = ComponentDetailResponse {
-        id: component_id.clone(),
+        id: component_id.to_owned(),
         name: info.name.clone(),
         description: info.description.clone(),
         entity_type: info.entity_type.clone(),
@@ -197,7 +328,8 @@ pub async fn get_component(
         configurations: caps
             .configurations
             .then(|| format!("{base}/configurations")),
+        subcomponents: None,
     };
 
-    Ok(Json(response))
+    Ok(response)
 }

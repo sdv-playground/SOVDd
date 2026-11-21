@@ -12,6 +12,7 @@ use sovd_uds::config::OutputConfig;
 use crate::auth::{AuthContext, Authorizer};
 use crate::error::ApiError;
 use crate::handlers::subscriptions::SubscriptionManager;
+use crate::topology::NodeTopology;
 
 /// Bounded recent-executions cache keyed by `(component_id, op_id, exec_id)`.
 ///
@@ -193,6 +194,10 @@ pub struct UpdatePart {
     /// Backend's file_id from `receive_package_stream`; needed by the
     /// `verify` step which calls `verify_package(file_id)` per part.
     pub file_id: String,
+    /// The uploaded bytes, kept for `GET {update}/bulk-data/{part_id}` when the
+    /// update's kept parts stay within [`crate::handlers::updates::MAX_KEPT_PART_BYTES`]
+    /// together (a manifest); `None` beyond that, the bytes only the backend holds.
+    pub content: Option<axum::body::Bytes>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -372,6 +377,10 @@ pub struct AppState {
     /// §7.5 document. Empty by default; set via
     /// [`AppState::with_capability_extensions`].
     capability_extensions: Arc<CapabilityExtensions>,
+    /// The node this server is, when it serves its backends as the node's
+    /// subcomponents; `None` keeps every backend a top-level component. Set via
+    /// [`AppState::with_node`].
+    node: Option<Arc<NodeTopology>>,
 }
 
 impl AppState {
@@ -389,6 +398,7 @@ impl AppState {
             updates_config: Arc::new(UpdatesConfig::default()),
             auth: Arc::new(AuthContext::default()),
             capability_extensions: Arc::new(CapabilityExtensions::default()),
+            node: None,
         }
     }
 
@@ -409,6 +419,7 @@ impl AppState {
             updates_config: Arc::new(UpdatesConfig::default()),
             auth: Arc::new(AuthContext::default()),
             capability_extensions: Arc::new(CapabilityExtensions::default()),
+            node: None,
         }
     }
 
@@ -430,6 +441,7 @@ impl AppState {
             updates_config: Arc::new(UpdatesConfig::default()),
             auth: Arc::new(AuthContext::default()),
             capability_extensions: Arc::new(CapabilityExtensions::default()),
+            node: None,
         }
     }
 
@@ -472,6 +484,30 @@ impl AppState {
     /// §7.5 doc builder.
     pub fn capability_extensions(&self) -> &CapabilityExtensions {
         &self.capability_extensions
+    }
+
+    /// Serve the backends as the subcomponents of `node` (see [`crate::topology`]). Refused when
+    /// a backend already has the node's id, or the node's host is not a backend. The router the
+    /// state ends up in has to be wrapped in [`crate::with_node_topology`].
+    pub fn with_node(mut self, node: NodeTopology) -> Result<Self, String> {
+        if self.backends.contains_key(node.id()) {
+            return Err(format!(
+                "node id '{}' is also a backend's id; a node's subcomponents need ids of their own",
+                node.id()
+            ));
+        }
+        if let Some(host) = node.host() {
+            if !self.backends.contains_key(host) {
+                return Err(format!("node host '{host}' is not a backend"));
+            }
+        }
+        self.node = Some(Arc::new(node));
+        Ok(self)
+    }
+
+    /// The node this server is, if it serves its backends as subcomponents.
+    pub fn node(&self) -> Option<&Arc<NodeTopology>> {
+        self.node.as_ref()
     }
 
     /// Create AppState from a single backend (for simple single-entity servers)
