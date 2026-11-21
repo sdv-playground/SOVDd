@@ -28,6 +28,9 @@ tracing = { workspace = true }
 # `cargo tree -p sovd-mdns --target aarch64-unknown-nto-qnx710`.
 simple-dns = "0.11"
 socket2 = "0.6"
+# getifaddrs: the responder serves every up, multicast-capable IPv4 interface
+# (supernova's QNX cross-build patches libc, which has it for nto).
+libc = "0.2"
 
 # Off-QNX only: enable socket2's `all` feature (for SO_REUSEPORT) and pull the
 # mature `mdns-sd` stack as the live backend.
