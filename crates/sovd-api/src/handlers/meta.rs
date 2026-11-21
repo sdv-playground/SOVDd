@@ -946,8 +946,8 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
                 "verbs": [
                     "PUT {base}/components/{id}/updates/{update_id}/x-update-commit",
                     "PUT {base}/components/{id}/updates/{update_id}/x-update-rollback",
-                    "POST {base}/operations/x-update-commit/executions (served by the embedding machine manager)",
-                    "POST {base}/operations/x-update-rollback/executions (served by the embedding machine manager)"
+                    "POST {base}/operations/x-update-commit/executions (served by the embedding machine manager; a node's: POST {base}/components/{node}/operations/x-update-commit/executions)",
+                    "POST {base}/operations/x-update-rollback/executions (served by the embedding machine manager; a node's: POST {base}/components/{node}/operations/x-update-rollback/executions)"
                 ],
                 "fields": ["x-update.state", "x-update.reset_kind", "capabilities.x-update.verdict"],
                 "spec":   "docs/x-update.md",

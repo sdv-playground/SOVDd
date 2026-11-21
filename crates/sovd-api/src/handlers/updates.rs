@@ -1678,11 +1678,15 @@ fn refuse_node_verdict(
         Some(update_id) => format!("update '{update_id}' on '{component_id}'"),
         None => format!("component '{component_id}'"),
     };
-    let base = tree.base();
+    // The node's operations: its own under a node topology, else at the root.
+    let at = state
+        .node()
+        .map(|node| node.href(tree))
+        .unwrap_or_else(|| tree.base().to_string());
     Err(ApiError::PreconditionFailed(format!(
         "{subject} belongs to a node transaction; settle it with \
-         POST {base}/operations/x-update-commit/executions or \
-         POST {base}/operations/x-update-rollback/executions"
+         POST {at}/operations/x-update-commit/executions or \
+         POST {at}/operations/x-update-rollback/executions"
     )))
 }
 
