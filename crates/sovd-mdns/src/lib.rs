@@ -12,24 +12,35 @@
 //!   `<instance>.local` verifies the server certificate with ordinary hostname
 //!   checking;
 //! - TXT records `identification=<unique id>` and
-//!   `accessurl=https://<host>:<port>/vehicle` (the SOVD API base — the parent
+//!   `accessurl=<scheme>://<host>:<port>/v1` (the SOVD API base — the parent
 //!   of the `version-info` resource);
 //! - SRV port = the SOVD server's actual bind port (a parameter, never
 //!   hardcoded).
 //!
-//! The instance id is derived from the TLS leaf certificate (see
-//! [`instance_from_cert_der`]) so the advertised hostname is guaranteed to match
-//! what TLS clients verify. An unprovisioned device (no leaf) is not a
-//! discoverable SOVD server and must not advertise — the integration only calls
-//! the advertiser on the provisioned HTTPS path.
+//! The server is advertised whether it is provisioned or not: the `accessurl`
+//! scheme ([`Scheme`]) tells the client which transport to dial — `http` before
+//! enrolment, `https` once a TLS leaf is installed.
+//!
+//! The two identity roles are resolved separately from the [`Identity`]
+//! sources the caller passes (see [`SovdAdvertiser::new`]):
+//! - instance / hostname — what TLS clients verify — come from the TLS leaf
+//!   (see [`instance_from_cert_der`]) when there is one, else the configured
+//!   server identification, else the OS hostname. TLS truth comes first: the
+//!   tower issues role-prefixed SANs (e.g. `cvc-host-<hash>`) that a device
+//!   cannot know before enrolment, so the hostname may change at the
+//!   http→https switch, but on https it always matches the certificate;
+//! - TXT `identification` — the stable id of the SOVD server — is the
+//!   configured identification (verbatim) when set, else the instance, so it
+//!   does not change across enrolment.
 //!
 //! ## Usage
 //! ```no_run
 //! # fn leaf_der() -> Vec<u8> { Vec::new() }
-//! // On the provisioned HTTPS path, with the TLS leaf DER and the bind addr:
-//! if let Some(adv) =
-//!     sovd_mdns::SovdAdvertiser::from_leaf_and_bind(&leaf_der(), "0.0.0.0:4000")
-//! {
+//! use sovd_mdns::{Identity, Scheme, SovdAdvertiser};
+//! // Hostname from the leaf (else `cvc`, else the OS hostname); identification `cvc`:
+//! let der = leaf_der();
+//! let ids = [Identity::Configured("cvc"), Identity::Leaf(&der), Identity::Hostname];
+//! if let Some(adv) = SovdAdvertiser::new(&ids, Scheme::Https, "0.0.0.0:4000") {
 //!     match adv.start() {
 //!         Ok(guard) => { /* hold `guard` for the server's lifetime */ }
 //!         Err(e) => tracing::warn!(error = %e, "SOVD mDNS advertise failed"),
@@ -74,12 +85,57 @@ pub const SERVICE_TYPE: &str = "_sovd._tcp.local.";
 
 /// The SOVD API base path appended to the host in the `accessurl` TXT record
 /// (ISO 17978-3 §5.11.4 — the parent of the `version-info` resource).
-pub const ACCESS_URL_PATH: &str = "/vehicle";
+pub const ACCESS_URL_PATH: &str = "/v1";
+
+/// The transport the SOVD server is reachable on — the `accessurl` scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scheme {
+    /// Plain HTTP (unprovisioned / dev, or TLS terminated by a fronting proxy).
+    Http,
+    /// HTTPS with the provisioned TLS leaf.
+    Https,
+}
+
+impl fmt::Display for Scheme {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Scheme::Http => "http",
+            Scheme::Https => "https",
+        })
+    }
+}
+
+/// A source for the DNS-SD instance id and TXT `identification`. See
+/// [`SovdAdvertiser::new`] for how a list of these is resolved.
+#[derive(Debug, Clone)]
+pub enum Identity<'a> {
+    /// Configured server identification (the device id the tower puts in the
+    /// leaf SAN), e.g. `cvc`.
+    Configured(&'a str),
+    /// Derive from the TLS leaf (DER): `<id>.local` SAN, else CN (see
+    /// [`instance_from_cert_der`]).
+    Leaf(&'a [u8]),
+    /// The OS hostname (`/proc/sys/kernel/hostname`, else `/etc/hostname`).
+    Hostname,
+}
+
+impl Identity<'_> {
+    /// The sanitised instance this source yields, if any.
+    fn instance(&self) -> Option<String> {
+        let raw = match self {
+            Identity::Configured(id) => Some(id.to_string()),
+            Identity::Leaf(der) => instance_from_cert_der(der),
+            Identity::Hostname => os_hostname(),
+        }?;
+        dns_label(&raw)
+    }
+}
 
 /// A request to advertise one SOVD server over mDNS / DNS-SD.
 ///
-/// Build directly, or via [`SovdAdvertiser::from_leaf_and_bind`], which derives
-/// the conformant fields from the TLS leaf certificate plus the server's bind
+/// Build directly, or via [`SovdAdvertiser::new`], which resolves the instance
+/// and identification from a list of [`Identity`] sources and derives the
+/// conformant fields from them, the transport [`Scheme`] and the server's bind
 /// address.
 #[derive(Debug, Clone)]
 pub struct SovdAdvertiser {
@@ -92,7 +148,7 @@ pub struct SovdAdvertiser {
     /// id or VIN).
     pub identification: String,
     /// TXT `accessurl` — the SOVD API base, e.g.
-    /// `https://cvc-host-rig1.local:4000/vehicle`.
+    /// `https://cvc-host-rig1.local:4000/v1`.
     pub accessurl: String,
 }
 
@@ -104,31 +160,93 @@ impl SovdAdvertiser {
         advertiser::start(self)
     }
 
-    /// Build the conformant advertiser from the TLS leaf certificate (DER) and
-    /// the SOVD server's bind address (e.g. `"0.0.0.0:4000"`).
+    /// Build the conformant advertiser from an ordered list of identity
+    /// sources, the transport scheme and the SOVD server's bind address (e.g.
+    /// `"0.0.0.0:4000"`).
     ///
-    /// The instance / hostname come from the certificate (see
-    /// [`instance_from_cert_der`]) so the advertised `<instance>.local` matches
-    /// the leaf SAN that TLS clients verify. `identification` defaults to the
-    /// device id; `accessurl` is `https://<instance>.local:<port>/vehicle`.
+    /// Instance / `<instance>.local` hostname: the first `Leaf` that resolves,
+    /// else the first `Configured`, else the first `Hostname` — whatever order
+    /// the list is in. Each candidate is sanitised to a DNS label (lowercase
+    /// `[a-z0-9-]`, no leading/trailing `-`, ≤63 bytes — other characters are
+    /// replaced by `-`); one that sanitises to nothing is skipped.
+    /// `identification` is the first non-empty `Configured` verbatim, else the
+    /// instance. `accessurl` is `<scheme>://<instance>.local:<port>/v1`.
     ///
-    /// Returns `None` when the certificate carries no parseable instance id (an
-    /// unprovisioned / non-conformant leaf) or the bind address has no port —
-    /// the caller must then not advertise.
-    pub fn from_leaf_and_bind(leaf_der: &[u8], bind: &str) -> Option<SovdAdvertiser> {
-        let instance = instance_from_cert_der(leaf_der)?;
+    /// Returns `None` when no source yields an instance or the bind address has
+    /// no port — the caller must then not advertise.
+    pub fn new(identities: &[Identity<'_>], scheme: Scheme, bind: &str) -> Option<SovdAdvertiser> {
+        let first = |want: fn(&Identity<'_>) -> bool| {
+            identities
+                .iter()
+                .filter(|i| want(i))
+                .find_map(Identity::instance)
+        };
+        let leaf = first(|i| matches!(i, Identity::Leaf(_)));
+        let configured = first(|i| matches!(i, Identity::Configured(_)));
+        if let (Some(leaf), Some(configured)) = (&leaf, &configured) {
+            if leaf != configured {
+                tracing::info!(
+                    leaf = %leaf,
+                    configured = %configured,
+                    "SOVD mDNS: TLS leaf identity differs from configured identification; \
+                     hostname follows the leaf"
+                );
+            }
+        }
+        let instance = leaf
+            .or(configured)
+            .or_else(|| first(|i| matches!(i, Identity::Hostname)))?;
         let port = port_from_bind(bind)?;
         let host = format!("{instance}.local");
+        // ISO 17978-3 §5.11.4 wants a *unique id of the SOVD server* here,
+        // "such as the VIN": the configured identification when set (stable
+        // across enrolment), else the device id the hostname carries.
+        let identification = identities
+            .iter()
+            .find_map(|i| match i {
+                Identity::Configured(id) if !id.is_empty() => Some(id.to_string()),
+                _ => None,
+            })
+            .unwrap_or_else(|| instance.clone());
         Some(SovdAdvertiser {
-            // ISO 17978-3 §5.11.4 wants a *unique id of the SOVD server* here,
-            // "such as the VIN". We use the device id (the cert identity); a
-            // vehicle-level VIN would be equally conformant once one exists.
-            identification: instance.clone(),
-            accessurl: format!("https://{host}:{port}{ACCESS_URL_PATH}"),
+            identification,
+            accessurl: format!("{scheme}://{host}:{port}{ACCESS_URL_PATH}"),
             instance,
             port,
         })
     }
+
+    /// Build the HTTPS advertiser from the TLS leaf certificate (DER) alone —
+    /// `new(&[Identity::Leaf(leaf_der)], Scheme::Https, bind)`.
+    pub fn from_leaf_and_bind(leaf_der: &[u8], bind: &str) -> Option<SovdAdvertiser> {
+        Self::new(&[Identity::Leaf(leaf_der)], Scheme::Https, bind)
+    }
+}
+
+/// The OS hostname, trimmed: `/proc/sys/kernel/hostname`, else `/etc/hostname`.
+fn os_hostname() -> Option<String> {
+    ["/proc/sys/kernel/hostname", "/etc/hostname"]
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
+        .find(|s| !s.is_empty())
+}
+
+/// Sanitise `raw` into a DNS label: lowercase, every character outside
+/// `[a-z0-9-]` replaced by `-`, leading/trailing `-` trimmed, at most 63 bytes.
+/// `None` if nothing is left.
+fn dns_label(raw: &str) -> Option<String> {
+    let mapped: String = raw
+        .chars()
+        .map(|c| match c.to_ascii_lowercase() {
+            c @ ('a'..='z' | '0'..='9' | '-') => c,
+            _ => '-',
+        })
+        .collect();
+    let trimmed = mapped.trim_matches('-');
+    // All ASCII now, so byte truncation is char-safe.
+    let label = trimmed[..trimmed.len().min(63)].trim_end_matches('-');
+    (!label.is_empty()).then(|| label.to_string())
 }
 
 /// Derive the DNS-SD instance id from a TLS leaf certificate (DER).
@@ -225,7 +343,7 @@ mod tests {
         assert_eq!(adv.instance, "cvc-host-rig1");
         assert_eq!(adv.port, 4000);
         assert_eq!(adv.identification, "cvc-host-rig1");
-        assert_eq!(adv.accessurl, "https://cvc-host-rig1.local:4000/vehicle");
+        assert_eq!(adv.accessurl, "https://cvc-host-rig1.local:4000/v1");
     }
 
     #[test]
@@ -233,13 +351,95 @@ mod tests {
         // The SRV port follows the bind addr — never a hardcoded default.
         let adv = SovdAdvertiser::from_leaf_and_bind(LEAF_DER, "127.0.0.1:8443").unwrap();
         assert_eq!(adv.port, 8443);
-        assert_eq!(adv.accessurl, "https://cvc-host-rig1.local:8443/vehicle");
+        assert_eq!(adv.accessurl, "https://cvc-host-rig1.local:8443/v1");
     }
 
     #[test]
     fn unprovisioned_or_portless_does_not_advertise() {
         assert!(SovdAdvertiser::from_leaf_and_bind(b"junk", "0.0.0.0:4000").is_none());
         assert!(SovdAdvertiser::from_leaf_and_bind(LEAF_DER, "0.0.0.0").is_none());
+    }
+
+    #[test]
+    fn new_sets_the_accessurl_scheme_from_the_transport() {
+        let ids = [Identity::Configured("cvc")];
+        let http = SovdAdvertiser::new(&ids, Scheme::Http, "0.0.0.0:9080").unwrap();
+        assert_eq!(http.accessurl, "http://cvc.local:9080/v1");
+        let https = SovdAdvertiser::new(&ids, Scheme::Https, "0.0.0.0:4000").unwrap();
+        assert_eq!(https.accessurl, "https://cvc.local:4000/v1");
+        assert_eq!(https.instance, "cvc");
+        assert_eq!(https.identification, "cvc");
+    }
+
+    fn adv(ids: &[Identity<'_>]) -> Option<SovdAdvertiser> {
+        SovdAdvertiser::new(ids, Scheme::Https, "0.0.0.0:4000")
+    }
+
+    #[test]
+    fn configured_and_leaf_hostname_from_leaf_identification_from_config() {
+        // Whatever the list order, the hostname follows the TLS leaf.
+        let ids = [
+            Identity::Configured("cvc"),
+            Identity::Leaf(LEAF_DER),
+            Identity::Hostname,
+        ];
+        let a = adv(&ids).unwrap();
+        assert_eq!(a.instance, "cvc-host-rig1");
+        assert_eq!(a.identification, "cvc");
+        assert_eq!(a.accessurl, "https://cvc-host-rig1.local:4000/v1");
+    }
+
+    #[test]
+    fn leaf_only() {
+        let a = adv(&[Identity::Leaf(LEAF_DER), Identity::Hostname]).unwrap();
+        assert_eq!(a.instance, "cvc-host-rig1");
+        assert_eq!(a.identification, "cvc-host-rig1");
+    }
+
+    #[test]
+    fn configured_only() {
+        // Unenrolled: no (usable) leaf, so the configured id is the hostname.
+        let a = adv(&[
+            Identity::Configured("CVC_1"),
+            Identity::Leaf(b"junk"),
+            Identity::Hostname,
+        ])
+        .unwrap();
+        assert_eq!(a.instance, "cvc-1");
+        assert_eq!(a.identification, "CVC_1", "identification is verbatim");
+    }
+
+    #[test]
+    fn hostname_only() {
+        // An unusable configured id falls through to the OS hostname for the
+        // instance, but is still the (verbatim) identification.
+        let expected = os_hostname().as_deref().and_then(dns_label);
+        let a = adv(&[Identity::Hostname]);
+        assert_eq!(a.as_ref().map(|a| a.instance.clone()), expected);
+        assert_eq!(a.map(|a| a.identification), expected);
+        let a = adv(&[Identity::Configured("--"), Identity::Hostname]);
+        assert_eq!(a.as_ref().map(|a| a.instance.clone()), expected);
+    }
+
+    #[test]
+    fn dns_label_sanitises_or_rejects() {
+        assert_eq!(dns_label("CVC").as_deref(), Some("cvc"));
+        assert_eq!(dns_label("cvc_host.rig1").as_deref(), Some("cvc-host-rig1"));
+        assert_eq!(dns_label("-_cvc_-").as_deref(), Some("cvc"));
+        assert_eq!(dns_label(&"a".repeat(70)).map(|s| s.len()), Some(63));
+        assert_eq!(dns_label(""), None);
+        assert_eq!(dns_label("___"), None);
+        assert!(
+            SovdAdvertiser::new(&[Identity::Configured("")], Scheme::Http, "0.0.0.0:1").is_none()
+        );
+        assert!(SovdAdvertiser::new(&[], Scheme::Http, "0.0.0.0:1").is_none());
+    }
+
+    #[test]
+    fn new_without_a_port_does_not_advertise() {
+        assert!(
+            SovdAdvertiser::new(&[Identity::Configured("cvc")], Scheme::Http, "0.0.0.0").is_none()
+        );
     }
 
     #[test]

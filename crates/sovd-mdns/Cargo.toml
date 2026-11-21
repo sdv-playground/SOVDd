@@ -3,7 +3,7 @@ name = "sovd-mdns"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Conformant mDNS / DNS-SD advertiser for the SOVD server (ISO 17978-3 §5.11): registers _sovd._tcp.local. with the cert-derived <id>.local hostname plus identification/accessurl TXT records. Off-QNX it uses mdns-sd; on QNX (nto) a hand-rolled pure-Rust responder (simple-dns + socket2)."
+description = "Conformant mDNS / DNS-SD advertiser for the SOVD server (ISO 17978-3 §5.11): registers _sovd._tcp.local. on both http and https with an <id>.local hostname (configured id, else TLS leaf SAN, else OS hostname) plus identification/accessurl TXT records. Off-QNX it uses mdns-sd; on QNX (nto) a hand-rolled pure-Rust responder (simple-dns + socket2)."
 
 [lib]
 path = "src/lib.rs"

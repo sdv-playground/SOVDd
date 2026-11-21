@@ -17,12 +17,12 @@ fn main() {
     let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(30);
 
     let host = format!("{instance}.local");
-    let adv = sovd_mdns::SovdAdvertiser {
-        identification: instance.clone(),
-        accessurl: format!("https://{host}:{port}/vehicle"),
-        instance: instance.clone(),
-        port,
-    };
+    let adv = sovd_mdns::SovdAdvertiser::new(
+        &[sovd_mdns::Identity::Configured(&instance)],
+        sovd_mdns::Scheme::Http,
+        &format!("0.0.0.0:{port}"),
+    )
+    .expect("instance is a valid DNS label");
 
     let _guard = sovd_mdns::responder::start(adv).expect("start mDNS responder");
     eprintln!(

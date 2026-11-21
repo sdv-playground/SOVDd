@@ -21,8 +21,12 @@ impl Drop for AdvertiserGuard {
         // Best-effort graceful teardown: `unregister` queues the goodbye
         // (TTL-0) announcements, then `shutdown` stops the daemon thread. The
         // daemon drains its command queue in order, so the goodbye is emitted
-        // before the thread exits.
-        let _ = self.daemon.unregister(&self.fullname);
+        // before the thread exits. Wait (bounded) for the unregister reply —
+        // the daemon multicasts the goodbye on every interface before replying
+        // — so a process exiting right after the drop doesn't cut it short.
+        if let Ok(done) = self.daemon.unregister(&self.fullname) {
+            let _ = done.recv_timeout(std::time::Duration::from_secs(1));
+        }
         let _ = self.daemon.shutdown();
     }
 }
