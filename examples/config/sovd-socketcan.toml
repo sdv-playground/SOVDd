@@ -56,6 +56,3 @@ max_periodic_dids = 16
 slow_hz = 1
 medium_hz = 5
 fast_hz = 10
-
-[ecu.vtx_ecm.parameters]
-config_file = "parameters/vtx_ecm.toml"
