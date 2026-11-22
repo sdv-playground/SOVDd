@@ -318,6 +318,9 @@ pub struct CapabilityExtensions {
     pub paths: serde_json::Map<String, serde_json::Value>,
     /// Schema name → schema object, merged into `components/schemas`.
     pub schemas: serde_json::Map<String, serde_json::Value>,
+    /// Like `paths`, for routes the embedder serves on `/v1` only: listed in
+    /// `/v1` docs and never in `/vehicle/v1` ones. Set via [`Self::with_v1_paths`].
+    pub v1_paths: serde_json::Map<String, serde_json::Value>,
 }
 
 impl CapabilityExtensions {
@@ -336,12 +339,24 @@ impl CapabilityExtensions {
             .and_then(|v| v.as_object())
             .cloned()
             .unwrap_or_default();
-        Self { paths, schemas }
+        Self {
+            paths,
+            schemas,
+            v1_paths: Default::default(),
+        }
+    }
+
+    /// These extensions with `v1_paths` (path templates, `{param}` form, →
+    /// OpenAPI Path Item Object) contributed for `/v1` only (see
+    /// [`Self::v1_paths`]). Builder-style consume + return.
+    pub fn with_v1_paths(mut self, v1_paths: serde_json::Map<String, serde_json::Value>) -> Self {
+        self.v1_paths = v1_paths;
+        self
     }
 
     /// True when nothing has been contributed.
     pub fn is_empty(&self) -> bool {
-        self.paths.is_empty() && self.schemas.is_empty()
+        self.paths.is_empty() && self.schemas.is_empty() && self.v1_paths.is_empty()
     }
 }
 

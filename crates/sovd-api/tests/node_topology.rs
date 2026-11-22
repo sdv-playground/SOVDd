@@ -1033,6 +1033,62 @@ async fn the_v1_docs_list_the_node_forms_only() {
 }
 
 #[tokio::test]
+async fn v1_only_contributed_paths_are_listed_on_v1_only() {
+    let ordinary = serde_json::json!({ "get": { "summary": "Update state" } });
+    let status_row = serde_json::json!({ "get": { "summary": "Node status" } });
+    let only_v1 = serde_json::json!({ "get": { "summary": "Boot id" } });
+    let extensions = || {
+        sovd_api::CapabilityExtensions::from_openapi(&serde_json::json!({
+            "paths": { "/vehicle/v1/data/x-update-state": ordinary },
+        }))
+    };
+    let v1_paths = serde_json::json!({
+        "/v1/status": status_row,
+        "/v1/data/x-boot-id": only_v1,
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let state = || {
+        members(&["vm1"]).with_capability_extensions(extensions().with_v1_paths(v1_paths.clone()))
+    };
+    let plain = members(&["vm1"]).with_capability_extensions(extensions());
+    let flat = flat_server(state()).await;
+    let node = node_server(state()).await;
+
+    // Node-less: flat on `/v1`, the ordinary row on both trees.
+    let (_, body) = get(&flat, "/v1/docs", None).await;
+    let paths = &json(&body)["paths"];
+    assert_eq!(paths["/v1/status"], status_row);
+    assert_eq!(paths["/v1/data/x-boot-id"], only_v1);
+    assert_eq!(paths["/v1/data/x-update-state"], ordinary);
+    // With a node: the node form.
+    let (_, body) = get(&node, "/v1/docs", None).await;
+    let paths = &json(&body)["paths"];
+    assert_eq!(paths["/v1/components/cvc/status"], status_row);
+    assert_eq!(paths["/v1/components/cvc/data/x-boot-id"], only_v1);
+    assert_eq!(paths["/v1/components/cvc/data/x-update-state"], ordinary);
+    assert!(paths.get("/v1/status").is_none());
+
+    // Never in the legacy doc, which is that of the ordinary rows alone.
+    let (_, reference) = get(&flat_server(plain).await, "/vehicle/v1/docs", None).await;
+    for server in [&flat, &node] {
+        let (status, legacy) = get(server, "/vehicle/v1/docs", None).await;
+        assert_eq!(status, 200);
+        assert_eq!(legacy, reference);
+        let legacy = json(&legacy);
+        assert_eq!(legacy["paths"]["/vehicle/v1/data/x-update-state"], ordinary);
+        assert!(legacy["paths"].get("/vehicle/v1/status").is_none());
+        assert!(legacy["paths"].get("/vehicle/v1/data/x-boot-id").is_none());
+    }
+
+    // They feed the node-level collections like the ordinary rows.
+    let (status, body) = get(&node, "/v1/components/cvc/data", None).await;
+    assert_eq!(status, 200);
+    assert_eq!(ids(&json(&body)), ["x-boot-id", "x-update-state"]);
+}
+
+#[tokio::test]
 async fn the_component_scope_applies_through_the_node_form() {
     let state = members(&["vm1", "vm2"]).with_authorizer(Arc::new(ScopedAuthorizer));
     let server = node_server(state).await;

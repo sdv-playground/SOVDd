@@ -470,7 +470,14 @@ but does not describe is not listed. SOVDd registers no route for the collection
 `GET /v1/data` / `GET /v1/operations` reaches the router's fallback when no embedder route serves
 it, and the fallback answers the listing (on a node server only; a node-less server's `/v1/data` stays
 404). So an embedder route for the root collection, merged in like any other, wins without a
-conflict. Unlike gateway children (`/apps/...`, above), subcomponents are the server's own
+conflict.
+
+A contributed row is listed on both trees: a path under either base is rebased onto the tree
+documented, and a path under neither is copied into both. A route the embedder serves on `/v1` only
+(e.g. its `GET /v1/status`, the node status) is contributed through
+`CapabilityExtensions::with_v1_paths(..)` (the `v1_paths` field) instead: those rows are listed in
+`/v1/docs` (in the node form on a node server, like every other row) and never in
+`/vehicle/v1/docs`, and they feed the node-level collections like the ordinary rows. Unlike gateway children (`/apps/...`, above), subcomponents are the server's own
 backends, not entities behind one of them.
 
 ---

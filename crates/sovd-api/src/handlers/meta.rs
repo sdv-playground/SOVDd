@@ -724,7 +724,8 @@ pub fn build_capability_doc_ext(
 ///
 /// `servers` is `tree`'s base and every `PATHS` template is rendered under
 /// it ([`render_template`]). A contributed path under either base is rebased
-/// onto `tree`; any other contributed path is kept verbatim.
+/// onto `tree`; any other contributed path is kept verbatim. The `/v1`-only
+/// `extensions.v1_paths` are merged likewise on [`Tree::V1`] only.
 ///
 /// `scope == None` → the global document: every entry in `PATHS`.
 ///
@@ -803,8 +804,10 @@ pub fn build_capability_doc_for(
     }
 
     // Merge embedder-contributed path items, scoped identically to native
-    // paths. Their content is opaque here — the embedder owns its meaning.
-    for (template, item) in &extensions.paths {
+    // paths, the `/v1`-only ones on `/v1` only. Their content is opaque here —
+    // the embedder owns its meaning.
+    let v1_paths = extensions.v1_paths.iter().filter(|_| tree == Tree::V1);
+    for (template, item) in extensions.paths.iter().chain(v1_paths) {
         let template = match Tree::split_path(template) {
             Some((_, rest)) => format!("{}{rest}", tree.base()),
             None => template.clone(),

@@ -242,7 +242,8 @@ pub struct NodeItem {
 /// GET /v1/components/{node}/data and /v1/components/{node}/operations (node
 /// topology only, `collection` being `"data"` or `"operations"`), when no
 /// embedder route serves the root form: the node-level items the embedder
-/// contributes to the capability description ([`AppState::with_capability_extensions`]),
+/// contributes to the capability description ([`AppState::with_capability_extensions`],
+/// `paths` and `v1_paths` alike),
 /// a `GET {base}/data/{item}` path an item of `data`, a
 /// `{base}/operations/{op}[/executions]` path one of `operations` (either
 /// base). An item's `name` is its path's summary (the `{op}` path's `get`
@@ -262,7 +263,8 @@ pub(crate) fn node_collection(
         )));
     }
     let mut names = std::collections::BTreeMap::<String, Option<String>>::new();
-    for (template, item) in &state.capability_extensions().paths {
+    let extensions = state.capability_extensions();
+    for (template, item) in extensions.paths.iter().chain(&extensions.v1_paths) {
         let Some(rest) = Tree::split_path(template)
             .and_then(|(_, rest)| rest.strip_prefix(&format!("/{collection}/")))
         else {
