@@ -226,20 +226,24 @@ async fn main() -> anyhow::Result<()> {
              tokens are NOT encrypted in transit"
         );
     }
+    // Self-advertise this SOVD endpoint over mDNS / DNS-SD (ISO 17978-3 §5.11,
+    // C-010/011) on both transports; the `accessurl` scheme tells the client
+    // which one to dial. Hostname from the TLS leaf (https arm), else
+    // `[server] identification`, else the OS hostname; TXT identification is
+    // `[server] identification` when set (stable across enrolment). The rule
+    // lives in `SovdAdvertiser::new`.
+    let identification = load_server_identification(&config_path)?;
+    let mut identities: Vec<sovd_mdns::Identity<'_>> = identification
+        .as_deref()
+        .map(sovd_mdns::Identity::Configured)
+        .into_iter()
+        .collect();
     match tls_config {
         Some(tls) => {
             tracing::info!("Listening on https://{} (TLS, rustls)", addr);
             let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert, &tls.key)
                 .await
                 .map_err(|e| anyhow::anyhow!("failed to load TLS cert/key: {}", e))?;
-            // Self-advertise this SOVD endpoint over mDNS / DNS-SD (ISO 17978-3
-            // §5.11, C-010/011). The instance/hostname are derived from the TLS
-            // leaf's `<id>.local` SAN — the same name a discovery client verifies
-            // this cert against — so we advertise only on this provisioned HTTPS
-            // path (the plain-HTTP arm has no verifiable leaf, like
-            // supernova-machine-manager's `Ok(leaf)` arm). Best-effort: a failure
-            // to advertise must never stop serving. `_mdns` holds the guard for
-            // the server's lifetime (dropping it sends DNS-SD goodbye packets).
             let leaf_der: Option<Vec<u8>> = std::fs::File::open(&tls.cert)
                 .ok()
                 .and_then(|f| {
@@ -248,35 +252,103 @@ async fn main() -> anyhow::Result<()> {
                         .next()
                 })
                 .map(|c| c.to_vec());
-            let _mdns = match leaf_der.as_deref().and_then(|der| {
-                sovd_mdns::SovdAdvertiser::from_leaf_and_bind(der, &addr.to_string())
-            }) {
-                Some(adv) => match adv.start() {
-                    Ok(guard) => Some(guard),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "SOVD mDNS advertise failed; serving without discovery");
-                        None
-                    }
-                },
-                None => {
-                    tracing::warn!(
-                        "SOVD mDNS advertise skipped: TLS leaf has no parseable <id>.local instance name"
-                    );
-                    None
+            identities.extend(leaf_der.as_deref().map(sovd_mdns::Identity::Leaf));
+            identities.push(sovd_mdns::Identity::Hostname);
+            // `_mdns` holds the guard until `serve` returns — on SIGTERM /
+            // ctrl-c too, via graceful shutdown — and dropping it sends DNS-SD
+            // goodbye packets.
+            let _mdns = start_mdns(&identities, sovd_mdns::Scheme::Https, addr);
+            let handle = axum_server::Handle::new();
+            tokio::spawn({
+                let handle = handle.clone();
+                async move {
+                    shutdown_signal().await;
+                    handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
                 }
-            };
+            });
             axum_server::bind_rustls(addr, rustls)
+                .handle(handle)
                 .serve(app.into_make_service())
                 .await?;
         }
         None => {
             tracing::info!("Listening on http://{}", addr);
             let listener = tokio::net::TcpListener::bind(addr).await?;
-            axum::serve(listener, app).await?;
+            identities.push(sovd_mdns::Identity::Hostname);
+            let _mdns = start_mdns(&identities, sovd_mdns::Scheme::Http, addr);
+            // One signal task drives both the graceful shutdown and its 5 s cap,
+            // so a long-lived (SSE / subscription) client can't hold SIGTERM open
+            // and block the goodbye.
+            let (stop_tx, stop_rx) = tokio::sync::watch::channel(());
+            tokio::spawn(async move {
+                shutdown_signal().await;
+                let _ = stop_tx.send(());
+            });
+            let mut graceful_rx = stop_rx.clone();
+            let mut cap_rx = stop_rx;
+            let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
+                let _ = graceful_rx.changed().await;
+            });
+            tokio::select! {
+                result = serve => result?,
+                _ = async {
+                    let _ = cap_rx.changed().await;
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                } => tracing::warn!("graceful shutdown timed out after 5 s; closing"),
+            }
         }
     }
 
     Ok(())
+}
+
+/// Resolves on ctrl-c or (on unix) SIGTERM — the trigger for graceful
+/// shutdown, so `serve` returns and the mDNS guard sends its goodbye.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("Shutdown signal received; stopping server");
+}
+
+/// Start the mDNS / DNS-SD advertiser. Best-effort: a failure to advertise
+/// must never stop serving, so it is logged and `None` returned.
+fn start_mdns(
+    identities: &[sovd_mdns::Identity<'_>],
+    scheme: sovd_mdns::Scheme,
+    addr: SocketAddr,
+) -> Option<sovd_mdns::AdvertiserGuard> {
+    let Some(adv) = sovd_mdns::SovdAdvertiser::new(identities, scheme, &addr.to_string()) else {
+        tracing::warn!(
+            "SOVD mDNS advertise skipped: no usable instance name (identification, TLS leaf or hostname)"
+        );
+        return None;
+    };
+    match adv.start() {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            tracing::warn!(error = %e, "SOVD mDNS advertise failed; serving without discovery");
+            None
+        }
+    }
 }
 
 /// Load DID definitions from CLI arguments
@@ -376,6 +448,19 @@ fn load_tls_config(path: &str) -> anyhow::Result<Option<TlsConfig>> {
         cert: cert.to_string(),
         key: key.to_string(),
     }))
+}
+
+/// Parse the optional `[server] identification` — the SOVD server id used as
+/// the mDNS instance / `<id>.local` hostname. `Ok(None)` ⇒ fall back to the TLS
+/// leaf, then the OS hostname.
+fn load_server_identification(path: &str) -> anyhow::Result<Option<String>> {
+    let content = std::fs::read_to_string(path)?;
+    let config: toml::Value = toml::from_str(&content)?;
+    Ok(config
+        .get("server")
+        .and_then(|s| s.get("identification"))
+        .and_then(|i| i.as_str())
+        .map(str::to_string))
 }
 
 /// Load configuration from TOML file
@@ -1356,5 +1441,33 @@ fn register_discovered_ecu_dids(
             def.component_id = Some(ecu_id.to_string());
             did_store.register(did, def);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_server_identification_present_and_absent() {
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+
+        let present = dir.join(format!("sovdd-ident-present-{pid}.toml"));
+        std::fs::write(
+            &present,
+            "[server]\nport = 9080\nidentification = \"cvc\"\n",
+        )
+        .unwrap();
+        let absent = dir.join(format!("sovdd-ident-absent-{pid}.toml"));
+        std::fs::write(&absent, "[server]\nport = 9080\n").unwrap();
+
+        let got_present = load_server_identification(present.to_str().unwrap());
+        let got_absent = load_server_identification(absent.to_str().unwrap());
+        let _ = std::fs::remove_file(&present);
+        let _ = std::fs::remove_file(&absent);
+
+        assert_eq!(got_present.unwrap().as_deref(), Some("cvc"));
+        assert_eq!(got_absent.unwrap(), None);
     }
 }
