@@ -12,7 +12,7 @@
 //!
 //! With config file (e.g., Vortex Motors mode):
 //! ```bash
-//! ./example-ecu --config config/example-ecu-vortex.toml
+//! ./example-ecu --config examples/config/example-ecu-vortex.toml
 //! ```
 
 use std::sync::atomic::{AtomicBool, Ordering};

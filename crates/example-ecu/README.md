@@ -32,7 +32,7 @@ A config-driven UDS ECU simulator for developing and testing the SOVD server wit
 ./target/release/example-ecu
 
 # With TOML config
-./target/release/example-ecu --config config/example-ecu-standard.toml
+./target/release/example-ecu --config examples/config/example-ecu-standard.toml
 
 # Custom interface and CAN IDs
 ./target/release/example-ecu --interface vcan1 --rx-id 0x18DA10F1 --tx-id 0x18DAF110
@@ -121,7 +121,7 @@ Default secret: `0xFF` (single byte). Override with `--security-secret`.
 
 ## TOML Configuration
 
-The ECU can be configured via TOML for custom transport settings and flash behavior. See `config/example-ecu-standard.toml` and `config/example-ecu-vortex.toml` for examples.
+The ECU can be configured via TOML for custom transport settings and flash behavior. See `examples/config/example-ecu-standard.toml` and `examples/config/example-ecu-vortex.toml` for examples.
 
 ## License
 

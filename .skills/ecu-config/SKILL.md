@@ -249,7 +249,7 @@ dids:
 # Upload via admin API
 curl -X POST http://localhost:9080/admin/definitions \
   -H "Content-Type: application/yaml" \
-  --data-binary @config/did-definitions/engine_ecu.did.yaml
+  --data-binary @examples/config/did-definitions/engine_ecu.did.yaml
 
 # List loaded definitions
 curl http://localhost:9080/admin/definitions
@@ -315,7 +315,7 @@ rollback_routine = "0xFF02"
 
 ```bash
 # Start server
-./target/release/sovdd config/sovd-socketcan.toml
+./target/release/sovdd examples/config/sovd-socketcan.toml
 
 # Verify connectivity
 curl http://localhost:9080/vehicle/v1/components
@@ -343,8 +343,8 @@ curl http://localhost:9080/vehicle/v1/components/my_ecu/did/0xF190
 | Config | Description |
 |--------|-------------|
 | `config/sovd.toml` | Mock transport (no hardware) |
-| `config/sovd-socketcan.toml` | Single ECU on vcan0 |
-| `config/gateway-socketcan.toml` | Multi-ECU gateway on vcan0 |
-| `config/gateway-dual-ecu.toml` | Dual ECU gateway |
-| `config/example-ecu-standard.toml` | Standard example ECU config |
-| `config/example-ecu-vortex.toml` | Vortex Motors example ECU config |
+| `examples/config/sovd-socketcan.toml` | Single ECU on vcan0 |
+| `examples/config/gateway-socketcan.toml` | Multi-ECU gateway on vcan0 |
+| `examples/config/gateway-dual-ecu.toml` | Dual ECU gateway |
+| `examples/config/example-ecu-standard.toml` | Standard example ECU config |
+| `examples/config/example-ecu-vortex.toml` | Vortex Motors example ECU config |

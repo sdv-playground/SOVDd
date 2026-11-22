@@ -43,6 +43,9 @@ crates/
 ├── example-ecu     # ECU simulator (runs on vcan)
 ├── example-app     # Example supplier app entity
 └── sovd-tests      # E2E integration tests
+config/sovd.toml    # The server's default config
+examples/config/    # Example configurations (simulated ECU, CAN, gateway)
+simulations/        # Runnable test networks
 ```
 
 ## Quick Start
@@ -86,7 +89,7 @@ sudo ip link set up vcan0
 ./target/release/example-ecu
 
 # Terminal 2: Start SOVD server
-./target/release/sovdd config/sovd-socketcan.toml
+./target/release/sovdd examples/config/sovd-socketcan.toml
 ```
 
 ### Multi-ECU Gateway
@@ -116,9 +119,9 @@ Server config is TOML, DID definitions are YAML.
 | Config | Description |
 |--------|-------------|
 | `config/sovd.toml` | Mock transport demo (no hardware; also the no-config fallback) |
-| `config/sovd-socketcan.toml` | Single ECU on vcan0 |
-| `config/gateway-socketcan.toml` | Multi-ECU gateway |
-| `config/did-definitions/*.yaml` | DID encoding/decoding rules |
+| `examples/config/sovd-socketcan.toml` | Single ECU on vcan0 |
+| `examples/config/gateway-socketcan.toml` | Multi-ECU gateway |
+| `examples/config/did-definitions/*.yaml` | DID encoding/decoding rules |
 
 ## Simulations
 
