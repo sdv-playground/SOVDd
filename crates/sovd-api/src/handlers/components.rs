@@ -69,6 +69,7 @@ pub struct NodeDetailResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updates: Option<String>,
     pub operations: String,
+    pub data: String,
     pub subcomponents: String,
 }
 
@@ -203,6 +204,7 @@ pub async fn get_node(
         status: format!("{href}/status"),
         updates,
         operations: format!("{href}/operations"),
+        data: format!("{href}/data"),
         subcomponents: node.subcomponents_href(),
     }))
 }

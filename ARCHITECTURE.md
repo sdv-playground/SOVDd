@@ -414,13 +414,13 @@ node on `/v1`, its backends the node's subcomponents. Opt-in: without a node not
 | Path (`/v1` only) | Serves |
 |---|---|
 | `/v1/components` | the node first (type `node`), then the backends as before (kept for the migration period) |
-| `/v1/components/{node}` | the node's document: `id`, `name`, `type`, links to `status`, `updates` (when a backend supports update, as on the root document), `operations` and `subcomponents` |
+| `/v1/components/{node}` | the node's document: `id`, `name`, `type`, links to `status`, `updates` (when a backend supports update, as on the root document), `operations`, `data` and `subcomponents` |
 | `/v1/components/{node}/subcomponents` | the backends with node-form hrefs, scope-filtered like `/v1/components` |
 | `/v1/components/{node}/subcomponents/{id}/...` | backend `id`'s entity API: everything `/v1/components/{id}/...` serves, embedder routes included |
-| `/v1/components/{node}/status`, `.../status/restart`, `.../updates[/...]`, `.../operations[/...]` | the node-level resources: whatever serves the root form (`/v1/status`, `/v1/updates/...`, an embedder's node verdict operations, ...) |
+| `/v1/components/{node}/status`, `.../status/restart`, `.../updates[/...]`, `.../operations[/...]`, `.../data[/...]` | the node-level resources: whatever serves the root form (`/v1/status`, `/v1/updates/...`, an embedder's node verdict operations or node-level data items such as `/v1/data/x-update-state`, ...), query kept |
 | any other `/v1/components/{node}/...` | 404 (`GenericError`) |
 | `/v1/components/{id}/...` of a backend | served as before, **deprecated**: `Deprecation: true` and `Link: </v1/components/{node}/subcomponents/{id}/...>; rel="successor-version"` |
-| root forms `/v1/status`, `/v1/updates/...`, `/v1/operations/...` | served as before (dated legacy path; canonical is under the node) |
+| root forms `/v1/status`, `/v1/updates/...`, `/v1/operations/...`, `/v1/data/...` | served as before (dated legacy path; canonical is under the node) |
 
 The node does not alias any backend's resources: it carries node-level resources only. The node id
 must be a path segment no backend has as its id (`with_node` refuses it otherwise). `/vehicle/v1` is
