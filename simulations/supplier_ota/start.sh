@@ -41,7 +41,7 @@ sim_start_ecu body_ecu             "$CONFIG/ecu-body.toml"
 sim_start_ecu vtx_vx500  "$CONFIG/ecu-supplier-engine.toml"
 
 # -- Security helper -----------------------------------------------------------
-sim_start_helper "$HELPER_PORT_NUM" "$CONFIG/secrets.toml"
+sim_start_helper "$HELPER_PORT_NUM" "$CONFIG/sim-keys.toml"
 
 # -- Layer 2: UDS gateway (port 4002) - CAN access to ALL ECUs ----------------
 sim_start_server "$UDS_GW_PORT" "$CONFIG/uds-gateway.toml" \

@@ -1,3 +1,5 @@
+# Simulation only: security-access keys of the simulated ECUs in this test network (the example ECU's XOR scheme). Not credentials.
+#
 # Security Helper - ECU Secrets for supplier_ota simulation
 #
 # Only OEM-owned ECUs are listed here. The supplier ECU (vtx_vx500)
