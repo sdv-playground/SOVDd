@@ -203,8 +203,8 @@ async fn main() -> anyhow::Result<()> {
     // Create the app state with DID store, output configs, and auth context
     let mut state = AppState::with_output_configs(backends, Arc::new(did_store), output_configs)
         .with_auth(Arc::new(auth));
-    // `[server.node]`: on `/v1`, also serve the components as the subcomponents
-    // of one node.
+    // `[server.node]`: on `/v1`, serve the components as the subcomponents of
+    // one node only.
     if let Some(node) = load_node_config(&config_path)? {
         let id = node.id().to_owned();
         state = state
@@ -212,7 +212,7 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("[server.node] {e}"))?;
         tracing::info!(
             node = id,
-            "serving the components on /v1 also as the subcomponents of node"
+            "serving the components on /v1 as the subcomponents of node"
         );
     }
 

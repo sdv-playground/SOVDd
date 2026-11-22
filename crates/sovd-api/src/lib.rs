@@ -62,8 +62,8 @@ impl Tree {
         }
     }
 
-    /// `{base}/components/{id}` — a component's URL under this tree; while a
-    /// node-form `/v1` request is served ([`topology`]), a backend's URL is its
+    /// `{base}/components/{id}` — a component's URL under this tree; on `/v1`
+    /// of a server with a node ([`topology`]), a backend's URL is its
     /// subcomponent URL, `/v1/components/{node}/subcomponents/{id}`.
     pub fn component(self, id: &str) -> String {
         match topology::current() {
@@ -73,8 +73,8 @@ impl Tree {
     }
 
     /// The URL the server's node-level resources (`status`, `updates`,
-    /// `operations`) are under: `{base}`; while a node-form `/v1` request is
-    /// served ([`topology`]), the node's URL `/v1/components/{node}`. An
+    /// `operations`) are under: `{base}`; on `/v1` of a server with a node
+    /// ([`topology`]), the node's URL `/v1/components/{node}`. An
     /// embedder rendering URLs of its own node-level routes renders them under
     /// this.
     pub fn server(self) -> String {

@@ -131,14 +131,15 @@ pub async fn not_found_fallback(State(state): State<AppState>, uri: Uri) -> Resp
             // Render under the entity's own tree; a path under no base keeps
             // the `/vehicle/v1` rendering it always had.
             let tree = Tree::split_path(entity).map_or(Tree::Legacy, |(tree, _)| tree);
-            return Json(build_capability_doc_for(
-                tree,
-                Some(entity),
-                state.capability_extensions(),
-            ))
-            .into_response();
+            let mut doc =
+                build_capability_doc_for(tree, Some(entity), state.capability_extensions());
+            if let Some(node) = state.node().filter(|_| tree == Tree::V1) {
+                to_node_forms(&mut doc, node);
+            }
+            return Json(doc).into_response();
         }
     }
+    let path = crate::topology::served_form(path.to_owned());
     ApiError::NotFound(format!("No resource at {}", path)).into_response()
 }
 
@@ -149,7 +150,10 @@ pub async fn method_not_allowed_fallback(
 ) -> (StatusCode, axum::Json<sovd_core::GenericError>) {
     let err = sovd_core::GenericError::vendor(
         "method-not-allowed",
-        format!("Method not allowed on {}", uri.path()),
+        format!(
+            "Method not allowed on {}",
+            crate::topology::served_form(uri.path().to_owned())
+        ),
     );
     (StatusCode::METHOD_NOT_ALLOWED, axum::Json(err))
 }
@@ -667,7 +671,7 @@ fn render_template(tree: Tree, template: &str) -> String {
 /// routing table.
 ///
 /// On `/v1` of a server configured with a node, the doc lists the node form
-/// too ([`add_node_paths`]).
+/// instead of the flat and root forms ([`add_node_paths`]).
 pub async fn capability_description(
     State(state): State<AppState>,
     Extension(tree): Extension<Tree>,
@@ -935,19 +939,14 @@ fn operation(summary: &str) -> serde_json::Value {
     })
 }
 
-/// Add the node form to a global `/v1` doc of a server configured with `node`
+/// The served paths of a global `/v1` doc of a server configured with `node`
 /// (see [`crate::topology`]): the node's document and subcomponents listing,
-/// and every listed path the node form maps onto (a backend's
-/// `/v1/components/{component_id}/...`, a node-level `/v1/updates/...`, ...,
-/// embedder-contributed ones included) under its node-form path too.
+/// and every path [`to_node_forms`] maps.
 fn add_node_paths(doc: &mut serde_json::Value, node: &NodeTopology) {
+    to_node_forms(doc, node);
     let Some(paths) = doc.get_mut("paths").and_then(|p| p.as_object_mut()) else {
         return;
     };
-    let node_forms: Vec<(String, serde_json::Value)> = paths
-        .iter()
-        .filter_map(|(path, item)| Some((node.node_form(path)?, item.clone())))
-        .collect();
     paths.insert(
         node.href(),
         serde_json::json!({ "get": operation("Read the node's document (its node-level resources and subcomponents).") }),
@@ -956,7 +955,20 @@ fn add_node_paths(doc: &mut serde_json::Value, node: &NodeTopology) {
         node.subcomponents_href(),
         serde_json::json!({ "get": operation("List the node's subcomponents.") }),
     );
-    paths.extend(node_forms);
+}
+
+/// Every path of a `/v1` doc of a server configured with `node` that has a
+/// node form (a backend's `/v1/components/{component_id}/...`, a node-level
+/// `/v1/updates/...`, ..., embedder-contributed ones included) under that node
+/// form, the only one served.
+fn to_node_forms(doc: &mut serde_json::Value, node: &NodeTopology) {
+    let Some(paths) = doc.get_mut("paths").and_then(|p| p.as_object_mut()) else {
+        return;
+    };
+    *paths = std::mem::take(paths)
+        .into_iter()
+        .map(|(path, item)| (node.node_form(&path).unwrap_or(path), item))
+        .collect();
 }
 
 /// Compute the emitted OpenAPI path for `template` under `scope_segs`.

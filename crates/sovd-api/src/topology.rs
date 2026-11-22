@@ -1,36 +1,36 @@
 //! Node topology: one node component on `/v1` whose subcomponents are the backends.
 //!
 //! By default every backend is a top-level component (`{base}/components/{id}`). A server
-//! configured with a [`NodeTopology`] ([`crate::AppState::with_node`]) is also one vehicle node,
-//! visible on `/v1` (ISO 17978-3's entity model: a node's members are its subcomponents):
+//! configured with a [`NodeTopology`] ([`crate::AppState::with_node`]) is one vehicle node on
+//! `/v1`, and `/v1` serves it hierarchically only (ISO 17978-3's entity model: a node's members
+//! are its subcomponents; §5.4.1: one path per resource):
 //!
-//! - `/v1/components` lists the node first, then the backends as before;
+//! - `/v1/components` lists the node alone;
 //! - `/v1/components/{node}` is the node's document, linking its `subcomponents` and the
 //!   node-level resources below, and carrying the unit's `x-identification` when set;
 //! - `/v1/components/{node}/subcomponents` lists the backends;
-//! - `/v1/components/{node}/subcomponents/{id}/...` is backend `id`'s entity API, everything
-//!   `/v1/components/{id}/...` serves;
+//! - `/v1/components/{node}/subcomponents/{id}/...` is backend `id`'s entity API;
 //! - `/v1/components/{node}/status`, `.../status/restart`, `.../updates[/...]`,
-//!   `.../operations[/...]` and `.../data[/...]` are the node-level resources, served by whatever
-//!   serves their root forms (`/v1/status`, `/v1/updates/...`, `/v1/data/...`, ...), which keep
-//!   working;
+//!   `.../operations[/...]` and `.../data[/...]` are the node-level resources;
 //! - any other `/v1/components/{node}/...` answers 404;
-//! - `/v1/components/{id}/...` of a backend is still served, deprecated: its responses carry
-//!   `Deprecation: true` and a `Link` to the node form (`rel="successor-version"`).
+//! - the flat and root forms those paths map onto (`/v1/components/{id}/...` of any other id,
+//!   `/v1/status`, `/v1/updates/...`, `/v1/data/...`, ...) answer 404 naming the node form.
+//!   The rest of `/v1` (`/v1/`, `/v1/components`, `/v1/docs`) is served as without a node.
 //!
 //! `/vehicle/v1` is frozen: it has no node, and its responses are those of a server without one.
 //!
 //! The routes stay the flat ones: [`with_node_topology`] rewrites a node-form path onto its flat
-//! (or root) route before routing, so handlers, authorization (a subcomponent's scope is still
-//! `component:{id}`) and every merged-in embedder route serve the node form unchanged. It has to
-//! wrap the embedder's *final* router, after its own routes are merged in. While a node-form
-//! request is served, the URLs a response renders through [`crate::Tree::component`] and
-//! [`crate::Tree::server`] take the node form, and so does a flat or root-form `Location`.
+//! (or root-form) route before routing, so handlers, authorization (a subcomponent's scope is
+//! still `component:{id}`) and every merged-in embedder route serve the node form unchanged; a
+//! request arriving in a flat or root form is answered 404 before routing. It has to wrap the
+//! embedder's *final* router, after its own routes are merged in. The `/v1` URLs a response
+//! renders through [`crate::Tree::component`] and [`crate::Tree::server`] take the node form, and
+//! so does a flat or root-form `Location`.
 
 use std::sync::Arc;
 
 use axum::extract::Request;
-use axum::http::header::{HeaderValue, LINK, LOCATION};
+use axum::http::header::{HeaderValue, LOCATION};
 use axum::http::Uri;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -53,15 +53,11 @@ pub struct NodeTopology {
 /// What [`with_node_topology`] does with a request path.
 #[derive(Debug, PartialEq, Eq)]
 enum Route {
-    /// Not a node-form path: route it as it is.
+    /// Route it as it is: not a node-form path, or the node's document or subcomponents listing.
     AsIs,
-    /// The node's document or its subcomponents listing, routes of their own.
-    Node,
     /// A node-form path: route it as this flat or root-form path.
     Rewrite(String),
-    /// A backend's flat path: route it as it is, deprecated in favour of this node-form path.
-    Deprecated(String),
-    /// A node-form path the node does not serve.
+    /// A path not served: a flat or root form, or a node-form path the node does not serve.
     NotFound(String),
 }
 
@@ -134,23 +130,25 @@ impl NodeTopology {
         (!id.is_empty() && id != self.id).then(|| format!("{}{tail}", self.subcomponent_href(id)))
     }
 
-    /// How `path` is routed; `is_backend` tells a backend's id.
-    fn route(&self, path: &str, is_backend: impl Fn(&str) -> bool) -> Route {
+    /// How `path` is routed.
+    fn route(&self, path: &str) -> Route {
+        if let Some(node_form) = self.node_form(path) {
+            return Route::NotFound(format!(
+                "No resource at {path}: on /v1 this server is node '{}', whose path for it is \
+                 {node_form}",
+                self.id
+            ));
+        }
         let Some((Tree::V1, rest)) = Tree::split_path(path) else {
             return Route::AsIs;
         };
         let Some(entity) = rest.strip_prefix("/components/") else {
             return Route::AsIs;
         };
+        // Not a flat form: the id is empty or the node's.
         let (id, tail) = split_segment(entity);
-        if id != self.id {
-            return match self.node_form(path) {
-                Some(successor) if is_backend(id) => Route::Deprecated(successor),
-                _ => Route::AsIs,
-            };
-        }
-        if tail.is_empty() || tail == "/subcomponents" {
-            return Route::Node;
+        if id != self.id || tail.is_empty() || tail == "/subcomponents" {
+            return Route::AsIs;
         }
         if let Some(member) = tail.strip_prefix("/subcomponents/") {
             let (member, rest) = split_segment(member);
@@ -188,55 +186,40 @@ tokio::task_local! {
     static NODE: Arc<NodeTopology>;
 }
 
-/// The node of the node-form request being served, while [`with_node_topology`] serves one.
+/// The node of the server, while [`with_node_topology`] serves a request on one.
 pub(crate) fn current() -> Option<Arc<NodeTopology>> {
     NODE.try_with(Clone::clone).ok()
 }
 
-/// `path` (a flat or root-form `/v1` path) in the form of the request being served: its
-/// [node form](NodeTopology::node_form) while a node-form request is served, else as it is.
-pub(crate) fn request_form(path: String) -> String {
+/// `path` (a flat or root-form `/v1` path) in the form it is served in: its
+/// [node form](NodeTopology::node_form) on a server with a node, else as it is.
+pub(crate) fn served_form(path: String) -> String {
     current()
         .and_then(|node| node.node_form(&path))
         .unwrap_or(path)
 }
 
 /// `router` serving `state`'s node topology (see the [module docs](self)): node-form paths are
-/// routed onto their flat or root-form routes and their responses render node-form URLs, other
-/// `/v1/components/{node}/...` paths answer 404, and a backend's flat `/v1` responses carry the
-/// deprecation headers. A no-op for a state without a node. Apply it last, around the router with
-/// every route merged in.
+/// routed onto their flat or root-form routes, the flat and root forms themselves and other
+/// `/v1/components/{node}/...` paths answer 404, and responses render node-form URLs. A no-op
+/// for a state without a node. Apply it last, around the router with every route merged in.
 pub fn with_node_topology(router: Router, state: &AppState) -> Router {
     let Some(node) = state.node().cloned() else {
         return router;
     };
-    let state = state.clone();
     // A layer on `router` itself would run after routing; wrapping it as the fallback of an empty
     // router runs the rewrite first.
     Router::new()
         .fallback_service(router)
         .layer(middleware::from_fn(move |req: Request, next: Next| {
-            let node = node.clone();
-            let state = state.clone();
-            async move { serve(node, state, req, next).await }
+            serve(node.clone(), req, next)
         }))
 }
 
-async fn serve(node: Arc<NodeTopology>, state: AppState, mut req: Request, next: Next) -> Response {
-    match node.route(req.uri().path(), |id| state.backends().contains_key(id)) {
-        Route::AsIs | Route::Node => next.run(req).await,
-        Route::NotFound(message) => ApiError::NotFound(message).into_response(),
-        Route::Deprecated(successor) => {
-            let mut response = next.run(req).await;
-            let headers = response.headers_mut();
-            headers.insert("deprecation", HeaderValue::from_static("true"));
-            if let Ok(link) =
-                HeaderValue::try_from(format!("<{successor}>; rel=\"successor-version\""))
-            {
-                headers.append(LINK, link);
-            }
-            response
-        }
+async fn serve(node: Arc<NodeTopology>, mut req: Request, next: Next) -> Response {
+    match node.route(req.uri().path()) {
+        Route::AsIs => {}
+        Route::NotFound(message) => return ApiError::NotFound(message).into_response(),
         Route::Rewrite(flat) => {
             let path_and_query = match req.uri().query() {
                 Some(query) => format!("{flat}?{query}"),
@@ -252,20 +235,20 @@ async fn serve(node: Arc<NodeTopology>, state: AppState, mut req: Request, next:
                     .into_response();
             };
             *req.uri_mut() = uri;
-            let mut response = NODE.scope(node.clone(), next.run(req)).await;
-            // A `Location` an (embedder) handler rendered itself in the flat or root form.
-            let location = response
-                .headers()
-                .get(LOCATION)
-                .and_then(|l| l.to_str().ok());
-            if let Some(nested) = location.and_then(|l| node.node_form(l)) {
-                if let Ok(nested) = HeaderValue::try_from(nested) {
-                    response.headers_mut().insert(LOCATION, nested);
-                }
-            }
-            response
         }
     }
+    let mut response = NODE.scope(node.clone(), next.run(req)).await;
+    // A `Location` an (embedder) handler rendered itself in the flat or root form.
+    let location = response
+        .headers()
+        .get(LOCATION)
+        .and_then(|l| l.to_str().ok());
+    if let Some(nested) = location.and_then(|l| node.node_form(l)) {
+        if let Ok(nested) = HeaderValue::try_from(nested) {
+            response.headers_mut().insert(LOCATION, nested);
+        }
+    }
+    response
 }
 
 #[cfg(test)]
@@ -273,7 +256,7 @@ mod tests {
     use super::*;
 
     fn route(path: &str) -> Route {
-        NodeTopology::new("cvc", "CVC").route(path, |id| matches!(id, "vm1" | "host"))
+        NodeTopology::new("cvc", "CVC").route(path)
     }
 
     fn rewrite(path: &str) -> Route {
@@ -318,11 +301,17 @@ mod tests {
 
     #[test]
     fn the_node_document_and_listing_are_routes_of_their_own() {
-        assert_eq!(route("/v1/components/cvc"), Route::Node);
-        assert_eq!(route("/v1/components/cvc/subcomponents"), Route::Node);
-        assert_eq!(route("/v1/components"), Route::AsIs);
-        assert_eq!(route("/v1/updates"), Route::AsIs);
-        assert_eq!(route("/version-info"), Route::AsIs);
+        for path in [
+            "/v1/components/cvc",
+            "/v1/components/cvc/subcomponents",
+            // The rest of `/v1` and the server root.
+            "/v1/",
+            "/v1/components",
+            "/v1/docs",
+            "/version-info",
+        ] {
+            assert_eq!(route(path), Route::AsIs, "{path}");
+        }
     }
 
     #[test]
@@ -342,23 +331,35 @@ mod tests {
     }
 
     #[test]
-    fn a_flat_backend_path_is_deprecated_on_v1_only() {
+    fn flat_and_root_forms_are_not_served_on_v1() {
         assert_eq!(
             route("/v1/components/vm1/data/x"),
-            Route::Deprecated("/v1/components/cvc/subcomponents/vm1/data/x".into())
+            Route::NotFound(
+                "No resource at /v1/components/vm1/data/x: on /v1 this server is node 'cvc', \
+                 whose path for it is /v1/components/cvc/subcomponents/vm1/data/x"
+                    .into()
+            )
         );
-        assert_eq!(
-            route("/v1/components/host"),
-            Route::Deprecated("/v1/components/cvc/subcomponents/host".into())
-        );
-        assert_eq!(route("/v1/components/nope/data"), Route::AsIs);
+        for path in [
+            "/v1/components/host",
+            // Any other id alike, so a flat path tells nothing of the members.
+            "/v1/components/nope/data",
+            "/v1/status",
+            "/v1/status/restart",
+            "/v1/updates/u1/status",
+            "/v1/operations/x-update-commit/executions",
+            "/v1/data/x-update-state",
+        ] {
+            assert!(matches!(route(path), Route::NotFound(_)), "{path}");
+        }
         // The frozen legacy tree has no node: its paths are routed as they are.
-        assert_eq!(route("/vehicle/v1/components/vm1/data"), Route::AsIs);
-        assert_eq!(route("/vehicle/v1/components/cvc"), Route::AsIs);
-        assert_eq!(
-            route("/vehicle/v1/components/cvc/subcomponents/vm1"),
-            Route::AsIs
-        );
+        for path in [
+            "/vehicle/v1/components/vm1/data",
+            "/vehicle/v1/updates",
+            "/vehicle/v1/components/cvc/subcomponents/vm1",
+        ] {
+            assert_eq!(route(path), Route::AsIs, "{path}");
+        }
     }
 
     #[test]

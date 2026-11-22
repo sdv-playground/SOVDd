@@ -373,7 +373,7 @@ pub struct AppState {
     /// §7.5 document. Empty by default; set via
     /// [`AppState::with_capability_extensions`].
     capability_extensions: Arc<CapabilityExtensions>,
-    /// The node this server also is on `/v1`, its backends the node's
+    /// The node this server is on `/v1`, its backends the node's
     /// subcomponents; `None` keeps every backend a top-level component only.
     /// Set via [`AppState::with_node`].
     node: Option<Arc<NodeTopology>>,
@@ -482,7 +482,7 @@ impl AppState {
         &self.capability_extensions
     }
 
-    /// Serve the backends on `/v1` also as the subcomponents of `node` (see
+    /// Serve the backends on `/v1` as the subcomponents of `node` only (see
     /// [`crate::topology`]). Refused when the node's id is not a plain path
     /// segment (RFC 3986 unreserved characters) or is also a backend's id. The
     /// router the state ends up in has to be wrapped in
@@ -508,7 +508,7 @@ impl AppState {
         Ok(self)
     }
 
-    /// The node this server also is on `/v1`, if one is configured.
+    /// The node this server is on `/v1`, if one is configured.
     pub fn node(&self) -> Option<&Arc<NodeTopology>> {
         self.node.as_ref()
     }
