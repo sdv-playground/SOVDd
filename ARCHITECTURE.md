@@ -419,10 +419,11 @@ Opt-in: a server without a node serves `/v1` flat, as before.
 | `/v1/components/{node}` | the node's document: `id`, `name`, `type`, `x-identification` (when set), links to `status`, `updates` (when a backend supports update, as on the root document), `operations`, `data` and `subcomponents` |
 | `/v1/components/{node}/subcomponents` | the backends with node-form hrefs, scope-filtered |
 | `/v1/components/{node}/subcomponents/{id}/...` | backend `id`'s entity API: everything a node-less `/v1/components/{id}/...` serves, embedder routes included |
-| `/v1/components/{node}/status`, `.../status/restart`, `.../updates[/...]`, `.../operations[/...]`, `.../data[/...]` | the node-level resources: whatever serves the root form (`/v1/updates/...`, an embedder's `/v1/status`, node verdict operations or node-level data items such as `/v1/data/x-update-state`, ...), query kept |
+| `/v1/components/{node}/status[/...]`, `.../updates[/...]`, `.../operations[/...]`, `.../data[/...]` | the node-level resources: whatever serves the root form (`/v1/updates/...`, an embedder's `/v1/status`, `/v1/status/restart` or `/v1/status/x-boot-id`, node verdict operations or node-level data items such as `/v1/data/x-update-state`, ...), query kept |
+| `GET /v1/components/{node}/data`, `GET .../operations` | the node-level collections: an embedder's `GET /v1/data` / `GET /v1/operations` route when it has one, else SOVDd's listing of the items the embedder contributes to the capability description (below); `{"items": []}` when there are none |
 | any other `/v1/components/{node}/...` | 404 (`GenericError`) |
 | `/v1/components/{id}/...` of any other id (the flat form) | 404 `incomplete-request`, naming the node form: `No resource at /v1/components/vm1/data: on /v1 this server is node 'cvc', whose path for it is /v1/components/cvc/subcomponents/vm1/data` |
-| root forms `/v1/status`, `/v1/status/restart`, `/v1/updates/...`, `/v1/operations/...`, `/v1/data/...` | 404 alike, naming the node form |
+| root forms `/v1/status[/...]`, `/v1/updates[/...]`, `/v1/operations[/...]`, `/v1/data[/...]` | 404 alike, naming the node form |
 | `/v1`, `/v1/`, `/v1/components`, `/v1/docs` | served: what a client reads before it knows the node (the root document's `updates` link is the node's) |
 
 The server-root resources (`/version-info`, `/health`, `/.well-known/sovd-extensions`, `/admin/...`)
@@ -451,10 +452,32 @@ renders backends' URLs as `/v1/components/{node}/subcomponents/{id}`, `Tree::ser
 node-level root as `/v1/components/{node}`, and a flat or root-form `Location` (an embedder handler's
 hard-coded one included) is rewritten to the node form. An embedder whose handlers render URLs in a
 body renders them through those two. The node's document and subcomponents listing are scope-checked
-in their handlers (visible to a client that may access the node or any subcomponent). `/v1/docs`
-lists the served forms only (the node's paths and the node form of every flat and root-form path,
+in their handlers (visible to a client that may access the node or any subcomponent), and so are
+SOVDd's node-level collections. `/v1/docs` lists the served forms only (the node's paths, its `data`
+and `operations` collections, and the node form of every flat and root-form path,
 embedder-contributed ones included; a member's scoped `.../docs` likewise); `/vehicle/v1/docs` is
-unchanged. Unlike gateway children (`/apps/...`, above), subcomponents are the server's own
+unchanged.
+
+The node-level collections are built from what SOVDd knows of the embedder's items: the capability
+rows it contributes (`AppState::with_capability_extensions`, `CapabilityExtensions::paths`). Every
+contributed `GET {base}/data/{item}` (either base, a concrete `{item}`) is an item of
+`.../data`, and every contributed `{base}/operations/{op}` or `{base}/operations/{op}/executions`
+one of `.../operations`: `{ "id", "name", "href" }`, `name` the path's `summary` (an operation's
+`{op}` `get` before its `executions` `post`) or else the id, `href` the node form
+(`/v1/components/{node}/data/{item}`, `/v1/components/{node}/operations/{op}`), sorted by id. An
+embedder makes an item appear by contributing its row, as it does for `/docs`; an item it serves
+but does not describe is not listed. SOVDd registers no route for the collections: the rewritten
+`GET /v1/data` / `GET /v1/operations` reaches the router's fallback when no embedder route serves
+it, and the fallback answers the listing (on a node server only; a node-less server's `/v1/data` stays
+404). So an embedder route for the root collection, merged in like any other, wins without a
+conflict.
+
+A contributed row is listed on both trees: a path under either base is rebased onto the tree
+documented, and a path under neither is copied into both. A route the embedder serves on `/v1` only
+(e.g. its `GET /v1/status`, the node status) is contributed through
+`CapabilityExtensions::with_v1_paths(..)` (the `v1_paths` field) instead: those rows are listed in
+`/v1/docs` (in the node form on a node server, like every other row) and never in
+`/vehicle/v1/docs`, and they feed the node-level collections like the ordinary rows. Unlike gateway children (`/apps/...`, above), subcomponents are the server's own
 backends, not entities behind one of them.
 
 ---
