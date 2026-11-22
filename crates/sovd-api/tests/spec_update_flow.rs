@@ -2882,19 +2882,22 @@ async fn reading_back_without_backend_support_is_501() {
 }
 
 // ---------------------------------------------------------------------------
-// /v1 execute requires x-ota-control=orchestrated
+// /v1 execute is always orchestrated
 // ---------------------------------------------------------------------------
 
-/// The exact 400 a `/v1` execute without `x-ota-control=orchestrated` answers.
-const EXECUTE_NEEDS_ORCHESTRATED: &str = r#"{"error_code":"incomplete-request","message":"execute requires x-ota-control=orchestrated: this server settles an update only on the tester's verdict","parameters":{"x-ota-control":["orchestrated"]}}"#;
+/// The exact 400 a `/v1` execute naming another `x-ota-control` mode answers.
+const EXECUTE_CONTROL_REFUSED: &str = r#"{"error_code":"incomplete-request","message":"x-ota-control accepts only orchestrated: this server settles an update only on the tester's verdict","parameters":{"x-ota-control":["orchestrated"]}}"#;
 
-/// The `/v1` execute requests that lack the orchestrated control mode.
-const WITHOUT_ORCHESTRATED: [&str; 4] = [
-    "",
+/// The `/v1` execute requests that name a mode other than orchestrated.
+const OTHER_CONTROL: [&str; 3] = [
     "?x-ota-control=auto",
     "?x-ota-control=",
     "?x-ota-control=Orchestrated",
 ];
+
+/// The `/v1` execute requests that run orchestrated: x-update's, with no
+/// parameter, and the x-ota alias.
+const ORCHESTRATED: [&str; 2] = ["", "?x-ota-control=orchestrated"];
 
 async fn get_text(server: &TestServer, path: &str) -> (reqwest::StatusCode, String) {
     let resp = http()
@@ -2939,9 +2942,9 @@ async fn v1_prepared(server: &TestServer, id: &str) -> String {
     update
 }
 
-/// Every `/v1` execute without the orchestrated control mode on `id`, on
-/// both collections, answers the exact 400 and changes nothing: the status
-/// body is unchanged and no backend call is made.
+/// Every `/v1` execute naming another control mode on `id`, on both
+/// collections, answers the exact 400 and changes nothing: the status body
+/// is unchanged and no backend call is made.
 async fn assert_execute_refused(server: &TestServer, backend: &MockBackend, id: &str) {
     let update = format!("/v1/components/dev1/updates/{id}");
     let (_, before) = get_text(server, &format!("{update}/status")).await;
@@ -2950,7 +2953,7 @@ async fn assert_execute_refused(server: &TestServer, backend: &MockBackend, id: 
         format!("{update}/execute"),
         format!("/v1/updates/{id}/execute"),
     ] {
-        for query in WITHOUT_ORCHESTRATED {
+        for query in OTHER_CONTROL {
             let resp = put(server, &format!("{execute}{query}")).await;
             assert_eq!(
                 resp.status(),
@@ -2959,7 +2962,7 @@ async fn assert_execute_refused(server: &TestServer, backend: &MockBackend, id: 
             );
             assert_eq!(
                 resp.text().await.unwrap(),
-                EXECUTE_NEEDS_ORCHESTRATED,
+                EXECUTE_CONTROL_REFUSED,
                 "{execute}{query}"
             );
         }
@@ -2974,17 +2977,19 @@ async fn assert_execute_refused(server: &TestServer, backend: &MockBackend, id: 
 }
 
 #[tokio::test]
-async fn v1_banked_execute_without_orchestrated_is_refused_then_orchestrated_commits() {
+async fn v1_banked_execute_is_orchestrated_with_or_without_the_alias() {
+    for query in ORCHESTRATED {
+        v1_banked_execute_awaits_the_verdict(query).await;
+    }
+}
+
+async fn v1_banked_execute_awaits_the_verdict(query: &str) {
     let (server, backend) = spawn_with("banked").await;
     let update = v1_prepared(&server, "v1-banked").await;
     assert_execute_refused(&server, &backend, "v1-banked").await;
 
-    let resp = put(
-        &server,
-        &format!("{update}/execute?x-ota-control=orchestrated"),
-    )
-    .await;
-    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let resp = put(&server, &format!("{update}/execute{query}")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED, "{query}");
     let mut body = Value::Null;
     for _ in 0..200 {
         body = get_json(&server, &format!("{update}/status")).await.1;
@@ -2993,10 +2998,14 @@ async fn v1_banked_execute_without_orchestrated_is_refused_then_orchestrated_com
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert_eq!(body["x-ota-substate"], "awaiting-verdict", "{body}");
+    assert_eq!(
+        body["x-ota-substate"], "awaiting-verdict",
+        "{query}: {body}"
+    );
     assert_eq!(
         *backend.hook_log.lock(),
-        ["finalize_flash", "validate", "activate"]
+        ["finalize_flash", "validate", "activate"],
+        "{query}"
     );
 
     *backend.flash_state.lock() = CoreFlashState::Activated;
@@ -3010,22 +3019,24 @@ async fn v1_banked_execute_without_orchestrated_is_refused_then_orchestrated_com
 }
 
 #[tokio::test]
-async fn v1_singleshot_execute_without_orchestrated_is_refused_then_orchestrated_commits() {
-    let (server, backend) = spawn_with("singleshot").await;
-    let update = v1_prepared(&server, "v1-singleshot").await;
-    assert_execute_refused(&server, &backend, "v1-singleshot").await;
+async fn v1_singleshot_execute_commits_with_or_without_the_alias() {
+    for query in ORCHESTRATED {
+        let (server, backend) = spawn_with("singleshot").await;
+        let update = v1_prepared(&server, "v1-singleshot").await;
+        assert_execute_refused(&server, &backend, "v1-singleshot").await;
 
-    let resp = put(
-        &server,
-        &format!("{update}/execute?x-ota-control=orchestrated"),
-    )
-    .await;
-    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
-    let body = poll_terminal_at(&server, &update).await;
-    assert_eq!(body["status"], "completed");
-    assert_eq!(body["x-update"]["state"], "COMMITTED");
-    assert!(body.get("x-ota-substate").is_none());
-    assert_eq!(*backend.hook_log.lock(), ["finalize_flash", "commit_flash"]);
+        let resp = put(&server, &format!("{update}/execute{query}")).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED, "{query}");
+        let body = poll_terminal_at(&server, &update).await;
+        assert_eq!(body["status"], "completed", "{query}");
+        assert_eq!(body["x-update"]["state"], "COMMITTED", "{query}");
+        assert!(body.get("x-ota-substate").is_none(), "{query}");
+        assert_eq!(
+            *backend.hook_log.lock(),
+            ["finalize_flash", "commit_flash"],
+            "{query}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -3038,17 +3049,19 @@ async fn v1_execute_ordering_404_then_400_then_state_checks() {
         let resp = put(&server, execute).await;
         assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND, "{execute}");
     }
-    // Not prepared: without the mode the 400 comes first; with it the
-    // state check answers as before.
+    // Not prepared: another mode's 400 comes first; orchestrated, with or
+    // without the alias, the state check answers as before.
     register_on(&server, "/v1", "v1-unprepared").await;
     let execute = "/v1/components/dev1/updates/v1-unprepared/execute";
-    let resp = put(&server, execute).await;
+    let resp = put(&server, &format!("{execute}?x-ota-control=auto")).await;
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
-    assert_eq!(resp.text().await.unwrap(), EXECUTE_NEEDS_ORCHESTRATED);
-    let resp = put(&server, &format!("{execute}?x-ota-control=orchestrated")).await;
-    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["error_code"], "precondition-not-fulfilled", "{body}");
+    assert_eq!(resp.text().await.unwrap(), EXECUTE_CONTROL_REFUSED);
+    for query in ORCHESTRATED {
+        let resp = put(&server, &format!("{execute}{query}")).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT, "{query}");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error_code"], "precondition-not-fulfilled", "{body}");
+    }
 }
 
 /// The legacy tree keeps main's standard mode: a banked execute without the
@@ -3118,7 +3131,7 @@ async fn v1_automated_is_not_supported() {
 }
 
 #[tokio::test]
-async fn execute_control_is_documented_on_v1_only() {
+async fn execute_takes_no_parameter_on_v1() {
     let (server, _backend) = spawn_with("banked").await;
     let (st, doc) = get_json(&server, "/v1/docs").await;
     assert_eq!(st, reqwest::StatusCode::OK);
@@ -3126,14 +3139,9 @@ async fn execute_control_is_documented_on_v1_only() {
         "/v1/components/{component_id}/updates/{update_id}/execute",
         "/v1/updates/{update_id}/execute",
     ] {
-        let params = &doc["paths"][path]["put"]["parameters"];
-        assert_eq!(params.as_array().map(Vec::len), Some(1), "{path}: {params}");
-        let param = &params[0];
-        assert_eq!(param["name"], "x-ota-control", "{path}");
-        assert_eq!(param["in"], "query", "{path}");
-        assert_eq!(param["required"], true, "{path}");
-        assert_eq!(param["schema"]["enum"], serde_json::json!(["orchestrated"]));
-        assert!(param["description"].is_string(), "{path}");
+        let op = &doc["paths"][path]["put"];
+        assert!(op.is_object(), "{path}");
+        assert!(op.get("parameters").is_none(), "{path}: {op}");
     }
     let (st, doc) = get_json(&server, "/vehicle/v1/docs").await;
     assert_eq!(st, reqwest::StatusCode::OK);
@@ -3145,7 +3153,7 @@ async fn execute_control_is_documented_on_v1_only() {
         let (_, body) = get_json(&server, "/v1/components/dev1").await;
         assert_eq!(
             body["capabilities"]["x-update"],
-            serde_json::json!({ "verdict": verdict, "verdict_scope": "update", "control": ["orchestrated"] }),
+            serde_json::json!({ "verdict": verdict, "verdict_scope": "update" }),
             "{shape}"
         );
         let (_, body) = get_json(&server, "/vehicle/v1/components/dev1").await;
@@ -3158,7 +3166,10 @@ async fn execute_control_is_documented_on_v1_only() {
 
     let (_, exts) = get_json(&server, "/.well-known/sovd-extensions").await;
     assert_eq!(
-        exts["extensions"]["x-ota-control"]["required_on"],
+        exts["extensions"]["x-ota-control"]["implied_on"],
         serde_json::json!(["/v1"])
     );
+    assert!(exts["extensions"]["x-ota-control"]
+        .get("required_on")
+        .is_none());
 }

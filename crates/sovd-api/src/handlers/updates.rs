@@ -356,10 +356,11 @@ pub struct PartCreatedResponse {
 /// orchestrated-extension flow: the execute task pauses post-activation
 /// at `substate=awaiting-verdict` and waits for the orchestrator to
 /// issue `PUT /x-ota-commit` or `/x-ota-rollback` before transitioning
-/// to a terminal status.  On `/v1` it is required ([`EXECUTE_CONTROL`]):
-/// absent or any other value → 400 `incomplete-request`.  On the legacy
-/// tree, absent or any other value → standard server-driven flow
-/// (Phase A behaviour, deprecated).
+/// to a terminal status.  On `/v1` every execute is orchestrated: x-update
+/// has no request parameter, the parameter is the x-ota alias and may be
+/// left out; any value but those in [`EXECUTE_CONTROL`] → 400
+/// `incomplete-request`.  On the legacy tree, absent or any other value →
+/// standard server-driven flow (Phase A behaviour, deprecated).
 ///
 /// `tasks/spec-aligned-updates-wire.md` §2.2.
 #[derive(Debug, Deserialize, Default)]
@@ -368,13 +369,20 @@ pub struct ExecuteQuery {
     pub control: Option<String>,
 }
 
-/// The `x-ota-control` values `PUT /v1/.../execute` accepts: this server
-/// settles an update only on the tester's verdict.
+/// The `x-ota-control` values `PUT /v1/.../execute` accepts besides none:
+/// this server settles an update only on the tester's verdict.
 pub(crate) const EXECUTE_CONTROL: &[&str] = &["orchestrated"];
 
 impl ExecuteQuery {
     fn is_orchestrated(&self) -> bool {
         self.control.as_deref() == Some("orchestrated")
+    }
+
+    /// Whether the execute runs orchestrated on `tree`: always on `/v1`
+    /// (where only an unaccepted value is refused), on request on the
+    /// legacy tree.
+    fn orchestrated_on(&self, tree: Tree) -> bool {
+        tree == Tree::V1 || self.is_orchestrated()
     }
 }
 
@@ -1116,7 +1124,7 @@ async fn put_execute_inner(
     // components — singleshot has no trial phase to pause at.  We
     // accept the query param on singleshot but silently treat it as
     // standard mode so callers can use one verb across both shapes.
-    let orchestrated = query.is_orchestrated() && !is_singleshot;
+    let orchestrated = query.orchestrated_on(tree) && !is_singleshot;
     let key = UpdateKey::new(&component_id, &update_id);
 
     let registration_token = {
@@ -1124,12 +1132,12 @@ async fn put_execute_inner(
         let entry = store
             .get_mut(&key)
             .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
-        // `/v1` never runs an execute nobody will settle: without the
-        // orchestrated control mode a banked update would sit in an
-        // uncommitted trial.  Refused before any state change.
-        if tree == Tree::V1 && !query.is_orchestrated() {
+        // `/v1` never runs an execute nobody will settle: every execute is
+        // orchestrated, so the x-ota alias may name only that mode.  Another
+        // value is refused before any state change.
+        if tree == Tree::V1 && query.control.is_some() && !query.is_orchestrated() {
             return Err(ApiError::MissingParameter {
-                message: "execute requires x-ota-control=orchestrated: this server \
+                message: "x-ota-control accepts only orchestrated: this server \
                           settles an update only on the tester's verdict"
                     .into(),
                 name: "x-ota-control",

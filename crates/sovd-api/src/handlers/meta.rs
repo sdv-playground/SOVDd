@@ -181,26 +181,14 @@ pub async fn method_not_allowed_fallback(
 const LEGACY_RESTART_EXECUTION: &str = "/components/{component_id}/status/restart/{exec_id}";
 
 /// Whether `entry` is listed on `/v1` only: the part read-back (the frozen
-/// legacy tree keeps its 405 there) and execute, whose `/v1` form requires
-/// [`execute_parameters`] (the frozen legacy document never listed it).
+/// legacy tree keeps its 405 there) and execute, whose `/v1` form is
+/// always orchestrated (the frozen legacy document never listed it).
 fn v1_only(entry: &PathEntry) -> bool {
     entry.method == "GET" && entry.path.ends_with("/bulk-data/{part_id}") || is_execute(entry)
 }
 
 fn is_execute(entry: &PathEntry) -> bool {
     entry.method == "PUT" && entry.path.ends_with("/updates/{update_id}/execute")
-}
-
-/// The OpenAPI `parameters` of `PUT /v1/.../execute`: the required
-/// `x-ota-control` (see `updates::EXECUTE_CONTROL`).
-fn execute_parameters() -> serde_json::Value {
-    serde_json::json!([{
-        "name": "x-ota-control",
-        "in": "query",
-        "required": true,
-        "description": "Execute control mode; the update is settled only by the tester's verdict (x-update-commit / x-update-rollback).",
-        "schema": { "type": "string", "enum": crate::handlers::updates::EXECUTE_CONTROL },
-    }])
 }
 
 /// One row of the path inventory consumed by [`capability_description`].
@@ -243,7 +231,7 @@ fn x_sovd_data_category_for(path: &str) -> Option<&'static str> {
 
 /// Summary of the `/v1`-only execute operations.
 const EXECUTE_SUMMARY: &str =
-    "Execute a prepared SW update (§7.18.6) — 202 + Location. Requires x-ota-control=orchestrated; without it 400 incomplete-request.";
+    "Execute a prepared SW update (§7.18.6) — 202 + Location. Orchestrated: a banked update is settled only by the tester's verdict (x-update-commit / x-update-rollback).";
 
 /// Curated path inventory.  Maintained alongside the router in
 /// `lib.rs::create_router`; the doc emitter walks this slice rather
@@ -775,11 +763,6 @@ pub fn build_capability_doc_for(
             None => continue, // out of scope for this entity path
         };
         let mut op = operation(entry.summary);
-        if is_execute(entry) {
-            op.as_object_mut()
-                .unwrap()
-                .insert("parameters".to_string(), execute_parameters());
-        }
         // Public resources (§5.4.4) override the global bearer requirement
         // with an empty security set — they need no authentication.
         if matches!(entry.path, "/health" | "/version-info" | "/docs") {
@@ -1058,7 +1041,7 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
                 "kind":   "query-param + lifecycle verbs",
                 "where":  "PUT {base}/components/{id}/updates/{update_id}/execute",
                 "values": ["orchestrated"],
-                "required_on": ["/v1"],
+                "implied_on": ["/v1"],
                 "verbs": [
                     "PUT {base}/components/{id}/updates/{update_id}/x-ota-commit",
                     "PUT {base}/components/{id}/updates/{update_id}/x-ota-rollback",
@@ -1068,10 +1051,11 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
                 "spec":   "tasks/spec-aligned-updates-wire.md sec 2.2",
                 "summary": "Execute-phase control for orchestrators \
                             that drive the trial verdict (commit / \
-                            rollback) out-of-band. Required on /v1: \
-                            execute without it answers 400 \
-                            incomplete-request (opt-in on the deprecated \
-                            /vehicle/v1 tree). \
+                            rollback) out-of-band. Implied on /v1, \
+                            where every execute is orchestrated: the \
+                            parameter may be left out, and any other \
+                            value answers 400 incomplete-request \
+                            (opt-in on the deprecated /vehicle/v1 tree). \
                             x-ota-force-rollback unconditionally clears \
                             stuck backend trial state when no in-flight \
                             update_id exists."
