@@ -2750,7 +2750,7 @@ async fn get_part(server: &TestServer, path: &str) -> reqwest::Response {
 }
 
 #[tokio::test]
-async fn uploaded_part_reads_back_on_both_trees_and_collections() {
+async fn uploaded_part_reads_back_on_v1_only() {
     let (server, _backend) = spawn_with("banked").await;
     let image: Vec<u8> = (0..=255u8).cycle().take(10_000).collect();
     let manifest = b"{\"suit\":1}".to_vec();
@@ -2773,6 +2773,15 @@ async fn uploaded_part_reads_back_on_both_trees_and_collections() {
                 ("%23rt-firmware.s19", "application/x-srec", &image),
             ] {
                 let resp = get_part(&server, &format!("{collection}/{part}")).await;
+                if base == "/vehicle/v1" {
+                    // The frozen legacy tree has no read-back.
+                    assert_eq!(
+                        resp.status(),
+                        reqwest::StatusCode::METHOD_NOT_ALLOWED,
+                        "{collection}/{part}"
+                    );
+                    continue;
+                }
                 assert_eq!(
                     resp.status(),
                     reqwest::StatusCode::OK,
@@ -2789,15 +2798,32 @@ async fn uploaded_part_reads_back_on_both_trees_and_collections() {
 }
 
 #[tokio::test]
+async fn part_read_back_is_documented_on_v1_only() {
+    let (server, _backend) = spawn_with("banked").await;
+    for (base, listed) in [("/v1", true), ("/vehicle/v1", false)] {
+        let (st, doc) = get_json(&server, &format!("{base}/docs")).await;
+        assert_eq!(st, reqwest::StatusCode::OK);
+        for path in [
+            "/components/{component_id}/updates/{update_id}/bulk-data/{part_id}",
+            "/updates/{update_id}/bulk-data/{part_id}",
+        ] {
+            let item = &doc["paths"][format!("{base}{path}")];
+            assert!(item["put"].is_object(), "{base}{path}");
+            assert_eq!(item["get"].is_object(), listed, "{base}{path}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn reading_back_an_unknown_part_or_update_is_404() {
     let (server, _backend) = spawn_with("banked").await;
     let id = open_update(&server).await;
     upload_part(&server, &id, "manifest", b"m").await;
     for path in [
-        format!("/vehicle/v1/components/dev1/updates/{id}/bulk-data/nope"),
-        format!("/vehicle/v1/updates/{id}/bulk-data/nope"),
-        "/vehicle/v1/components/dev1/updates/nope/bulk-data/manifest".to_string(),
-        "/vehicle/v1/updates/nope/bulk-data/manifest".to_string(),
+        format!("/v1/components/dev1/updates/{id}/bulk-data/nope"),
+        format!("/v1/updates/{id}/bulk-data/nope"),
+        "/v1/components/dev1/updates/nope/bulk-data/manifest".to_string(),
+        "/v1/updates/nope/bulk-data/manifest".to_string(),
     ] {
         let resp = get_part(&server, &path).await;
         assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND, "{path}");
@@ -2806,7 +2832,7 @@ async fn reading_back_an_unknown_part_or_update_is_404() {
     }
 
     // Deleted: the record is gone.
-    let base = format!("/vehicle/v1/components/dev1/updates/{id}");
+    let base = format!("/v1/components/dev1/updates/{id}");
     let resp = http()
         .delete(format!("{}{base}", server.base_url()))
         .send()
@@ -2823,7 +2849,7 @@ async fn reading_back_a_part_the_backend_no_longer_keeps_is_404() {
     let id = open_update(&server).await;
     upload_part(&server, &id, "manifest", b"m").await;
     backend.received.lock().clear();
-    let path = format!("/vehicle/v1/components/dev1/updates/{id}/bulk-data/manifest");
+    let path = format!("/v1/components/dev1/updates/{id}/bulk-data/manifest");
     let resp = get_part(&server, &path).await;
     assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
 }
@@ -2835,8 +2861,8 @@ async fn reading_back_without_backend_support_is_501() {
     let id = open_update(&server).await;
     upload_part(&server, &id, "manifest", b"m").await;
     for path in [
-        format!("/vehicle/v1/components/dev1/updates/{id}/bulk-data/manifest"),
-        format!("/vehicle/v1/updates/{id}/bulk-data/manifest"),
+        format!("/v1/components/dev1/updates/{id}/bulk-data/manifest"),
+        format!("/v1/updates/{id}/bulk-data/manifest"),
     ] {
         let resp = get_part(&server, &path).await;
         assert_eq!(

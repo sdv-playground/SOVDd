@@ -38,6 +38,18 @@ fn legacy_docs_as_v1(body: &[u8]) -> serde_json::Value {
     doc
 }
 
+/// A `/v1` doc without its `/v1`-only operations (the part read-back), to
+/// compare with [`legacy_docs_as_v1`].
+fn v1_docs_without_v1_only(body: &[u8]) -> serde_json::Value {
+    let mut doc = json(body);
+    for (path, item) in doc["paths"].as_object_mut().expect("paths") {
+        if path.ends_with("/bulk-data/{part_id}") {
+            item.as_object_mut().expect("path item").remove("get");
+        }
+    }
+    doc
+}
+
 // ---------------------------------------------------------------------------
 // a. version-info
 // ---------------------------------------------------------------------------
@@ -112,7 +124,10 @@ async fn docs_are_public_under_both_bases() {
         assert_eq!(json(&body)["openapi"], "3.1.0");
         globals.push(body);
     }
-    assert_eq!(json(&globals[0]), legacy_docs_as_v1(&globals[1]));
+    assert_eq!(
+        v1_docs_without_v1_only(&globals[0]),
+        legacy_docs_as_v1(&globals[1])
+    );
 
     // Entity-scoped docs (router fallback) — public, and scoped the same way
     // under both bases.
@@ -128,7 +143,7 @@ async fn docs_are_public_under_both_bases() {
         scoped.push(body.to_string());
     }
     assert_eq!(
-        json(scoped[0].as_bytes()),
+        v1_docs_without_v1_only(scoped[0].as_bytes()),
         legacy_docs_as_v1(scoped[1].as_bytes())
     );
 }
@@ -366,7 +381,10 @@ async fn capability_docs_use_request_base() {
         }
         scoped.push(body);
     }
-    assert_eq!(json(&scoped[0]), legacy_docs_as_v1(&scoped[1]));
+    assert_eq!(
+        v1_docs_without_v1_only(&scoped[0]),
+        legacy_docs_as_v1(&scoped[1])
+    );
 }
 
 // ---------------------------------------------------------------------------

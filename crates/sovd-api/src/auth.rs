@@ -229,6 +229,7 @@ pub fn route_capability(method: &Method, path: &str) -> Capability {
     // `/admin/*` is rooted (off every base); the rest is decided on the
     // base-relative path so `/v1` and `/vehicle/v1` resolve identically.
     let admin = path.starts_with("/admin/");
+    let v1 = Tree::split_path(path).is_some_and(|(tree, _)| tree == Tree::V1);
     let path = api_relative(path);
     if admin {
         Capability::Admin
@@ -255,8 +256,9 @@ pub fn route_capability(method: &Method, path: &str) -> Capability {
     } else if path.ends_with("/status/restart") || path.contains("/reset") {
         Capability::ResetExecute
     } else if path.contains("/updates") {
-        // Reading an uploaded part back needs what uploading it needs.
-        if is_get && !path.contains("/bulk-data/") {
+        // Reading an uploaded part back (`/v1` only) needs what uploading it
+        // needs; the legacy tree has no such GET and decides as before.
+        if is_get && !(v1 && path.contains("/bulk-data/")) {
             Capability::Read
         } else if path.ends_with("/execute") || path.ends_with("/automated") {
             Capability::UpdateExecute
@@ -965,6 +967,13 @@ mod tests {
             assert_eq!(is_public_path(&v1), is_public_path(&legacy), "{rel}");
             assert_eq!(component_in_path(&v1), component_in_path(&legacy), "{rel}");
             for m in &methods {
+                // The part read-back is served on `/v1` only (UpdateTransfer);
+                // the legacy tree has no such route and keeps its old decision.
+                if m == Method::GET && rel.contains("/bulk-data/") {
+                    assert_eq!(route_capability(m, &v1), Capability::UpdateTransfer);
+                    assert_eq!(route_capability(m, &legacy), Capability::Read);
+                    continue;
+                }
                 assert_eq!(
                     route_capability(m, &v1),
                     route_capability(m, &legacy),
