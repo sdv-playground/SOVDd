@@ -157,10 +157,27 @@ pub async fn method_not_allowed_fallback(
 /// The legacy-only restart execution stub (see `restart_status_routes`).
 const LEGACY_RESTART_EXECUTION: &str = "/components/{component_id}/status/restart/{exec_id}";
 
-/// Whether `entry` is served on `/v1` only: the part read-back (the frozen
-/// legacy tree keeps its 405 there).
+/// Whether `entry` is listed on `/v1` only: the part read-back (the frozen
+/// legacy tree keeps its 405 there) and execute, whose `/v1` form requires
+/// [`execute_parameters`] (the frozen legacy document never listed it).
 fn v1_only(entry: &PathEntry) -> bool {
-    entry.method == "GET" && entry.path.ends_with("/bulk-data/{part_id}")
+    entry.method == "GET" && entry.path.ends_with("/bulk-data/{part_id}") || is_execute(entry)
+}
+
+fn is_execute(entry: &PathEntry) -> bool {
+    entry.method == "PUT" && entry.path.ends_with("/updates/{update_id}/execute")
+}
+
+/// The OpenAPI `parameters` of `PUT /v1/.../execute`: the required
+/// `x-ota-control` (see `updates::EXECUTE_CONTROL`).
+fn execute_parameters() -> serde_json::Value {
+    serde_json::json!([{
+        "name": "x-ota-control",
+        "in": "query",
+        "required": true,
+        "description": "Execute control mode; the update is settled only by the tester's verdict (x-update-commit / x-update-rollback).",
+        "schema": { "type": "string", "enum": crate::handlers::updates::EXECUTE_CONTROL },
+    }])
 }
 
 /// One row of the path inventory consumed by [`capability_description`].
@@ -200,6 +217,10 @@ fn x_sovd_data_category_for(path: &str) -> Option<&'static str> {
         None
     }
 }
+
+/// Summary of the `/v1`-only execute operations.
+const EXECUTE_SUMMARY: &str =
+    "Execute a prepared SW update (§7.18.6) — 202 + Location. Requires x-ota-control=orchestrated; without it 400 incomplete-request.";
 
 /// Curated path inventory.  Maintained alongside the router in
 /// `lib.rs::create_router`; the doc emitter walks this slice rather
@@ -378,6 +399,11 @@ const PATHS: &[PathEntry] = &[
         path: "/components/{component_id}/updates/{update_id}/bulk-data/{part_id}",
         summary: "Read an uploaded part back: the bytes as received, with Content-Type and ETag. 404 once it is no longer kept.",
     },
+    PathEntry {
+        method: "PUT",
+        path: "/components/{component_id}/updates/{update_id}/execute",
+        summary: EXECUTE_SUMMARY,
+    },
     // Node-level updates (§7.18.1.1) — alias of the per-component collection;
     // a registration names its component in `target`.
     PathEntry {
@@ -419,6 +445,11 @@ const PATHS: &[PathEntry] = &[
         method: "GET",
         path: "/updates/{update_id}/bulk-data/{part_id}",
         summary: "Read an uploaded part back: the bytes as received, with Content-Type and ETag. 404 once it is no longer kept.",
+    },
+    PathEntry {
+        method: "PUT",
+        path: "/updates/{update_id}/execute",
+        summary: EXECUTE_SUMMARY,
     },
     // logs (§7.21)
     PathEntry {
@@ -720,6 +751,11 @@ pub fn build_capability_doc_for(
             None => continue, // out of scope for this entity path
         };
         let mut op = operation(entry.summary);
+        if is_execute(entry) {
+            op.as_object_mut()
+                .unwrap()
+                .insert("parameters".to_string(), execute_parameters());
+        }
         // Public resources (§5.4.4) override the global bearer requirement
         // with an empty security set — they need no authentication.
         if matches!(entry.path, "/health" | "/version-info" | "/docs") {
@@ -979,6 +1015,7 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
                 "kind":   "query-param + lifecycle verbs",
                 "where":  "PUT {base}/components/{id}/updates/{update_id}/execute",
                 "values": ["orchestrated"],
+                "required_on": ["/v1"],
                 "verbs": [
                     "PUT {base}/components/{id}/updates/{update_id}/x-ota-commit",
                     "PUT {base}/components/{id}/updates/{update_id}/x-ota-rollback",
@@ -986,9 +1023,12 @@ pub async fn sovd_extensions() -> Json<serde_json::Value> {
                 ],
                 "fields": ["x-ota-substate"],
                 "spec":   "tasks/spec-aligned-updates-wire.md sec 2.2",
-                "summary": "Opt-in fine-grained execute-phase control \
-                            for orchestrators that want to drive the \
-                            trial verdict (commit / rollback) out-of-band. \
+                "summary": "Execute-phase control for orchestrators \
+                            that drive the trial verdict (commit / \
+                            rollback) out-of-band. Required on /v1: \
+                            execute without it answers 400 \
+                            incomplete-request (opt-in on the deprecated \
+                            /vehicle/v1 tree). \
                             x-ota-force-rollback unconditionally clears \
                             stuck backend trial state when no in-flight \
                             update_id exists."

@@ -38,15 +38,17 @@ fn legacy_docs_as_v1(body: &[u8]) -> serde_json::Value {
     doc
 }
 
-/// A `/v1` doc without its `/v1`-only operations (the part read-back), to
-/// compare with [`legacy_docs_as_v1`].
+/// A `/v1` doc without its `/v1`-only operations (the part read-back and
+/// execute), to compare with [`legacy_docs_as_v1`].
 fn v1_docs_without_v1_only(body: &[u8]) -> serde_json::Value {
     let mut doc = json(body);
-    for (path, item) in doc["paths"].as_object_mut().expect("paths") {
+    let paths = doc["paths"].as_object_mut().expect("paths");
+    for (path, item) in paths.iter_mut() {
         if path.ends_with("/bulk-data/{part_id}") {
             item.as_object_mut().expect("path item").remove("get");
         }
     }
+    paths.retain(|path, _| !path.ends_with("/execute"));
     doc
 }
 
