@@ -12,6 +12,7 @@ use sovd_uds::config::OutputConfig;
 use crate::auth::{AuthContext, Authorizer};
 use crate::error::ApiError;
 use crate::handlers::subscriptions::SubscriptionManager;
+use crate::topology::NodeTopology;
 
 /// Bounded recent-executions cache keyed by `(component_id, op_id, exec_id)`.
 ///
@@ -372,6 +373,10 @@ pub struct AppState {
     /// §7.5 document. Empty by default; set via
     /// [`AppState::with_capability_extensions`].
     capability_extensions: Arc<CapabilityExtensions>,
+    /// The node this server also is on `/v1`, its backends the node's
+    /// subcomponents; `None` keeps every backend a top-level component only.
+    /// Set via [`AppState::with_node`].
+    node: Option<Arc<NodeTopology>>,
 }
 
 impl AppState {
@@ -389,6 +394,7 @@ impl AppState {
             updates_config: Arc::new(UpdatesConfig::default()),
             auth: Arc::new(AuthContext::default()),
             capability_extensions: Arc::new(CapabilityExtensions::default()),
+            node: None,
         }
     }
 
@@ -409,6 +415,7 @@ impl AppState {
             updates_config: Arc::new(UpdatesConfig::default()),
             auth: Arc::new(AuthContext::default()),
             capability_extensions: Arc::new(CapabilityExtensions::default()),
+            node: None,
         }
     }
 
@@ -430,6 +437,7 @@ impl AppState {
             updates_config: Arc::new(UpdatesConfig::default()),
             auth: Arc::new(AuthContext::default()),
             capability_extensions: Arc::new(CapabilityExtensions::default()),
+            node: None,
         }
     }
 
@@ -472,6 +480,37 @@ impl AppState {
     /// §7.5 doc builder.
     pub fn capability_extensions(&self) -> &CapabilityExtensions {
         &self.capability_extensions
+    }
+
+    /// Serve the backends on `/v1` also as the subcomponents of `node` (see
+    /// [`crate::topology`]). Refused when the node's id is not a plain path
+    /// segment (RFC 3986 unreserved characters) or is also a backend's id. The
+    /// router the state ends up in has to be wrapped in
+    /// [`crate::with_node_topology`].
+    pub fn with_node(mut self, node: NodeTopology) -> Result<Self, String> {
+        let id = node.id();
+        if id.is_empty()
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~'))
+        {
+            return Err(format!(
+                "node id '{id}' is not a path segment of letters, digits, '-', '.', '_' or '~'"
+            ));
+        }
+        if self.backends.contains_key(id) {
+            return Err(format!(
+                "node id '{id}' is also a component's id; the node and its subcomponents need \
+                 ids of their own"
+            ));
+        }
+        self.node = Some(Arc::new(node));
+        Ok(self)
+    }
+
+    /// The node this server also is on `/v1`, if one is configured.
+    pub fn node(&self) -> Option<&Arc<NodeTopology>> {
+        self.node.as_ref()
     }
 
     /// Create AppState from a single backend (for simple single-entity servers)

@@ -687,7 +687,10 @@ pub async fn require_auth(
         bearer: header.as_deref(),
         method: &method,
         path: &path,
-        component: component_in_path(&path),
+        // The node's document and subcomponents listing are scope-checked in
+        // their handlers, like the components collection (see `crate::topology`).
+        component: component_in_path(&path)
+            .filter(|_| !state.node().is_some_and(|node| node.is_own_path(&path))),
         capability: route_capability(&method, &path),
     };
     // §5.4.4: a valid token lacking the scope is 403 on `/v1`; the legacy

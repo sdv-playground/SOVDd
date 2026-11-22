@@ -10,6 +10,12 @@ port = 9080
 # identification = "cvc"   # mDNS instance / <id>.local hostname; defaults to the TLS leaf's SAN, then the OS hostname
 request_timeout_ms = 5000
 
+# Node topology (opt-in): on /v1, also serve the components as the subcomponents
+# of one node, /v1/components/<id>/subcomponents/... (ARCHITECTURE.md §7.1).
+# [server.node]
+# id = "cvc"
+# name = "Central vehicle computer"
+
 # Transport configuration
 # Options: "socketcan", "someip", "mock"
 [transport]

@@ -1,5 +1,7 @@
 //! Component discovery handlers
 
+use std::sync::Arc;
+
 use axum::extract::{Path, State};
 use axum::{Extension, Json};
 use serde::Serialize;
@@ -10,6 +12,7 @@ use crate::auth::ClientContext;
 use crate::error::ApiError;
 use crate::handlers::updates::{x_update_verdict_scope, XUpdateVerdictScope};
 use crate::state::AppState;
+use crate::topology::NodeTopology;
 use crate::Tree;
 
 #[derive(Serialize)]
@@ -52,6 +55,25 @@ pub struct ComponentDetailResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub configurations: Option<String>,
 }
+
+/// The node's document (`/v1/components/{node}`, see [`crate::topology`]): its
+/// node-level resources and its subcomponents. It has no resources of a backend.
+#[derive(Serialize)]
+pub struct NodeDetailResponse {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub entity_type: String,
+    pub status: String,
+    /// Present when a backend supports software update, as on the root document.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updates: Option<String>,
+    pub operations: String,
+    pub subcomponents: String,
+}
+
+/// The node's entity type.
+const NODE_TYPE: &str = "node";
 
 #[derive(Serialize)]
 pub struct CapabilitiesResponse {
@@ -120,32 +142,110 @@ impl From<&Capabilities> for CapabilitiesResponse {
 /// C-031 non-leakage: when authentication is enabled, the listing is filtered
 /// to the components the client's scopes permit (no `ClientContext` ⇒ auth
 /// disabled ⇒ list everything).
+///
+/// On `/v1` of a server configured with a node, the node comes first, then the
+/// backends as on a server without one (see [`crate::topology`]).
 pub async fn list_components(
     State(state): State<AppState>,
     Extension(tree): Extension<Tree>,
     client: Option<Extension<ClientContext>>,
 ) -> Json<ComponentsResponse> {
     let client = client.map(|Extension(c)| c);
-    let items: Vec<ComponentInfo> = state
+    let node = state
+        .node()
+        .filter(|node| tree == Tree::V1 && node_visible(&state, node, client.as_ref()))
+        .map(|node| ComponentInfo {
+            id: node.id().to_owned(),
+            name: node.name().to_owned(),
+            description: None,
+            entity_type: NODE_TYPE.to_owned(),
+            href: node.href(),
+        });
+    let items = node
+        .into_iter()
+        .chain(backend_items(&state, client.as_ref(), |id| {
+            tree.component(id)
+        }))
+        .collect();
+
+    Json(ComponentsResponse { items })
+}
+
+/// GET /v1/components/{node} — the node's document (node topology only).
+///
+/// Scope-checked here rather than as a component: the node is open to the
+/// clients the components listing shows it to.
+pub async fn get_node(
+    State(state): State<AppState>,
+    Extension(node): Extension<Arc<NodeTopology>>,
+    client: Option<Extension<ClientContext>>,
+) -> Result<Json<NodeDetailResponse>, ApiError> {
+    if !node_visible(&state, &node, client.as_ref().map(|Extension(c)| c)) {
+        return Err(ApiError::Forbidden(format!(
+            "no scope for node {} or any of its subcomponents",
+            node.id()
+        )));
+    }
+    let href = node.href();
+    let updates = state
+        .backends()
+        .values()
+        .any(|backend| backend.capabilities().software_update)
+        .then(|| format!("{href}/updates"));
+    Ok(Json(NodeDetailResponse {
+        id: node.id().to_owned(),
+        name: node.name().to_owned(),
+        entity_type: NODE_TYPE.to_owned(),
+        status: format!("{href}/status"),
+        updates,
+        operations: format!("{href}/operations"),
+        subcomponents: node.subcomponents_href(),
+    }))
+}
+
+/// GET /v1/components/{node}/subcomponents — the backends, as the node's
+/// subcomponents: the items of `/v1/components` with their node-form hrefs,
+/// scope-filtered alike (C-031 non-leakage).
+pub async fn list_subcomponents(
+    State(state): State<AppState>,
+    Extension(node): Extension<Arc<NodeTopology>>,
+    client: Option<Extension<ClientContext>>,
+) -> Json<ComponentsResponse> {
+    let client = client.map(|Extension(c)| c);
+    let items = backend_items(&state, client.as_ref(), |id| node.subcomponent_href(id)).collect();
+    Json(ComponentsResponse { items })
+}
+
+/// The backends `client` may access (no `ClientContext` ⇒ auth disabled ⇒
+/// every one), as listing items with the hrefs `href` renders.
+fn backend_items<'a>(
+    state: &'a AppState,
+    client: Option<&'a ClientContext>,
+    href: impl Fn(&str) -> String + 'a,
+) -> impl Iterator<Item = ComponentInfo> + 'a {
+    state
         .backends()
         .iter()
-        .filter(|(id, _)| match &client {
-            Some(c) => c.can_access_component(id.as_str()),
-            None => true, // auth disabled ⇒ no filtering
-        })
-        .map(|(id, backend)| {
+        .filter(move |(id, _)| client.is_none_or(|c| c.can_access_component(id)))
+        .map(move |(id, backend)| {
             let info = backend.entity_info();
             ComponentInfo {
                 id: id.clone(),
                 name: info.name.clone(),
                 description: info.description.clone(),
                 entity_type: info.entity_type.clone(),
-                href: tree.component(id),
+                href: href(id),
             }
         })
-        .collect();
+}
 
-    Json(ComponentsResponse { items })
+/// Whether `client` sees the node: when it may access the node or any of its
+/// subcomponents (no `ClientContext` ⇒ auth disabled ⇒ yes).
+fn node_visible(state: &AppState, node: &NodeTopology, client: Option<&ClientContext>) -> bool {
+    client.is_none_or(|c| {
+        c.can_access_component(node.id())
+            || state.backends().keys().any(|id| c.can_access_component(id))
+    })
 }
 
 /// GET /vehicle/v1/components/:component_id

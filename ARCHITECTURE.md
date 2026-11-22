@@ -405,6 +405,41 @@ graph LR
   Vehicle-Gateway SOVDd (no CAN) → {proxy → SOVDd; proxy → example-app → proxy → SOVDd} →
   `example-ecu` on vcan. `gateway_e2e_test.rs` covers the single-gateway-over-real-vcan case.
 
+### 7.1 Node topology (`sovd-api::topology`)
+
+By default every backend is a top-level component. A server configured with a node
+(`AppState::with_node(NodeTopology::new(id, name))`, `[server.node]` in `sovdd`) is also one vehicle
+node on `/v1`, its backends the node's subcomponents. Opt-in: without a node nothing changes.
+
+| Path (`/v1` only) | Serves |
+|---|---|
+| `/v1/components` | the node first (type `node`), then the backends as before (kept for the migration period) |
+| `/v1/components/{node}` | the node's document: `id`, `name`, `type`, links to `status`, `updates` (when a backend supports update, as on the root document), `operations` and `subcomponents` |
+| `/v1/components/{node}/subcomponents` | the backends with node-form hrefs, scope-filtered like `/v1/components` |
+| `/v1/components/{node}/subcomponents/{id}/...` | backend `id`'s entity API: everything `/v1/components/{id}/...` serves, embedder routes included |
+| `/v1/components/{node}/status`, `.../status/restart`, `.../updates[/...]`, `.../operations[/...]` | the node-level resources: whatever serves the root form (`/v1/status`, `/v1/updates/...`, an embedder's node verdict operations, ...) |
+| any other `/v1/components/{node}/...` | 404 (`GenericError`) |
+| `/v1/components/{id}/...` of a backend | served as before, **deprecated**: `Deprecation: true` and `Link: </v1/components/{node}/subcomponents/{id}/...>; rel="successor-version"` |
+| root forms `/v1/status`, `/v1/updates/...`, `/v1/operations/...` | served as before (dated legacy path; canonical is under the node) |
+
+The node does not alias any backend's resources: it carries node-level resources only. The node id
+must be a path segment no backend has as its id (`with_node` refuses it otherwise). `/vehicle/v1` is
+frozen: no node, and its responses are byte-identical to a server without one.
+
+The routes stay the flat ones: `with_node_topology(router, &state)` rewrites a node-form path onto
+its flat (or root-form) route before routing, so handlers, authorization (a subcomponent needs
+`component:{id}`, as the component does; a node-level resource what its root form needs) and any
+routes an embedder merged in serve the node form unchanged. It must wrap the embedder's **final**
+router, after its own routes are merged. Responses follow the form of the request: while a
+node-form request is served, `Tree::component` renders backends' URLs in the node form and
+`Tree::server` renders the node-level root as `/v1/components/{node}`, and a flat or root-form
+`Location` is rewritten to the node form. An embedder whose handlers render URLs in a body renders
+them through those two. The node's document and subcomponents listing are scope-checked in their
+handlers (visible to a client that may access the node or any subcomponent). The global `/v1/docs`
+lists the node form of every path besides the flat one; `/vehicle/v1/docs` is unchanged. Unlike
+gateway children (`/apps/...`, above), subcomponents are the server's own backends, not entities
+behind one of them.
+
 ---
 
 ## 8. Software update / flash
@@ -524,7 +559,8 @@ resolved relative to the current directory) with a warning, and errors out if th
 the gateway/test configs use 18082-18092.
 
 Recognized TOML sections: `[server]` (`port`); `[server.tls]` (certificate + private key → in-process
-rustls termination); `[server.auth]` (§13); `[transport]` (`socketcan`|`mock` + isotp);
+rustls termination); `[server.auth]` (§13); `[server.node]` (`id`, `name`: on `/v1`, also serve the
+components as the subcomponents of one node, §7.1); `[transport]` (`socketcan`|`mock` + isotp);
 `[session]`/`[session.security]`/`[session.keepalive]`; `[service_overrides]` (OEM SID remaps);
 `[ecu.<id>]` (transport, params, operations, outputs, flash, session/security, overrides);
 `[proxy.<id>]` (`url`, `component_id`, `auth_token`); `[gateway]` (`enabled`, `id`, `scan`).
