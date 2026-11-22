@@ -10,7 +10,7 @@ use sovd_core::Capabilities;
 
 use crate::auth::ClientContext;
 use crate::error::ApiError;
-use crate::handlers::updates::{x_update_verdict_scope, XUpdateVerdictScope, EXECUTE_CONTROL};
+use crate::handlers::updates::{x_update_verdict_scope, XUpdateVerdictScope};
 use crate::state::AppState;
 use crate::topology::NodeTopology;
 use crate::Tree;
@@ -117,10 +117,6 @@ pub struct XUpdateCapability {
     /// (`/v1` only, see `updates::x_update_verdict_scope`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verdict_scope: Option<XUpdateVerdictScope>,
-    /// The `x-ota-control` modes execute accepts (`/v1` only, where one is
-    /// required — see `updates::EXECUTE_CONTROL`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub control: Option<&'static [&'static str]>,
 }
 
 impl From<&Capabilities> for CapabilitiesResponse {
@@ -342,17 +338,14 @@ pub async fn get_component(
     let caps = backend.capabilities();
     let mut capabilities = CapabilitiesResponse::from(caps);
     let verdict_scope = x_update_verdict_scope(tree, backend.as_ref());
-    let control = (tree == Tree::V1).then_some(EXECUTE_CONTROL);
     capabilities.x_update = match backend.update_shape() {
         "banked" => Some(XUpdateCapability {
             verdict: true,
             verdict_scope,
-            control,
         }),
         "singleshot" => Some(XUpdateCapability {
             verdict: false,
             verdict_scope,
-            control,
         }),
         _ => None,
     };

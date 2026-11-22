@@ -105,18 +105,18 @@ root document's `updates` links the node's collection. `/vehicle/v1` is unchange
 ## Execute
 
 Under `/v1`, `PUT {entity}/updates/{update_id}/execute` (component and node-level collections)
-requires the query parameter `x-ota-control=orchestrated`: this server settles an update only on
-the tester's verdict. Without it, or with any other value, the answer is 400 before anything
-runs, and the update stays as it was:
+takes no x-update parameter: every execute is orchestrated, and this server settles a banked
+update only on the tester's verdict. The x-ota alias `x-ota-control=orchestrated` is accepted and
+changes nothing; any other `x-ota-control` value answers 400 before anything runs, and the update
+stays as it was:
 
 ```json
-{"error_code": "incomplete-request", "message": "execute requires x-ota-control=orchestrated: this server settles an update only on the tester's verdict", "parameters": {"x-ota-control": ["orchestrated"]}}
+{"error_code": "incomplete-request", "message": "x-ota-control accepts only orchestrated: this server settles an update only on the tester's verdict", "parameters": {"x-ota-control": ["orchestrated"]}}
 ```
 
-An unknown update answers 404 first; with the parameter, the state checks answer as before (409).
-The same request serves every update shape: a single-shot update takes it and commits on its own
-as before. The capability description (`GET /v1/docs`) lists the parameter as required, and the
-component capabilities carry `x-update.control` (see "Capability flag").
+An unknown update answers 404 first; then the state checks answer as before (409). The same
+request serves every update shape: a single-shot update takes it and commits on its own as before.
+The capability description (`GET /v1/docs`) lists execute without parameters.
 
 Under `/v1`, `PUT {entity}/updates/{update_id}/automated` answers 409
 `update-automated-not-supported`: an automated chain gives no verdict.
@@ -244,11 +244,10 @@ The x-ota member `x-ota-reset-kind` keeps its old vocabulary (`none`, `local`,
 `GET {entity}` (component body) carries:
 
 ```json
-"capabilities": { "...": "...", "x-update": { "verdict": true, "verdict_scope": "update" | "node", "control": ["orchestrated"] } }
+"capabilities": { "...": "...", "x-update": { "verdict": true, "verdict_scope": "update" | "node" } }
 ```
 
-`verdict_scope` is served under `/v1` only, with the values of the status member. `control`, also
-`/v1` only, lists the `x-ota-control` values execute accepts; one of them is required.
+`verdict_scope` is served under `/v1` only, with the values of the status member.
 
 | `verdict` | meaning |
 |---|---|
@@ -281,7 +280,7 @@ restart and the verdict.
 1. Register one update per component (`POST {entity}/updates`).
 2. Upload the manifest and parts.
 3. `PUT prepare` on each; wait for PREPARED.
-4. `PUT execute?x-ota-control=orchestrated` on each; each goes EXECUTING.
+4. `PUT execute` on each; each goes EXECUTING.
 5. The restart named by `reset_kind` happens: whoever is authorized issues
    `PUT {entity}/status/restart`, or a power cycle does it. The client awaits EXECUTED.
 6. When the updates report EXECUTED: send the verdict and await COMMITTED or ROLLED_BACK. A
@@ -298,7 +297,7 @@ restart and the verdict.
 | `x-ota-commit-trials`, `x-ota-rollback-trials` | node `x-update-commit`, `x-update-rollback` operations | machine manager |
 | `x-ota-update-state` | `x-update-state` | machine manager |
 | `x-ota-reset-kind`, `x-ota-substate` | `x-update.reset_kind`, `x-update.state` | this crate |
-| `?x-ota-control=orchestrated` | unchanged; required on `/v1` (see "Execute") | this crate |
+| `?x-ota-control=orchestrated` | none: every `/v1` execute is orchestrated (see "Execute") | this crate |
 | `x-ota-force-rollback` | unchanged (admin operation, not lifecycle) | this crate |
 | `x-ota-pull-update` | unchanged (admin operation, not lifecycle) | machine manager |
 
