@@ -5,11 +5,12 @@
 //! is mounted at `/version-info` not `/vehicle/v1/version-info`.
 
 use axum::extract::State;
-use axum::http::{StatusCode, Uri};
+use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 
+use crate::auth::ClientContext;
 use crate::error::ApiError;
 use crate::state::{AppState, CapabilityExtensions};
 use crate::topology::NodeTopology;
@@ -103,7 +104,7 @@ pub async fn version_info() -> Json<VersionInfoResponse> {
     Json(build_version_info())
 }
 
-/// Router fallback — dual role.
+/// Router fallback — three roles.
 ///
 /// 1. **Scoped capability description** (ISO 17978-3 §6.3.3/7.5, C-063):
 ///    any `GET {entity-path}/docs` at arbitrary depth returns `200` with
@@ -117,10 +118,28 @@ pub async fn version_info() -> Json<VersionInfoResponse> {
 ///    existence is not validated, and an empty scope still yields a valid
 ///    OpenAPI doc with empty `paths` (never a 404).
 ///
-/// 2. **Spec-conforming 404** for everything else — emit `GenericError`
+/// 2. **The node-level `data` and `operations` collections** of a server
+///    configured with a node: `GET /v1/components/{node}/data` (routed as
+///    `/v1/data`, see [`crate::topology`]) reaches the fallback when no
+///    embedder route serves `/v1/data`, and is answered by
+///    [`crate::handlers::components::node_collection`]; `operations` alike.
+///
+/// 3. **Spec-conforming 404** for everything else — emit `GenericError`
 ///    with the spec shape instead of axum's plain-text default.
-pub async fn not_found_fallback(State(state): State<AppState>, uri: Uri) -> Response {
+pub async fn not_found_fallback(
+    State(state): State<AppState>,
+    method: Method,
+    uri: Uri,
+    client: Option<Extension<ClientContext>>,
+) -> Response {
     let path = uri.path();
+    if let (Some(node), Method::GET, Some((Tree::V1, rest @ ("/data" | "/operations")))) =
+        (state.node(), method, Tree::split_path(path))
+    {
+        let client = client.as_ref().map(|Extension(c)| c);
+        return crate::handlers::components::node_collection(&state, node, client, &rest[1..])
+            .into_response();
+    }
     if let Some(entity) = path.strip_suffix("/docs") {
         // Strip a trailing slash if the entity itself ended with one
         // (e.g. `/vehicle/v1/components/foo//docs` is unusual but cheap
@@ -940,8 +959,8 @@ fn operation(summary: &str) -> serde_json::Value {
 }
 
 /// The served paths of a global `/v1` doc of a server configured with `node`
-/// (see [`crate::topology`]): the node's document and subcomponents listing,
-/// and every path [`to_node_forms`] maps.
+/// (see [`crate::topology`]): the node's document, subcomponents listing and
+/// `data` and `operations` collections, and every path [`to_node_forms`] maps.
 fn add_node_paths(doc: &mut serde_json::Value, node: &NodeTopology) {
     to_node_forms(doc, node);
     let Some(paths) = doc.get_mut("paths").and_then(|p| p.as_object_mut()) else {
@@ -955,6 +974,15 @@ fn add_node_paths(doc: &mut serde_json::Value, node: &NodeTopology) {
         node.subcomponents_href(),
         serde_json::json!({ "get": operation("List the node's subcomponents.") }),
     );
+    // The node-level collections, unless an embedder contributed its own.
+    for (collection, summary) in [
+        ("data", "List the node-level data items."),
+        ("operations", "List the node-level operations."),
+    ] {
+        paths
+            .entry(format!("{}/{collection}", node.href()))
+            .or_insert_with(|| serde_json::json!({ "get": operation(summary) }));
+    }
 }
 
 /// Every path of a `/v1` doc of a server configured with `node` that has a

@@ -10,8 +10,10 @@
 //!   node-level resources below, and carrying the unit's `x-identification` when set;
 //! - `/v1/components/{node}/subcomponents` lists the backends;
 //! - `/v1/components/{node}/subcomponents/{id}/...` is backend `id`'s entity API;
-//! - `/v1/components/{node}/status`, `.../status/restart`, `.../updates[/...]`,
-//!   `.../operations[/...]` and `.../data[/...]` are the node-level resources;
+//! - `/v1/components/{node}/status[/...]`, `.../updates[/...]`, `.../operations[/...]` and
+//!   `.../data[/...]` are the node-level resources; the `data` and `operations` collections no
+//!   embedder route serves list the embedder's contributed items
+//!   (`handlers::components::node_collection`, served from the router's fallback);
 //! - any other `/v1/components/{node}/...` answers 404;
 //! - the flat and root forms those paths map onto (`/v1/components/{id}/...` of any other id,
 //!   `/v1/status`, `/v1/updates/...`, `/v1/data/...`, ...) answer 404 naming the node form.
@@ -117,7 +119,7 @@ impl NodeTopology {
 
     /// The node form of a flat or root-form `/v1` path: `/v1/components/{id}/...` of any other
     /// component id as `/v1/components/{node}/subcomponents/{id}/...`, a node-level resource
-    /// `/v1/{status|updates|operations|data}...` as `/v1/components/{node}/...`. `None` for any
+    /// `/v1/{status|updates|operations|data}[/...]` as `/v1/components/{node}/...`. `None` for any
     /// other path, the node-form ones included.
     pub(crate) fn node_form(&self, path: &str) -> Option<String> {
         let (Tree::V1, rest) = Tree::split_path(path)? else {
@@ -167,11 +169,12 @@ impl NodeTopology {
     }
 }
 
-/// Whether `rest` (a path relative to `/v1` or to the node) is a node-level resource: `/status`,
-/// `/status/restart`, `/updates[/...]`, `/operations[/...]`, `/data[/...]`.
+/// Whether `rest` (a path relative to `/v1` or to the node) is a node-level resource:
+/// `/status[/...]`, `/updates[/...]`, `/operations[/...]`, `/data[/...]`.
 fn is_node_level(rest: &str) -> bool {
-    matches!(rest, "/status" | "/status/restart")
-        || ["/updates", "/operations", "/data"].iter().any(|c| {
+    ["/status", "/updates", "/operations", "/data"]
+        .iter()
+        .any(|c| {
             rest.strip_prefix(c)
                 .is_some_and(|r| r.is_empty() || r.starts_with('/'))
         })
@@ -285,6 +288,7 @@ mod tests {
         for rest in [
             "/status",
             "/status/restart",
+            "/status/x-boot-id",
             "/updates",
             "/updates/u1/bulk-data/p1",
             "/operations",
@@ -321,7 +325,7 @@ mod tests {
             "/v1/components/cvc/faults",
             "/v1/components/cvc/data-lists",
             "/v1/components/cvc/docs",
-            "/v1/components/cvc/status/x-boot-id",
+            "/v1/components/cvc/statusx",
             "/v1/components/cvc/updatesx",
             "/v1/components/cvc/subcomponents/",
             "/v1/components/cvc/subcomponents/cvc",
@@ -346,6 +350,7 @@ mod tests {
             "/v1/components/nope/data",
             "/v1/status",
             "/v1/status/restart",
+            "/v1/status/x-boot-id",
             "/v1/updates/u1/status",
             "/v1/operations/x-update-commit/executions",
             "/v1/data/x-update-state",
@@ -377,6 +382,10 @@ mod tests {
         assert_eq!(
             node.node_form("/v1/data/x-update-state").as_deref(),
             Some("/v1/components/cvc/data/x-update-state")
+        );
+        assert_eq!(
+            node.node_form("/v1/status/x-boot-id").as_deref(),
+            Some("/v1/components/cvc/status/x-boot-id")
         );
         assert_eq!(node.node_form("/v1/components/cvc/updates"), None);
         assert_eq!(node.node_form("/v1/components"), None);

@@ -225,6 +225,77 @@ pub async fn list_subcomponents(
     Json(ComponentsResponse { items })
 }
 
+/// A node-level `data` or `operations` collection ([`node_collection`]).
+#[derive(Serialize)]
+pub struct NodeItemsResponse {
+    pub items: Vec<NodeItem>,
+}
+
+/// An item of a [`NodeItemsResponse`].
+#[derive(Serialize)]
+pub struct NodeItem {
+    pub id: String,
+    pub name: String,
+    pub href: String,
+}
+
+/// GET /v1/components/{node}/data and /v1/components/{node}/operations (node
+/// topology only, `collection` being `"data"` or `"operations"`), when no
+/// embedder route serves the root form: the node-level items the embedder
+/// contributes to the capability description ([`AppState::with_capability_extensions`]),
+/// a `GET {base}/data/{item}` path an item of `data`, a
+/// `{base}/operations/{op}[/executions]` path one of `operations` (either
+/// base). An item's `name` is its path's summary (the `{op}` path's `get`
+/// before the `executions` path's `post`), else its id.
+///
+/// Scope-checked as the node's document is.
+pub(crate) fn node_collection(
+    state: &AppState,
+    node: &NodeTopology,
+    client: Option<&ClientContext>,
+    collection: &str,
+) -> Result<Json<NodeItemsResponse>, ApiError> {
+    if !node_visible(state, node, client) {
+        return Err(ApiError::Forbidden(format!(
+            "no scope for node {} or any of its subcomponents",
+            node.id()
+        )));
+    }
+    let mut names = std::collections::BTreeMap::<String, Option<String>>::new();
+    for (template, item) in &state.capability_extensions().paths {
+        let Some(rest) = Tree::split_path(template)
+            .and_then(|(_, rest)| rest.strip_prefix(&format!("/{collection}/")))
+        else {
+            continue;
+        };
+        let (id, tail) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
+        let method = match (collection, tail) {
+            ("data", "") if item.get("get").is_some() => "get",
+            ("operations", "") => "get",
+            ("operations", "/executions") => "post",
+            _ => continue,
+        };
+        if id.is_empty() || id.starts_with('{') {
+            continue;
+        }
+        let name = names.entry(id.to_owned()).or_default();
+        if let Some(summary) = item[method]["summary"].as_str() {
+            if tail.is_empty() || name.is_none() {
+                *name = Some(summary.to_owned());
+            }
+        }
+    }
+    let items = names
+        .into_iter()
+        .map(|(id, name)| NodeItem {
+            href: format!("{}/{collection}/{id}", node.href()),
+            name: name.unwrap_or_else(|| id.clone()),
+            id,
+        })
+        .collect();
+    Ok(Json(NodeItemsResponse { items }))
+}
+
 /// The backends `client` may access (no `ClientContext` ⇒ auth disabled ⇒
 /// every one), as listing items with the hrefs `href` renders.
 fn backend_items<'a>(
