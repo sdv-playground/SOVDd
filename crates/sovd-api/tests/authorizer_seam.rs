@@ -313,3 +313,40 @@ async fn component_admin_needs_its_bare_hyphenated_verb() {
             .is_err()
     );
 }
+
+// Reading an update part back (`/v1` only) is authorized as uploading it: the
+// same capability (`updates:transfer`) and component scope as the PUT. (Past
+// authorization the unknown update answers 404.)
+#[tokio::test]
+async fn reading_back_an_update_part_is_authorized_as_uploading_it() {
+    let server = server_with_injected_authorizer().await;
+    let client = reqwest::Client::new();
+    let url = format!(
+        "{}/v1/components/vm1/updates/u1/bulk-data/%23rt-firmware.s19",
+        server.base_url()
+    );
+    for (scopes, granted) in [
+        (&["component:vm1", "updates:transfer"][..], true),
+        (&["component:vm1"][..], false),
+        (&["component:other", "updates:transfer"][..], false),
+    ] {
+        let token = mint(scopes);
+        let put = client.put(&url).bearer_auth(&token).send().await.unwrap();
+        let get = client.get(&url).bearer_auth(&token).send().await.unwrap();
+        assert_eq!(get.status(), put.status(), "{scopes:?}");
+        assert_eq!(get.status() == 404, granted, "{scopes:?}");
+    }
+}
+
+// The legacy tree has no part read-back: a GET there is decided as before
+// (a plain read) and, once authorized, answers 405.
+#[tokio::test]
+async fn legacy_part_get_is_unchanged() {
+    let server = server_with_injected_authorizer().await;
+    let path = "/vehicle/v1/components/vm1/updates/u1/bulk-data/%23rt-firmware.s19";
+    let read = mint(&["component:vm1"]);
+    let other = mint(&["component:other"]);
+    assert_eq!(get_status(&server, path, Some(&read)).await, 405);
+    assert_eq!(get_status(&server, path, Some(&other)).await, 401);
+    assert_eq!(get_status(&server, path, None).await, 401);
+}

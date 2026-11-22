@@ -156,6 +156,12 @@ pub async fn method_not_allowed_fallback(
 /// The legacy-only restart execution stub (see `restart_status_routes`).
 const LEGACY_RESTART_EXECUTION: &str = "/components/{component_id}/status/restart/{exec_id}";
 
+/// Whether `entry` is served on `/v1` only: the part read-back (the frozen
+/// legacy tree keeps its 405 there).
+fn v1_only(entry: &PathEntry) -> bool {
+    entry.method == "GET" && entry.path.ends_with("/bulk-data/{part_id}")
+}
+
 /// One row of the path inventory consumed by [`capability_description`].
 struct PathEntry {
     /// HTTP method (uppercase).
@@ -366,6 +372,11 @@ const PATHS: &[PathEntry] = &[
         path: "/components/{component_id}/updates/{update_id}/bulk-data/{part_id}",
         summary: "Upload a part (legacy alias of POST bulk-data). 201 + ETag.",
     },
+    PathEntry {
+        method: "GET",
+        path: "/components/{component_id}/updates/{update_id}/bulk-data/{part_id}",
+        summary: "Read an uploaded part back: the bytes as received, with Content-Type and ETag. 404 once it is no longer kept.",
+    },
     // Node-level updates (§7.18.1.1) — alias of the per-component collection;
     // a registration names its component in `target`.
     PathEntry {
@@ -402,6 +413,11 @@ const PATHS: &[PathEntry] = &[
         method: "PUT",
         path: "/updates/{update_id}/bulk-data/{part_id}",
         summary: "Upload a part (legacy alias of POST bulk-data). 201 + ETag.",
+    },
+    PathEntry {
+        method: "GET",
+        path: "/updates/{update_id}/bulk-data/{part_id}",
+        summary: "Read an uploaded part back: the bytes as received, with Content-Type and ETag. 404 once it is no longer kept.",
     },
     // logs (§7.21)
     PathEntry {
@@ -690,6 +706,9 @@ pub fn build_capability_doc_for(
     for entry in PATHS {
         // The restart execution stub is mounted on the legacy tree only.
         if tree == Tree::V1 && entry.path == LEGACY_RESTART_EXECUTION {
+            continue;
+        }
+        if tree == Tree::Legacy && v1_only(entry) {
             continue;
         }
         let emitted = match emit_scoped_path(&render_template(tree, entry.path), &scope_segs) {

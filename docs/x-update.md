@@ -50,6 +50,14 @@ forms are used here unchanged.
 - `PUT {entity}/updates/{update_id}/bulk-data/{part_id}` is the legacy alias of the `POST`, the
   part named by the path; it records `Content-Type` alike and answers 201, the `ETag` and
   `{part_id, size, sha256, href}`. It is scheduled for deprecation.
+- `GET {entity}/updates/{update_id}/bulk-data/{part_id}` (the `Location` of the upload) reads a
+  part back, under `/v1` only (the legacy `/vehicle/v1` tree is frozen and answers 405): 200 with
+  the bytes as uploaded, streamed from the backend, `Content-Type` the recorded mimetype
+  (`application/octet-stream` when none was sent), `Content-Length` the part's size and its `ETag`.
+  It needs what the upload needs (`UpdateTransfer` and the component's scope). 404 for an update or
+  part this server holds no record of (an update only the executor holds, or one deleted) and for a
+  part the backend no longer keeps; 501 when the backend cannot read parts back
+  (`DiagnosticBackend::read_part` not implemented).
 
 `GET {entity}/updates/{update_id}/bulk-data` items carry, beside `part_id`, `size`, `sha256` and
 `href`, a `present` flag: whether the executor already holds the part. It is matched by name (the
