@@ -508,6 +508,56 @@ unsafe fn sockaddr_in_ip(sa: *const libc::sockaddr) -> Ipv4Addr {
     Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr))
 }
 
+/// `socket2` compiles `join_multicast_v6` / `leave_multicast_v6` out on QNX
+/// (`target_os = "nto"`). The kernel has the options; go to libc there.
+#[cfg(not(target_os = "nto"))]
+fn join_multicast_v6(sock: &Socket, group: &Ipv6Addr, index: u32) -> io::Result<()> {
+    sock.join_multicast_v6(group, index)
+}
+
+#[cfg(not(target_os = "nto"))]
+fn leave_multicast_v6(sock: &Socket, group: &Ipv6Addr, index: u32) -> io::Result<()> {
+    sock.leave_multicast_v6(group, index)
+}
+
+#[cfg(target_os = "nto")]
+fn join_multicast_v6(sock: &Socket, group: &Ipv6Addr, index: u32) -> io::Result<()> {
+    v6_group_opt(sock, libc::IPV6_JOIN_GROUP, group, index)
+}
+
+#[cfg(target_os = "nto")]
+fn leave_multicast_v6(sock: &Socket, group: &Ipv6Addr, index: u32) -> io::Result<()> {
+    v6_group_opt(sock, libc::IPV6_LEAVE_GROUP, group, index)
+}
+
+/// `setsockopt(IPPROTO_IPV6, IPV6_{JOIN,LEAVE}_GROUP, ipv6_mreq)`.
+#[cfg(target_os = "nto")]
+fn v6_group_opt(sock: &Socket, opt: libc::c_int, group: &Ipv6Addr, index: u32) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let mreq = libc::ipv6_mreq {
+        ipv6mr_multiaddr: libc::in6_addr {
+            s6_addr: group.octets(),
+        },
+        ipv6mr_interface: index as _,
+    };
+    // SAFETY: `mreq` is a fully initialised `ipv6_mreq` and the length passed is
+    // its size; the fd is owned by `sock` for the duration of the call.
+    let rc = unsafe {
+        libc::setsockopt(
+            sock.as_raw_fd(),
+            libc::IPPROTO_IPV6,
+            opt,
+            &mreq as *const libc::ipv6_mreq as *const libc::c_void,
+            std::mem::size_of::<libc::ipv6_mreq>() as libc::socklen_t,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 /// A UDP socket that shares :5353: `SO_REUSEADDR`, and `IPV6_V6ONLY` for IPv6.
 fn mdns_socket(domain: Domain) -> io::Result<Socket> {
     let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
@@ -571,7 +621,7 @@ fn v6_socket(index: Option<u32>) -> io::Result<Socket> {
         MDNS_PORT,
     ))))?;
     if let Some(index) = index {
-        sock.join_multicast_v6(&MDNS_GROUP_V6, index)?;
+        join_multicast_v6(&sock, &MDNS_GROUP_V6, index)?;
         sock.set_multicast_if_v6(index)?;
     }
     let _ = sock.set_multicast_loop_v6(true);
@@ -673,7 +723,7 @@ impl Served {
                         .ok();
                 }
                 V6::Shared(sock) => {
-                    if let Err(e) = sock.join_multicast_v6(&MDNS_GROUP_V6, iface.index) {
+                    if let Err(e) = join_multicast_v6(sock, &MDNS_GROUP_V6, iface.index) {
                         tracing::debug!(interface = %iface.name, error = %e, "mDNS group join failed");
                     }
                 }
@@ -695,7 +745,7 @@ impl Served {
             let _ = shared_v4.leave_multicast_v4(&MDNS_GROUP, &v4.addr);
         }
         if let (V6::Shared(sock), false) = (v6, self.iface.v6.is_empty()) {
-            let _ = sock.leave_multicast_v6(&MDNS_GROUP_V6, self.iface.index);
+            let _ = leave_multicast_v6(sock, &MDNS_GROUP_V6, self.iface.index);
         }
     }
 
