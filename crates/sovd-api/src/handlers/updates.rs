@@ -87,7 +87,7 @@ impl UpdatePath {
     fn collection(self, tree: Tree, component_id: &str) -> String {
         match self {
             Self::Component => format!("{}/updates", tree.component(component_id)),
-            Self::Node => format!("{}/updates", tree.base()),
+            Self::Node => format!("{}/updates", tree.server()),
         }
     }
 }
@@ -736,7 +736,8 @@ pub async fn get_update(
 /// The `GET /updates/{id}` body under `tree`. The descriptor's entity-path
 /// references come from the backend, which renders them under either base
 /// (the default descriptor under `/vehicle/v1`): one under a base is
-/// re-emitted under `tree`'s, any other is kept verbatim.
+/// re-emitted under `tree`'s, in the node form when the request is a node-form
+/// one (see [`crate::topology`]); any other is kept verbatim.
 fn update_detail(
     tree: Tree,
     component_id: &str,
@@ -751,7 +752,7 @@ fn update_detail(
     ] {
         for entry in refs.iter_mut() {
             if let Some((_, rest)) = Tree::split_path(entry) {
-                *entry = format!("{}{rest}", tree.base());
+                *entry = crate::topology::request_form(format!("{}{rest}", tree.base()));
             }
         }
     }

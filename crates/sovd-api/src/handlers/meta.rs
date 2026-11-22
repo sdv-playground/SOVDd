@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::state::{AppState, CapabilityExtensions};
+use crate::topology::NodeTopology;
 use crate::Tree;
 
 /// One entry of `/version-info`'s `sovd_info[]` array — ISO 17978-3
@@ -633,15 +634,18 @@ fn render_template(tree: Tree, template: &str) -> String {
 /// [`not_found_fallback`] on `{entity}/docs`.  A full path-walker that
 /// introspects the axum router is a TODO — axum 0.8 doesn't expose its
 /// routing table.
+///
+/// On `/v1` of a server configured with a node, the doc lists the node form
+/// too ([`add_node_paths`]).
 pub async fn capability_description(
     State(state): State<AppState>,
     Extension(tree): Extension<Tree>,
 ) -> Json<serde_json::Value> {
-    Json(build_capability_doc_for(
-        tree,
-        None,
-        state.capability_extensions(),
-    ))
+    let mut doc = build_capability_doc_for(tree, None, state.capability_extensions());
+    if let Some(node) = state.node().filter(|_| tree == Tree::V1) {
+        add_node_paths(&mut doc, node);
+    }
+    Json(doc)
 }
 
 /// Build the `/vehicle/v1` OpenAPI 3.1.0 capability description (§7.5,
@@ -715,19 +719,7 @@ pub fn build_capability_doc_for(
             Some(p) => p,
             None => continue, // out of scope for this entity path
         };
-        let mut op = serde_json::json!({
-            "summary": entry.summary,
-            "responses": {
-                "default": {
-                    "description": "See §5.8 status codes; non-2xx bodies are GenericError.",
-                    "content": {
-                        "application/json": {
-                            "schema": { "$ref": "#/components/schemas/GenericError" }
-                        }
-                    }
-                }
-            }
-        });
+        let mut op = operation(entry.summary);
         // Public resources (§5.4.4) override the global bearer requirement
         // with an empty security set — they need no authentication.
         if matches!(entry.path, "/health" | "/version-info" | "/docs") {
@@ -888,6 +880,47 @@ pub fn build_capability_doc_for(
     }
 
     doc
+}
+
+/// The Operation Object of a path the doc lists, summarized by `summary`.
+fn operation(summary: &str) -> serde_json::Value {
+    serde_json::json!({
+        "summary": summary,
+        "responses": {
+            "default": {
+                "description": "See §5.8 status codes; non-2xx bodies are GenericError.",
+                "content": {
+                    "application/json": {
+                        "schema": { "$ref": "#/components/schemas/GenericError" }
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// Add the node form to a global `/v1` doc of a server configured with `node`
+/// (see [`crate::topology`]): the node's document and subcomponents listing,
+/// and every listed path the node form maps onto (a backend's
+/// `/v1/components/{component_id}/...`, a node-level `/v1/updates/...`, ...,
+/// embedder-contributed ones included) under its node-form path too.
+fn add_node_paths(doc: &mut serde_json::Value, node: &NodeTopology) {
+    let Some(paths) = doc.get_mut("paths").and_then(|p| p.as_object_mut()) else {
+        return;
+    };
+    let node_forms: Vec<(String, serde_json::Value)> = paths
+        .iter()
+        .filter_map(|(path, item)| Some((node.node_form(path)?, item.clone())))
+        .collect();
+    paths.insert(
+        node.href(),
+        serde_json::json!({ "get": operation("Read the node's document (its node-level resources and subcomponents).") }),
+    );
+    paths.insert(
+        node.subcomponents_href(),
+        serde_json::json!({ "get": operation("List the node's subcomponents.") }),
+    );
+    paths.extend(node_forms);
 }
 
 /// Compute the emitted OpenAPI path for `template` under `scope_segs`.

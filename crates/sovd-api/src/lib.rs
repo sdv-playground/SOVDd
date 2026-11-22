@@ -18,6 +18,7 @@ pub mod auth;
 pub mod error;
 pub mod handlers;
 pub mod state;
+pub mod topology;
 pub mod workshop_ca;
 
 pub use auth::{
@@ -26,6 +27,7 @@ pub use auth::{
 };
 pub use error::ApiError;
 pub use state::{AppState, CapabilityExtensions};
+pub use topology::{with_node_topology, NodeTopology};
 
 // Re-export DidStore from sovd-conv for convenience
 pub use sovd_conv::{DataType, DidDefinition, DidStore};
@@ -33,6 +35,7 @@ pub use sovd_conv::{DataType, DidDefinition, DidStore};
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post, put};
 use axum::Router;
+use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
@@ -59,9 +62,26 @@ impl Tree {
         }
     }
 
-    /// `{base}/components/{id}` — a component's URL under this tree.
+    /// `{base}/components/{id}` — a component's URL under this tree; while a
+    /// node-form `/v1` request is served ([`topology`]), a backend's URL is its
+    /// subcomponent URL, `/v1/components/{node}/subcomponents/{id}`.
     pub fn component(self, id: &str) -> String {
-        format!("{}/components/{id}", self.base())
+        match topology::current() {
+            Some(node) if self == Tree::V1 && node.id() != id => node.subcomponent_href(id),
+            _ => format!("{}/components/{id}", self.base()),
+        }
+    }
+
+    /// The URL the server's node-level resources (`status`, `updates`,
+    /// `operations`) are under: `{base}`; while a node-form `/v1` request is
+    /// served ([`topology`]), the node's URL `/v1/components/{node}`. An
+    /// embedder rendering URLs of its own node-level routes renders them under
+    /// this.
+    pub fn server(self) -> String {
+        match topology::current() {
+            Some(node) if self == Tree::V1 => node.href(),
+            _ => self.base().to_string(),
+        }
     }
 
     /// `{base}/components/{component_id}/apps/{app_id}` — a sub-entity's URL
@@ -135,6 +155,7 @@ pub fn create_router(state: AppState) -> Router {
         // The entity API, mounted under every base path (`Tree::ALL`).
         .merge(api_routes(Tree::V1))
         .merge(api_routes(Tree::Legacy))
+        .merge(node_routes(state.node()))
         // Fallback for unknown paths / methods so the error body
         // matches the spec `GenericError` shape (axum's defaults are
         // plain text otherwise).
@@ -699,6 +720,23 @@ fn api_routes(tree: Tree) -> Router<AppState> {
         )
         .merge(restart_status_routes(tree))
         .layer(axum::Extension(tree))
+}
+
+/// The node's own `/v1` routes, its document and subcomponents listing, on a
+/// server configured with a node ([`AppState::with_node`]); none otherwise. The
+/// rest of the node form is routed onto the flat routes by
+/// [`with_node_topology`].
+fn node_routes(node: Option<&Arc<NodeTopology>>) -> Router<AppState> {
+    let Some(node) = node else {
+        return Router::new();
+    };
+    Router::new()
+        .route(&node.href(), get(handlers::components::get_node))
+        .route(
+            &node.subcomponents_href(),
+            get(handlers::components::list_subcomponents),
+        )
+        .layer(axum::Extension(node.clone()))
 }
 
 /// Tree-specific restart status routes.  `/v1` serves the app's `status`
