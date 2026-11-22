@@ -18,7 +18,9 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
-use sovd_api::{create_router, AppState, AuthConfig, AuthContext};
+use sovd_api::{
+    create_router, with_node_topology, AppState, AuthConfig, AuthContext, NodeTopology,
+};
 use sovd_conv::DidStore;
 use sovd_gateway::GatewayBackend;
 use sovd_proxy::SovdProxyBackend;
@@ -199,11 +201,23 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Create the app state with DID store, output configs, and auth context
-    let state = AppState::with_output_configs(backends, Arc::new(did_store), output_configs)
+    let mut state = AppState::with_output_configs(backends, Arc::new(did_store), output_configs)
         .with_auth(Arc::new(auth));
+    // `[server.node]`: on `/v1`, also serve the components as the subcomponents
+    // of one node.
+    if let Some(node) = load_node_config(&config_path)? {
+        let id = node.id().to_owned();
+        state = state
+            .with_node(node)
+            .map_err(|e| anyhow::anyhow!("[server.node] {e}"))?;
+        tracing::info!(
+            node = id,
+            "serving the components on /v1 also as the subcomponents of node"
+        );
+    }
 
-    // Create the router
-    let app = create_router(state);
+    // Create the router; the node topology wraps it last.
+    let app = with_node_topology(create_router(state.clone()), &state);
 
     // Bind to address
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -420,6 +434,22 @@ fn load_auth_config(path: &str) -> anyhow::Result<AuthConfig> {
         Some(auth) => Ok(auth.clone().try_into()?),
         None => Ok(AuthConfig::default()),
     }
+}
+
+/// Parse the optional `[server.node]` section: `id` (required, the node's
+/// component id) and `name` (default: the id).
+fn load_node_config(path: &str) -> anyhow::Result<Option<NodeTopology>> {
+    let content = std::fs::read_to_string(path)?;
+    let config: toml::Value = toml::from_str(&content)?;
+    let Some(node) = config.get("server").and_then(|s| s.get("node")) else {
+        return Ok(None);
+    };
+    let id = node
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("[server.node] missing 'id' (the node's component id)"))?;
+    let name = node.get("name").and_then(|v| v.as_str()).unwrap_or(id);
+    Ok(Some(NodeTopology::new(id, name)))
 }
 
 /// In-process TLS settings parsed from `[server.tls]`.
@@ -1469,5 +1499,28 @@ mod tests {
 
         assert_eq!(got_present.unwrap().as_deref(), Some("cvc"));
         assert_eq!(got_absent.unwrap(), None);
+    }
+
+    #[test]
+    fn load_node_config_present_defaulted_and_absent() {
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let load = |name: &str, content: &str| {
+            let path = dir.join(format!("sovdd-node-{name}-{pid}.toml"));
+            std::fs::write(&path, content).unwrap();
+            let got = load_node_config(path.to_str().unwrap());
+            let _ = std::fs::remove_file(&path);
+            got
+        };
+
+        let named = load(
+            "named",
+            "[server]\nport = 9080\n[server.node]\nid = \"cvc\"\nname = \"CVC\"\n",
+        );
+        assert_eq!(named.unwrap(), Some(NodeTopology::new("cvc", "CVC")));
+        let unnamed = load("unnamed", "[server.node]\nid = \"cvc\"\n");
+        assert_eq!(unnamed.unwrap(), Some(NodeTopology::new("cvc", "cvc")));
+        assert_eq!(load("absent", "[server]\nport = 9080\n").unwrap(), None);
+        assert!(load("no-id", "[server.node]\nname = \"CVC\"\n").is_err());
     }
 }
