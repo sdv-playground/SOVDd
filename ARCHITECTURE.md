@@ -407,20 +407,27 @@ graph LR
 
 ### 7.1 Node topology (`sovd-api::topology`)
 
-By default every backend is a top-level component. A server configured with a node
-(`AppState::with_node(NodeTopology::new(id, name))`, `[server.node]` in `sovdd`) is also one vehicle
-node on `/v1`, its backends the node's subcomponents. Opt-in: without a node nothing changes.
+By default every backend is a top-level component, on both trees. A server configured with a node
+(`AppState::with_node(NodeTopology::new(id, name))`, `[server.node]` in `sovdd`) has two styles: the
+frozen legacy tree `/vehicle/v1` stays flat (old clients), and `/v1` is hierarchical only — one
+vehicle node, its backends the node's subcomponents, one path per resource (ISO 17978-3 §5.4.1).
+Opt-in: a server without a node serves `/v1` flat, as before.
 
-| Path (`/v1` only) | Serves |
+| Path (`/v1`, node configured) | Serves |
 |---|---|
-| `/v1/components` | the node first (type `node`), then the backends as before (kept for the migration period) |
+| `/v1/components` | the node alone (type `node`), shown to a client that may access the node or any subcomponent |
 | `/v1/components/{node}` | the node's document: `id`, `name`, `type`, `x-identification` (when set), links to `status`, `updates` (when a backend supports update, as on the root document), `operations`, `data` and `subcomponents` |
-| `/v1/components/{node}/subcomponents` | the backends with node-form hrefs, scope-filtered like `/v1/components` |
-| `/v1/components/{node}/subcomponents/{id}/...` | backend `id`'s entity API: everything `/v1/components/{id}/...` serves, embedder routes included |
-| `/v1/components/{node}/status`, `.../status/restart`, `.../updates[/...]`, `.../operations[/...]`, `.../data[/...]` | the node-level resources: whatever serves the root form (`/v1/status`, `/v1/updates/...`, an embedder's node verdict operations or node-level data items such as `/v1/data/x-update-state`, ...), query kept |
+| `/v1/components/{node}/subcomponents` | the backends with node-form hrefs, scope-filtered |
+| `/v1/components/{node}/subcomponents/{id}/...` | backend `id`'s entity API: everything a node-less `/v1/components/{id}/...` serves, embedder routes included |
+| `/v1/components/{node}/status`, `.../status/restart`, `.../updates[/...]`, `.../operations[/...]`, `.../data[/...]` | the node-level resources: whatever serves the root form (`/v1/updates/...`, an embedder's `/v1/status`, node verdict operations or node-level data items such as `/v1/data/x-update-state`, ...), query kept |
 | any other `/v1/components/{node}/...` | 404 (`GenericError`) |
-| `/v1/components/{id}/...` of a backend | served as before, **deprecated**: `Deprecation: true` and `Link: </v1/components/{node}/subcomponents/{id}/...>; rel="successor-version"` |
-| root forms `/v1/status`, `/v1/updates/...`, `/v1/operations/...`, `/v1/data/...` | served as before (dated legacy path; canonical is under the node) |
+| `/v1/components/{id}/...` of any other id (the flat form) | 404 `incomplete-request`, naming the node form: `No resource at /v1/components/vm1/data: on /v1 this server is node 'cvc', whose path for it is /v1/components/cvc/subcomponents/vm1/data` |
+| root forms `/v1/status`, `/v1/status/restart`, `/v1/updates/...`, `/v1/operations/...`, `/v1/data/...` | 404 alike, naming the node form |
+| `/v1`, `/v1/`, `/v1/components`, `/v1/docs` | served: what a client reads before it knows the node (the root document's `updates` link is the node's) |
+
+The server-root resources (`/version-info`, `/health`, `/.well-known/sovd-extensions`, `/admin/...`)
+are outside `/v1` and unaffected. The flat and root forms answer the same 404 for every id, a
+backend's or not, before authentication: they tell nothing of the members.
 
 The node does not alias any backend's resources: it carries node-level resources only. The node id
 must be a path segment no backend has as its id (`with_node` refuses it otherwise).
@@ -435,16 +442,20 @@ frozen: no node, and its responses are byte-identical to a server without one.
 The routes stay the flat ones: `with_node_topology(router, &state)` rewrites a node-form path onto
 its flat (or root-form) route before routing, so handlers, authorization (a subcomponent needs
 `component:{id}`, as the component does; a node-level resource what its root form needs) and any
-routes an embedder merged in serve the node form unchanged. It must wrap the embedder's **final**
-router, after its own routes are merged. Responses follow the form of the request: while a
-node-form request is served, `Tree::component` renders backends' URLs in the node form and
-`Tree::server` renders the node-level root as `/v1/components/{node}`, and a flat or root-form
-`Location` is rewritten to the node form. An embedder whose handlers render URLs in a body renders
-them through those two. The node's document and subcomponents listing are scope-checked in their
-handlers (visible to a client that may access the node or any subcomponent). The global `/v1/docs`
-lists the node form of every path besides the flat one; `/vehicle/v1/docs` is unchanged. Unlike
-gateway children (`/apps/...`, above), subcomponents are the server's own backends, not entities
-behind one of them.
+routes an embedder merged in serve the node form unchanged. A request that arrives in a flat or root
+form is answered 404 by the same middleware before routing; the rewritten request goes on to the
+router and never passes it again, so the root-form routes (SOVDd's and the embedder's) are reachable
+only as the target of the node form. It must therefore wrap the embedder's **final** router, after
+its own routes are merged. Every `/v1` URL a response renders is the node form: `Tree::component`
+renders backends' URLs as `/v1/components/{node}/subcomponents/{id}`, `Tree::server` renders the
+node-level root as `/v1/components/{node}`, and a flat or root-form `Location` (an embedder handler's
+hard-coded one included) is rewritten to the node form. An embedder whose handlers render URLs in a
+body renders them through those two. The node's document and subcomponents listing are scope-checked
+in their handlers (visible to a client that may access the node or any subcomponent). `/v1/docs`
+lists the served forms only (the node's paths and the node form of every flat and root-form path,
+embedder-contributed ones included; a member's scoped `.../docs` likewise); `/vehicle/v1/docs` is
+unchanged. Unlike gateway children (`/apps/...`, above), subcomponents are the server's own
+backends, not entities behind one of them.
 
 ---
 
@@ -565,8 +576,8 @@ resolved relative to the current directory) with a warning, and errors out if th
 the gateway/test configs use 18082-18092.
 
 Recognized TOML sections: `[server]` (`port`); `[server.tls]` (certificate + private key → in-process
-rustls termination); `[server.auth]` (§13); `[server.node]` (`id`, `name`, `identification`: on `/v1`, also serve the
-components as the subcomponents of one node, §7.1); `[transport]` (`socketcan`|`mock` + isotp);
+rustls termination); `[server.auth]` (§13); `[server.node]` (`id`, `name`, `identification`: on `/v1`, serve the
+components as the subcomponents of one node only, §7.1); `[transport]` (`socketcan`|`mock` + isotp);
 `[session]`/`[session.security]`/`[session.keepalive]`; `[service_overrides]` (OEM SID remaps);
 `[ecu.<id>]` (transport, params, operations, outputs, flash, session/security, overrides);
 `[proxy.<id>]` (`url`, `component_id`, `auth_token`); `[gateway]` (`enabled`, `id`, `scan`).

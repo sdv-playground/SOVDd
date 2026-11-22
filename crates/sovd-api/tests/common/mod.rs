@@ -340,6 +340,11 @@ impl DiagnosticBackend for BankedBackend {
     async fn verify_part(&self, _file_id: &str, _expected_sha256: &str) -> BackendResult<()> {
         Ok(())
     }
+    /// Every part reads back as `banked`.
+    async fn read_part(&self, _file_id: &str) -> BackendResult<PackageStream> {
+        let chunk = Ok(axum::body::Bytes::from_static(b"banked"));
+        Ok(Box::pin(futures::stream::iter([chunk])))
+    }
     async fn start_flash(&self) -> BackendResult<String> {
         let mut counter = self.next_id.lock();
         *counter += 1;

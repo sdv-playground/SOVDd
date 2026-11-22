@@ -153,30 +153,27 @@ impl From<&Capabilities> for CapabilitiesResponse {
 /// to the components the client's scopes permit (no `ClientContext` ⇒ auth
 /// disabled ⇒ list everything).
 ///
-/// On `/v1` of a server configured with a node, the node comes first, then the
-/// backends as on a server without one (see [`crate::topology`]).
+/// On `/v1` of a server configured with a node, the node alone: the backends
+/// are its subcomponents (see [`crate::topology`]).
 pub async fn list_components(
     State(state): State<AppState>,
     Extension(tree): Extension<Tree>,
     client: Option<Extension<ClientContext>>,
 ) -> Json<ComponentsResponse> {
     let client = client.map(|Extension(c)| c);
-    let node = state
-        .node()
-        .filter(|node| tree == Tree::V1 && node_visible(&state, node, client.as_ref()))
-        .map(|node| ComponentInfo {
-            id: node.id().to_owned(),
-            name: node.name().to_owned(),
-            description: None,
-            entity_type: NODE_TYPE.to_owned(),
-            href: node.href(),
-        });
-    let items = node
-        .into_iter()
-        .chain(backend_items(&state, client.as_ref(), |id| {
-            tree.component(id)
-        }))
-        .collect();
+    let items = match state.node().filter(|_| tree == Tree::V1) {
+        Some(node) => node_visible(&state, node, client.as_ref())
+            .then(|| ComponentInfo {
+                id: node.id().to_owned(),
+                name: node.name().to_owned(),
+                description: None,
+                entity_type: NODE_TYPE.to_owned(),
+                href: node.href(),
+            })
+            .into_iter()
+            .collect(),
+        None => backend_items(&state, client.as_ref(), |id| tree.component(id)).collect(),
+    };
 
     Json(ComponentsResponse { items })
 }

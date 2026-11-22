@@ -77,6 +77,11 @@ alias of the per-component collections, which remain and are unchanged. The root
 (`GET {base}/`) references it as `updates` when at least one component accepts software
 updates.
 
+On `/v1` of a server configured with a node (ARCHITECTURE.md §7.1), `{base}` for the node-level
+resources is the node, `/v1/components/{node}`, and the components are its subcomponents,
+`/v1/components/{node}/subcomponents/{id}`: the root and flat forms are not served there, and the
+root document's `updates` links the node's collection. `/vehicle/v1` is unchanged.
+
 - `POST {base}/updates`, body `{"id"?, "target", "manifest"?}`, registers on the component
   `target`, which is required and must be one of the root document's `x-update.update-targets`
   (400 otherwise). The id rules are those of the component collection. An id registered on, or

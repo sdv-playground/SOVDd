@@ -50,7 +50,7 @@ pub async fn get_root(
     let updates = backends
         .values()
         .any(|backend| backend.capabilities().software_update)
-        .then(|| format!("{}/updates", tree.base()));
+        .then(|| format!("{}/updates", tree.server()));
     let mut update_targets: Vec<String> = backends
         .iter()
         .filter(|(id, backend)| {

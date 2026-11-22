@@ -450,13 +450,13 @@ async fn read_did_internal(
                     timestamp: Utc::now().to_rfc3339(),
                 }));
             }
-            let base = tree.base();
+            let entity = tree.component(component_id);
             return Err(ApiError::NotFound(format!(
                 "DID '{param_id}' is not a readable data resource on entity \
                  '{component_id}'. This entity exposes no raw DID access (e.g. an \
                  aggregating gateway, which owns no DIDs of its own and forwards to \
                  children). Read it on the owning component via the sub-entity path: \
-                 {base}/components/{component_id}/apps/<child>/data/{param_id}."
+                 {entity}/apps/<child>/data/{param_id}."
             )));
         }
         Err(e) => return Err(e.into()),
