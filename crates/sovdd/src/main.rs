@@ -437,7 +437,8 @@ fn load_auth_config(path: &str) -> anyhow::Result<AuthConfig> {
 }
 
 /// Parse the optional `[server.node]` section: `id` (required, the node's
-/// component id) and `name` (default: the id).
+/// component id), `name` (default: the id) and `identification` (optional,
+/// the unit's own name on the node's document, distinct from its id).
 fn load_node_config(path: &str) -> anyhow::Result<Option<NodeTopology>> {
     let content = std::fs::read_to_string(path)?;
     let config: toml::Value = toml::from_str(&content)?;
@@ -449,7 +450,13 @@ fn load_node_config(path: &str) -> anyhow::Result<Option<NodeTopology>> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("[server.node] missing 'id' (the node's component id)"))?;
     let name = node.get("name").and_then(|v| v.as_str()).unwrap_or(id);
-    Ok(Some(NodeTopology::new(id, name)))
+    let topology = NodeTopology::new(id, name);
+    Ok(Some(
+        match node.get("identification").and_then(|v| v.as_str()) {
+            Some(identification) => topology.with_identification(identification),
+            None => topology,
+        },
+    ))
 }
 
 /// In-process TLS settings parsed from `[server.tls]`.
@@ -1520,6 +1527,14 @@ mod tests {
         assert_eq!(named.unwrap(), Some(NodeTopology::new("cvc", "CVC")));
         let unnamed = load("unnamed", "[server.node]\nid = \"cvc\"\n");
         assert_eq!(unnamed.unwrap(), Some(NodeTopology::new("cvc", "cvc")));
+        let identified = load(
+            "identified",
+            "[server.node]\nid = \"cvc\"\nidentification = \"cvc-host-f88a13a329a72db1\"\n",
+        );
+        assert_eq!(
+            identified.unwrap(),
+            Some(NodeTopology::new("cvc", "cvc").with_identification("cvc-host-f88a13a329a72db1"))
+        );
         assert_eq!(load("absent", "[server]\nport = 9080\n").unwrap(), None);
         assert!(load("no-id", "[server.node]\nname = \"CVC\"\n").is_err());
     }

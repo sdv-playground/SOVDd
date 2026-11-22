@@ -7,7 +7,7 @@
 //! listing; a member's entity API under the node form, with node-form hrefs
 //! and `Location`s; node-level resources under the node served by their root
 //! forms' handlers, embedder routes (node-level data items included); other
-//! node paths 404; the flat
+//! node paths 404; the node's identification; the flat
 //! member paths carry the deprecation headers; the legacy tree is unchanged
 //! with a node; the `/v1` capability doc lists the node paths; the component
 //! scope applies through both forms; refused configurations.
@@ -208,6 +208,31 @@ async fn the_node_document_links_node_level_resources_and_subcomponents() {
     assert_eq!(body["updates"], "/v1/components/cvc/updates");
     assert!(body.get("faults").is_none(), "{body}");
     assert!(body.get("capabilities").is_none(), "{body}");
+}
+
+#[tokio::test]
+async fn the_node_document_carries_the_identification_when_set() {
+    // Not set: absent, not null (the exact document above).
+    let server = node_server(members(&["vm1"])).await;
+    let (_, body) = get(&server, "/v1/components/cvc", None).await;
+    assert!(json(&body).get("x-identification").is_none());
+
+    let node = NodeTopology::new("cvc", "CVC").with_identification("cvc-host-f88a13a329a72db1");
+    assert_eq!(node.identification(), Some("cvc-host-f88a13a329a72db1"));
+    let state = members(&["vm1"]).with_node(node).expect("valid node");
+    let server = TestServer::start(with_node_topology(create_router(state.clone()), &state))
+        .await
+        .expect("test server");
+    let (status, body) = get(&server, "/v1/components/cvc", None).await;
+    assert_eq!(status, 200);
+    let body = json(&body);
+    assert_eq!(body["x-identification"], "cvc-host-f88a13a329a72db1");
+    // The node's id stays its logical id; the listing does not carry it.
+    assert_eq!(body["id"], "cvc");
+    let (_, list) = get(&server, "/v1/components", None).await;
+    assert!(!String::from_utf8(list)
+        .unwrap()
+        .contains("x-identification"));
 }
 
 #[tokio::test]

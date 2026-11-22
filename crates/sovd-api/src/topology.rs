@@ -6,7 +6,7 @@
 //!
 //! - `/v1/components` lists the node first, then the backends as before;
 //! - `/v1/components/{node}` is the node's document, linking its `subcomponents` and the
-//!   node-level resources below;
+//!   node-level resources below, and carrying the unit's `x-identification` when set;
 //! - `/v1/components/{node}/subcomponents` lists the backends;
 //! - `/v1/components/{node}/subcomponents/{id}/...` is backend `id`'s entity API, everything
 //!   `/v1/components/{id}/...` serves;
@@ -40,12 +40,14 @@ use crate::error::ApiError;
 use crate::state::AppState;
 use crate::Tree;
 
-/// The node a server is on `/v1`: its id and name in `/v1/components`. Its id must be a path
-/// segment no backend also has as its id (see [`crate::AppState::with_node`]).
+/// The node a server is on `/v1`: its id and name in `/v1/components`, and optionally the unit's
+/// identification on its document. Its id must be a path segment no backend also has as its id
+/// (see [`crate::AppState::with_node`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NodeTopology {
     id: String,
     name: String,
+    identification: Option<String>,
 }
 
 /// What [`with_node_topology`] does with a request path.
@@ -69,7 +71,16 @@ impl NodeTopology {
         Self {
             id: id.into(),
             name: name.into(),
+            identification: None,
         }
+    }
+
+    /// The node with the identification `identification`: the unit's own name (its mDNS/TLS
+    /// identity, e.g. `cvc-host-f88a13a329a72db1`), distinct from the node's logical id (`cvc`).
+    /// The node's document carries it as `x-identification`.
+    pub fn with_identification(mut self, identification: impl Into<String>) -> Self {
+        self.identification = Some(identification.into());
+        self
     }
 
     /// The node's component id.
@@ -80,6 +91,11 @@ impl NodeTopology {
     /// The node's name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The unit's identification, if set (see [`Self::with_identification`]).
+    pub fn identification(&self) -> Option<&str> {
+        self.identification.as_deref()
     }
 
     /// `/v1/components/{node}`.
