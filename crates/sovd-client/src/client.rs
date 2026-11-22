@@ -7,6 +7,7 @@ use tracing::{debug, instrument};
 use url::Url;
 
 use crate::error::{Result, SovdClientError};
+use crate::paths::{self, Dialect, Paths};
 use crate::types::*;
 
 /// URL-encode a resource ID for use in path segments.
@@ -16,6 +17,16 @@ use crate::types::*;
 /// being split across two segments by the literal `/`.
 fn encode_path_segment(id: &str) -> String {
     id.replace('/', "%2F")
+}
+
+/// The `Location` header of `response`, empty when absent.
+pub(crate) fn location(response: &reqwest::Response) -> String {
+    response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|l| l.to_str().ok())
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// Convert an `/operations` entry (IO control flavor) into the
@@ -78,6 +89,8 @@ pub(crate) fn apply_tls(
 pub struct SovdClient {
     client: Client,
     base_url: Url,
+    /// The tree this client speaks (see [`crate::paths`]); legacy unless set.
+    paths: Paths,
 }
 
 impl SovdClient {
@@ -152,7 +165,11 @@ impl SovdClient {
 
         let base_url = Url::parse(base_url)?;
 
-        Ok(Self { client, base_url })
+        Ok(Self {
+            client,
+            base_url,
+            paths: Paths::legacy(),
+        })
     }
 
     /// Create a new SOVD client that sends a bearer token with every request.
@@ -194,7 +211,11 @@ impl SovdClient {
 
         let base_url = Url::parse(base_url)?;
 
-        Ok(Self { client, base_url })
+        Ok(Self {
+            client,
+            base_url,
+            paths: Paths::legacy(),
+        })
     }
 
     /// Get the base URL
@@ -208,6 +229,43 @@ impl SovdClient {
     /// connection pool and default headers (e.g., bearer token).
     pub fn http_client(&self) -> &Client {
         &self.client
+    }
+
+    // =========================================================================
+    // Path dialect
+    // =========================================================================
+
+    /// Speak `dialect` (see [`crate::paths`]). [`Dialect::Legacy`] sends nothing;
+    /// [`Dialect::V1`] discovers the node once ([`discover_node`](Self::discover_node))
+    /// and uses the node form on a node server, the flat form otherwise. Every
+    /// constructor builds a legacy client; this switches it.
+    pub async fn with_dialect(self, dialect: Dialect) -> Result<Self> {
+        let paths = match dialect {
+            Dialect::Legacy => Paths::legacy(),
+            Dialect::V1 => Paths::v1(self.discover_node().await?),
+        };
+        Ok(self.with_paths(paths))
+    }
+
+    /// Use an already resolved path map (e.g. one another client discovered),
+    /// without any request.
+    pub fn with_paths(mut self, paths: Paths) -> Self {
+        self.paths = paths;
+        self
+    }
+
+    /// The path map this client speaks.
+    pub fn paths(&self) -> &Paths {
+        &self.paths
+    }
+
+    /// The node an ISO-tree server presents: `GET {base}/components`; a single item
+    /// whose `{href}/subcomponents` answers 2xx is the node (its `type` is not
+    /// looked at). `None` for a server without a node. Errors when the listing
+    /// itself fails (e.g. a server without `/v1`).
+    #[instrument(skip(self))]
+    pub async fn discover_node(&self) -> Result<Option<String>> {
+        Ok(paths::discover_node(&self.base_url, |url| self.client.get(url)).await?)
     }
 
     // =========================================================================
@@ -231,10 +289,11 @@ impl SovdClient {
     // Component Operations
     // =========================================================================
 
-    /// List all available components
+    /// List all available components (on a `/v1` node server: the node's
+    /// subcomponents).
     #[instrument(skip(self))]
     pub async fn list_components(&self) -> Result<Vec<Component>> {
-        let url = self.base_url.join("/vehicle/v1/components")?;
+        let url = self.base_url.join(&self.paths.components())?;
         debug!("Listing components from {}", url);
 
         let response = self.client.get(url).send().await?;
@@ -246,16 +305,14 @@ impl SovdClient {
     /// Get information about a specific component
     #[instrument(skip(self))]
     pub async fn get_component(&self, component_id: &str) -> Result<Component> {
-        let url = self
-            .base_url
-            .join(&format!("/vehicle/v1/components/{}", component_id))?;
+        let url = self.base_url.join(&self.paths.member(component_id))?;
 
         let response = self.client.get(url).send().await?;
         self.handle_response(response).await
     }
 
     /// Read an entity's runtime status (ISO 17978-3 §7.19.2):
-    /// `GET /vehicle/v1/components/{id}/status` → `EntityStatusBody` —
+    /// `GET {component}/status` → `EntityStatusBody` —
     /// `status: ready|notReady` + control links + vendor `x-<vendor>-*` runtime fields.
     /// An orchestrator reads the vendor boot counter here to verify a reset took
     /// effect (baseline → restart → wait until incremented + `ready`).
@@ -263,23 +320,24 @@ impl SovdClient {
     pub async fn read_status(&self, component_id: &str) -> Result<sovd_core::EntityStatusBody> {
         let url = self
             .base_url
-            .join(&format!("/vehicle/v1/components/{}/status", component_id))?;
+            .join(&self.paths.member_res(component_id, "/status"))?;
         let response = self.client.get(url).send().await?;
         self.handle_response(response).await
     }
 
     /// Issue an ECU-level reset at the SOVD entity root or a gateway component
-    /// (ISO 17978-3 §7.19): `PUT /vehicle/v1/status/restart` (the whole node)
-    /// when `gateway_id` is `None`, else
-    /// `PUT /vehicle/v1/components/{gateway}/status/restart`. Carries this
+    /// (ISO 17978-3 §7.19): `PUT {base}/status/restart` (the whole node; on a
+    /// `/v1` node server `{node}/status/restart`) when `gateway_id` is `None`,
+    /// else `PUT {gateway}/status/restart`. Only the status is checked, so the
+    /// `/v1` answer (202, no body) is accepted as the legacy one is. Carries this
     /// client's auth (e.g. a bearer token from [`with_bearer_token`](Self::with_bearer_token)).
     /// The flash engine uses this to coalesce `RequiresEcuReset` components into
     /// a single node reboot.
     #[instrument(skip(self))]
     pub async fn system_restart(&self, gateway_id: Option<&str>, reset_type: &str) -> Result<()> {
         let path = match gateway_id {
-            Some(gw) => format!("/vehicle/v1/components/{}/status/restart", gw),
-            None => "/vehicle/v1/status/restart".to_string(),
+            Some(gw) => self.paths.member_res(gw, "/status/restart"),
+            None => self.paths.node_level("/status/restart"),
         };
         let url = self.base_url.join(&path)?;
         debug!("ECU restart at {url} (reset_type={reset_type})");
@@ -309,7 +367,7 @@ impl SovdClient {
     pub async fn list_parameters(&self, component_id: &str) -> Result<ParametersResponse> {
         let url = self
             .base_url
-            .join(&format!("/vehicle/v1/components/{}/data", component_id))?;
+            .join(&self.paths.member_res(component_id, "/data"))?;
 
         let response = self.client.get(url).send().await?;
         self.handle_response(response).await
@@ -317,7 +375,7 @@ impl SovdClient {
 
     /// List parameters for a sub-entity (accessed via gateway's apps route)
     ///
-    /// Routes through: `GET /vehicle/v1/components/{component_id}/apps/{app_path}/data`
+    /// Routes through: `GET {component}/apps/{app_path}/data`
     #[instrument(skip(self))]
     pub async fn list_sub_entity_parameters(
         &self,
@@ -325,8 +383,8 @@ impl SovdClient {
         app_path: &str,
     ) -> Result<ParametersResponse> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/apps/{}/data",
-            component_id,
+            "{}/apps/{}/data",
+            self.paths.member(component_id),
             encode_path_segment(app_path)
         ))?;
 
@@ -336,7 +394,7 @@ impl SovdClient {
 
     /// Read a sub-entity parameter value
     ///
-    /// Routes through: `GET /vehicle/v1/components/{component_id}/apps/{app_path}/data/{param_id}`
+    /// Routes through: `GET {component}/apps/{app_path}/data/{param_id}`
     #[instrument(skip(self))]
     pub async fn read_sub_entity_data(
         &self,
@@ -345,8 +403,8 @@ impl SovdClient {
         param_id: &str,
     ) -> Result<DataResponse> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/apps/{}/data/{}",
-            component_id,
+            "{}/apps/{}/data/{}",
+            self.paths.member(component_id),
             encode_path_segment(app_path),
             encode_path_segment(param_id)
         ))?;
@@ -364,8 +422,8 @@ impl SovdClient {
         param_id: &str,
     ) -> Result<DataResponse> {
         let mut url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/apps/{}/data/{}",
-            component_id,
+            "{}/apps/{}/data/{}",
+            self.paths.member(component_id),
             encode_path_segment(app_path),
             encode_path_segment(param_id)
         ))?;
@@ -409,8 +467,8 @@ impl SovdClient {
     #[instrument(skip(self))]
     pub async fn read_data(&self, component_id: &str, param_id: &str) -> Result<DataResponse> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/data/{}",
-            component_id,
+            "{}/data/{}",
+            self.paths.member(component_id),
             encode_path_segment(param_id)
         ))?;
 
@@ -430,8 +488,8 @@ impl SovdClient {
     #[instrument(skip(self))]
     pub async fn read_data_raw(&self, component_id: &str, param_id: &str) -> Result<DataResponse> {
         let mut url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/data/{}",
-            component_id,
+            "{}/data/{}",
+            self.paths.member(component_id),
             encode_path_segment(param_id)
         ))?;
         url.set_query(Some("raw=true"));
@@ -449,8 +507,9 @@ impl SovdClient {
     ) -> Result<Vec<DataResponse>> {
         let params = param_ids.join(",");
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/data?ids={}",
-            component_id, params
+            "{}/data?ids={}",
+            self.paths.member(component_id),
+            params
         ))?;
 
         let response = self.client.get(url).send().await?;
@@ -468,8 +527,8 @@ impl SovdClient {
         value: serde_json::Value,
     ) -> Result<()> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/data/{}",
-            component_id,
+            "{}/data/{}",
+            self.paths.member(component_id),
             encode_path_segment(param_id)
         ))?;
 
@@ -493,8 +552,8 @@ impl SovdClient {
         value: serde_json::Value,
     ) -> Result<()> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/apps/{}/data/{}",
-            component_id,
+            "{}/apps/{}/data/{}",
+            self.paths.member(component_id),
             encode_path_segment(app_path),
             encode_path_segment(param_id)
         ))?;
@@ -526,8 +585,8 @@ impl SovdClient {
         data: &[u8],
     ) -> Result<()> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/data/{}",
-            component_id,
+            "{}/data/{}",
+            self.paths.member(component_id),
             encode_path_segment(param_id)
         ))?;
 
@@ -569,8 +628,9 @@ impl SovdClient {
         value: serde_json::Value,
     ) -> Result<()> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/data/{:04X}",
-            component_id, did
+            "{}/data/{:04X}",
+            self.paths.member(component_id),
+            did
         ))?;
 
         let request = WriteDataRequest { value };
@@ -592,7 +652,7 @@ impl SovdClient {
     pub async fn get_faults(&self, component_id: &str) -> Result<Vec<FaultInfo>> {
         let url = self
             .base_url
-            .join(&format!("/vehicle/v1/components/{}/faults", component_id))?;
+            .join(&self.paths.member_res(component_id, "/faults"))?;
 
         let response = self.client.get(url).send().await?;
         self.handle_response::<FaultsResponse>(response)
@@ -609,7 +669,7 @@ impl SovdClient {
     ) -> Result<Vec<FaultInfo>> {
         let mut url = self
             .base_url
-            .join(&format!("/vehicle/v1/components/{}/faults", component_id))?;
+            .join(&self.paths.member_res(component_id, "/faults"))?;
 
         if let Some(cat) = category {
             url.set_query(Some(&format!("category={}", cat)));
@@ -625,8 +685,8 @@ impl SovdClient {
     #[instrument(skip(self))]
     pub async fn get_fault(&self, component_id: &str, fault_id: &str) -> Result<FaultInfo> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/faults/{}",
-            component_id,
+            "{}/faults/{}",
+            self.paths.member(component_id),
             encode_path_segment(fault_id)
         ))?;
 
@@ -644,7 +704,7 @@ impl SovdClient {
     pub async fn clear_faults(&self, component_id: &str) -> Result<ClearFaultsResponse> {
         let url = self
             .base_url
-            .join(&format!("/vehicle/v1/components/{}/faults", component_id))?;
+            .join(&self.paths.member_res(component_id, "/faults"))?;
 
         let response = self.client.delete(url).send().await?;
         if response.status().is_success() {
@@ -667,7 +727,7 @@ impl SovdClient {
     pub async fn get_logs(&self, component_id: &str) -> Result<LogsResponse> {
         let url = self
             .base_url
-            .join(&format!("/vehicle/v1/components/{}/logs", component_id))?;
+            .join(&self.paths.member_res(component_id, "/logs"))?;
 
         let response = self.client.get(url).send().await?;
         self.handle_response(response).await
@@ -686,7 +746,7 @@ impl SovdClient {
     ) -> Result<LogsResponse> {
         let mut url = self
             .base_url
-            .join(&format!("/vehicle/v1/components/{}/logs", component_id))?;
+            .join(&self.paths.member_res(component_id, "/logs"))?;
 
         append_log_query(&mut url, filter, true);
         let response = self.client.get(url).send().await?;
@@ -697,10 +757,9 @@ impl SovdClient {
     /// a client enumerates before reading one source at a time.
     #[instrument(skip(self))]
     pub async fn list_log_sources(&self, component_id: &str) -> Result<LogSourcesResponse> {
-        let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/logs/sources",
-            component_id
-        ))?;
+        let url = self
+            .base_url
+            .join(&self.paths.member_res(component_id, "/logs/sources"))?;
         let response = self.client.get(url).send().await?;
         self.handle_response(response).await
     }
@@ -715,8 +774,9 @@ impl SovdClient {
         filter: &LogFilter,
     ) -> Result<LogsResponse> {
         let mut url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/logs/sources/{}",
-            component_id, source
+            "{}/logs/sources/{}",
+            self.paths.member(component_id),
+            source
         ))?;
         // source is in the path — don't also send it as a query.
         append_log_query(&mut url, filter, false);
@@ -745,8 +805,8 @@ impl SovdClient {
     #[instrument(skip(self))]
     pub async fn get_log(&self, component_id: &str, log_id: &str) -> Result<LogEntry> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/logs/{}",
-            component_id,
+            "{}/logs/{}",
+            self.paths.member(component_id),
             encode_path_segment(log_id)
         ))?;
 
@@ -761,8 +821,8 @@ impl SovdClient {
     #[instrument(skip(self))]
     pub async fn get_log_content(&self, component_id: &str, log_id: &str) -> Result<Vec<u8>> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/logs/{}",
-            component_id,
+            "{}/logs/{}",
+            self.paths.member(component_id),
             encode_path_segment(log_id)
         ))?;
 
@@ -786,8 +846,8 @@ impl SovdClient {
     #[instrument(skip(self))]
     pub async fn delete_log(&self, component_id: &str, log_id: &str) -> Result<()> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/logs/{}",
-            component_id,
+            "{}/logs/{}",
+            self.paths.member(component_id),
             encode_path_segment(log_id)
         ))?;
 
@@ -823,7 +883,7 @@ impl SovdClient {
     ) -> Result<Vec<BulkCategoryRef>> {
         let url = self
             .base_url
-            .join(&format!("/vehicle/v1/components/{component_id}/bulk-data"))?;
+            .join(&self.paths.member_res(component_id, "/bulk-data"))?;
         let response = self.client.get(url).send().await?;
         self.handle_response::<BulkCategoriesResponse>(response)
             .await
@@ -841,8 +901,8 @@ impl SovdClient {
         created_before: Option<&str>,
     ) -> Result<Vec<BulkItemRef>> {
         let mut url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/bulk-data/{}",
-            component_id,
+            "{}/bulk-data/{}",
+            self.paths.member(component_id),
             encode_path_segment(category)
         ))?;
         {
@@ -875,8 +935,8 @@ impl SovdClient {
         id: &str,
     ) -> Result<Vec<u8>> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/bulk-data/{}/{}",
-            component_id,
+            "{}/bulk-data/{}/{}",
+            self.paths.member(component_id),
             encode_path_segment(category),
             encode_path_segment(id)
         ))?;
@@ -895,10 +955,9 @@ impl SovdClient {
     /// List available operations for a component
     #[instrument(skip(self))]
     pub async fn list_operations(&self, component_id: &str) -> Result<Vec<OperationInfo>> {
-        let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/operations",
-            component_id
-        ))?;
+        let url = self
+            .base_url
+            .join(&self.paths.member_res(component_id, "/operations"))?;
 
         let response = self.client.get(url).send().await?;
         self.handle_response::<OperationsResponse>(response)
@@ -918,8 +977,8 @@ impl SovdClient {
         parameters: Option<&str>,
     ) -> Result<OperationExecution> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/operations/{}/executions",
-            component_id,
+            "{}/operations/{}/executions",
+            self.paths.member(component_id),
             encode_path_segment(operation_id)
         ))?;
 
@@ -952,10 +1011,10 @@ impl SovdClient {
         exec_id: &str,
     ) -> Result<OperationExecution> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/operations/{}/executions/{}",
-            component_id,
+            "{}/operations/{}/executions/{}",
+            self.paths.member(component_id),
             encode_path_segment(operation_id),
-            exec_id,
+            exec_id
         ))?;
         let response = self.client.get(url).send().await?;
         self.handle_response(response).await
@@ -972,10 +1031,10 @@ impl SovdClient {
         exec_id: &str,
     ) -> Result<()> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/operations/{}/executions/{}",
-            component_id,
+            "{}/operations/{}/executions/{}",
+            self.paths.member(component_id),
             encode_path_segment(operation_id),
-            exec_id,
+            exec_id
         ))?;
         let response = self.client.delete(url).send().await?;
         if response.status().is_success() {
@@ -1002,7 +1061,7 @@ impl SovdClient {
     ) -> Result<Vec<ScriptInfo>> {
         let mut url = self
             .base_url
-            .join(&format!("/vehicle/v1/components/{}/scripts", component_id))?;
+            .join(&self.paths.member_res(component_id, "/scripts"))?;
         if let Some(t) = tag {
             url.query_pairs_mut().append_pair("tags", t);
         }
@@ -1018,8 +1077,8 @@ impl SovdClient {
     #[instrument(skip(self))]
     pub async fn get_script(&self, component_id: &str, script_id: &str) -> Result<ScriptInfo> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/scripts/{}",
-            component_id,
+            "{}/scripts/{}",
+            self.paths.member(component_id),
             encode_path_segment(script_id)
         ))?;
         let response = self.client.get(url).send().await?;
@@ -1040,8 +1099,8 @@ impl SovdClient {
         script_id: &str,
     ) -> Result<ScriptExecution> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/scripts/{}/executions",
-            component_id,
+            "{}/scripts/{}/executions",
+            self.paths.member(component_id),
             encode_path_segment(script_id)
         ))?;
         // No request body — the test's cmd is a backend/guest-agent internal.
@@ -1060,10 +1119,10 @@ impl SovdClient {
         exec_id: &str,
     ) -> Result<ScriptExecution> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/scripts/{}/executions/{}",
-            component_id,
+            "{}/scripts/{}/executions/{}",
+            self.paths.member(component_id),
             encode_path_segment(script_id),
-            encode_path_segment(exec_id),
+            encode_path_segment(exec_id)
         ))?;
         let response = self.client.get(url).send().await?;
         self.handle_response(response).await
@@ -1083,10 +1142,9 @@ impl SovdClient {
         component_id: &str,
         tag: Option<&str>,
     ) -> Result<Vec<DiagnosticInfo>> {
-        let mut url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/diagnostics",
-            component_id
-        ))?;
+        let mut url = self
+            .base_url
+            .join(&self.paths.member_res(component_id, "/diagnostics"))?;
         if let Some(t) = tag {
             url.query_pairs_mut().append_pair("tags", t);
         }
@@ -1108,8 +1166,8 @@ impl SovdClient {
         probe_id: &str,
     ) -> Result<DiagnosticResult> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/diagnostics/{}",
-            component_id,
+            "{}/diagnostics/{}",
+            self.paths.member(component_id),
             encode_path_segment(probe_id)
         ))?;
         let response = self.client.get(url).send().await?;
@@ -1125,7 +1183,7 @@ impl SovdClient {
     pub async fn list_apps(&self, component_id: &str) -> Result<Vec<AppInfo>> {
         let url = self
             .base_url
-            .join(&format!("/vehicle/v1/components/{}/apps", component_id))?;
+            .join(&self.paths.member_res(component_id, "/apps"))?;
 
         let response = self.client.get(url).send().await?;
         self.handle_response::<AppsResponse>(response)
@@ -1141,8 +1199,8 @@ impl SovdClient {
         app_id: &str,
     ) -> Result<Vec<AppInfo>> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/apps/{}/apps",
-            component_id,
+            "{}/apps/{}/apps",
+            self.paths.member(component_id),
             encode_path_segment(app_id)
         ))?;
 
@@ -1156,8 +1214,9 @@ impl SovdClient {
     #[instrument(skip(self))]
     pub async fn get_app(&self, component_id: &str, app_id: &str) -> Result<AppInfo> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/apps/{}",
-            component_id, app_id
+            "{}/apps/{}",
+            self.paths.member(component_id),
+            app_id
         ))?;
 
         let response = self.client.get(url).send().await?;
@@ -1189,8 +1248,8 @@ impl SovdClient {
         value: Option<serde_json::Value>,
     ) -> Result<OutputControlResponse> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/operations/{}/executions",
-            component_id,
+            "{}/operations/{}/executions",
+            self.paths.member(component_id),
             encode_path_segment(output_id)
         ))?;
 
@@ -1239,10 +1298,9 @@ impl SovdClient {
     #[instrument(skip(self))]
     pub async fn list_outputs(&self, component_id: &str) -> Result<Vec<OutputInfo>> {
         use crate::types::OperationInfo;
-        let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/operations",
-            component_id
-        ))?;
+        let url = self
+            .base_url
+            .join(&self.paths.member_res(component_id, "/operations"))?;
 
         let response = self.client.get(url).send().await?;
         #[derive(serde::Deserialize)]
@@ -1267,8 +1325,8 @@ impl SovdClient {
     pub async fn get_output(&self, component_id: &str, output_id: &str) -> Result<OutputInfo> {
         use crate::types::OperationInfo;
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/operations/{}",
-            component_id,
+            "{}/operations/{}",
+            self.paths.member(component_id),
             encode_path_segment(output_id)
         ))?;
 
@@ -1301,7 +1359,7 @@ impl SovdClient {
     ///
     /// When `target` is provided, the app_id is extracted and a spec-compliant
     /// sub-entity URL is constructed (SOVD §6.5):
-    /// `GET /vehicle/v1/components/{gateway}/apps/{ecu}/modes/{mode_type}`
+    /// `GET {gateway}/apps/{ecu}/modes/{mode_type}`
     #[instrument(skip(self))]
     pub async fn get_mode_targeted(
         &self,
@@ -1312,15 +1370,16 @@ impl SovdClient {
         let url = if let Some(t) = target {
             let app_id = t.strip_prefix(&format!("{}/", component_id)).unwrap_or(t);
             self.base_url.join(&format!(
-                "/vehicle/v1/components/{}/apps/{}/modes/{}",
-                component_id,
+                "{}/apps/{}/modes/{}",
+                self.paths.member(component_id),
                 app_id.replace('/', "%2F"),
                 mode_type
             ))?
         } else {
             self.base_url.join(&format!(
-                "/vehicle/v1/components/{}/modes/{}",
-                component_id, mode_type
+                "{}/modes/{}",
+                self.paths.member(component_id),
+                mode_type
             ))?
         };
 
@@ -1359,15 +1418,16 @@ impl SovdClient {
         let url = if let Some(t) = target {
             let app_id = t.strip_prefix(&format!("{}/", component_id)).unwrap_or(t);
             self.base_url.join(&format!(
-                "/vehicle/v1/components/{}/apps/{}/modes/{}",
-                component_id,
+                "{}/apps/{}/modes/{}",
+                self.paths.member(component_id),
                 app_id.replace('/', "%2F"),
                 mode_type
             ))?
         } else {
             self.base_url.join(&format!(
-                "/vehicle/v1/components/{}/modes/{}",
-                component_id, mode_type
+                "{}/modes/{}",
+                self.paths.member(component_id),
+                mode_type
             ))?
         };
 
@@ -1378,10 +1438,9 @@ impl SovdClient {
     /// Get current diagnostic session
     #[instrument(skip(self))]
     pub async fn get_session(&self, component_id: &str) -> Result<SessionType> {
-        let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/modes/session",
-            component_id
-        ))?;
+        let url = self
+            .base_url
+            .join(&self.paths.member_res(component_id, "/modes/session"))?;
 
         let response = self.client.get(url).send().await?;
         let data: serde_json::Value = self.handle_response(response).await?;
@@ -1398,10 +1457,9 @@ impl SovdClient {
     /// Change diagnostic session
     #[instrument(skip(self))]
     pub async fn set_session(&self, component_id: &str, session: SessionType) -> Result<()> {
-        let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/modes/session",
-            component_id
-        ))?;
+        let url = self
+            .base_url
+            .join(&self.paths.member_res(component_id, "/modes/session"))?;
 
         let body = serde_json::json!({
             "value": session.as_name()
@@ -1440,15 +1498,13 @@ impl SovdClient {
         let url = if let Some(t) = target {
             let app_id = t.strip_prefix(&format!("{}/", component_id)).unwrap_or(t);
             self.base_url.join(&format!(
-                "/vehicle/v1/components/{}/apps/{}/modes/security",
-                component_id,
-                app_id.replace('/', "%2F"),
+                "{}/apps/{}/modes/security",
+                self.paths.member(component_id),
+                app_id.replace('/', "%2F")
             ))?
         } else {
-            self.base_url.join(&format!(
-                "/vehicle/v1/components/{}/modes/security",
-                component_id
-            ))?
+            self.base_url
+                .join(&self.paths.member_res(component_id, "/modes/security"))?
         };
 
         let body = serde_json::json!({
@@ -1498,15 +1554,13 @@ impl SovdClient {
         let url = if let Some(t) = target {
             let app_id = t.strip_prefix(&format!("{}/", component_id)).unwrap_or(t);
             self.base_url.join(&format!(
-                "/vehicle/v1/components/{}/apps/{}/modes/security",
-                component_id,
-                app_id.replace('/', "%2F"),
+                "{}/apps/{}/modes/security",
+                self.paths.member(component_id),
+                app_id.replace('/', "%2F")
             ))?
         } else {
-            self.base_url.join(&format!(
-                "/vehicle/v1/components/{}/modes/security",
-                component_id
-            ))?
+            self.base_url
+                .join(&self.paths.member_res(component_id, "/modes/security"))?
         };
 
         let body = serde_json::json!({
@@ -1552,10 +1606,9 @@ impl SovdClient {
         resource: &str,
         interval: SubscriptionInterval,
     ) -> Result<CyclicSubscription> {
-        let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/cyclic-subscriptions",
-            component_id
-        ))?;
+        let url = self
+            .base_url
+            .join(&self.paths.member_res(component_id, "/cyclic-subscriptions"))?;
         let request = CyclicSubscriptionRequest {
             resource: resource.to_string(),
             interval,
@@ -1572,10 +1625,9 @@ impl SovdClient {
         &self,
         component_id: &str,
     ) -> Result<CyclicSubscriptionsResponse> {
-        let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/cyclic-subscriptions",
-            component_id
-        ))?;
+        let url = self
+            .base_url
+            .join(&self.paths.member_res(component_id, "/cyclic-subscriptions"))?;
         let response = self.client.get(url).send().await?;
         self.handle_response(response).await
     }
@@ -1588,8 +1640,9 @@ impl SovdClient {
         subscription_id: &str,
     ) -> Result<CyclicSubscription> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/cyclic-subscriptions/{}",
-            component_id, subscription_id
+            "{}/cyclic-subscriptions/{}",
+            self.paths.member(component_id),
+            subscription_id
         ))?;
         let response = self.client.get(url).send().await?;
         self.handle_response(response).await
@@ -1603,8 +1656,9 @@ impl SovdClient {
         subscription_id: &str,
     ) -> Result<()> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/cyclic-subscriptions/{}",
-            component_id, subscription_id
+            "{}/cyclic-subscriptions/{}",
+            self.paths.member(component_id),
+            subscription_id
         ))?;
         let response = self.client.delete(url).send().await?;
         if response.status().is_success() {
@@ -1660,15 +1714,16 @@ impl SovdClient {
         // (set by `Subscription::connect`). There is no separate
         // non-standard `streams/{id}` delivery URL.
         let stream_url = format!(
-            "/vehicle/v1/components/{}/cyclic-subscriptions/{}",
-            component_id, response.subscription_id
+            "{}/cyclic-subscriptions/{}",
+            self.paths.member(component_id),
+            response.subscription_id
         );
 
         Subscription::connect(
             self.base_url.clone(),
             self.client.clone(),
             response.subscription_id,
-            Some(component_id.to_string()),
+            Some(stream_url.clone()),
             &stream_url,
         )
         .await
@@ -1696,10 +1751,11 @@ impl SovdClient {
         ddid: &str,
         source_dids: Vec<DataDefinitionSource>,
     ) -> Result<DataDefinitionResponse> {
-        let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/operations/define-data/executions",
-            component_id
-        ))?;
+        let url = self.base_url.join(
+            &self
+                .paths
+                .member_res(component_id, "/operations/define-data/executions"),
+        )?;
 
         let body = serde_json::json!({
             "ddid": ddid,
@@ -1722,8 +1778,9 @@ impl SovdClient {
             .trim_start_matches("0X")
             .to_uppercase();
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/data-lists/{}",
-            component_id, list_id
+            "{}/data-lists/{}",
+            self.paths.member(component_id),
+            list_id
         ))?;
 
         let response = self.client.delete(url).send().await?;
@@ -1740,6 +1797,10 @@ impl SovdClient {
 
     /// Perform ECU reset (UDS 0x11)
     ///
+    /// On `/v1` the server answers 202 with no body; the result is then
+    /// `status: "running"` (triggered), `href` = the `Location` header (the
+    /// entity's `status`, where readiness is read), the other fields empty.
+    ///
     /// # Arguments
     /// * `component_id` - Component to reset
     /// * `reset_type` - Reset type: "hard" (0x01), "key_off_on" (0x02), "soft" (0x03), or hex value
@@ -1752,17 +1813,31 @@ impl SovdClient {
         // ISO 17978-3 §7.19: PUT `{entity-path}/status/restart`. CDA §8.7
         // maps UDS ECUReset(0x11) to this path. Server keeps the older
         // POST `/reset` as a deprecated alias for one release cycle.
-        let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/status/restart",
-            component_id
-        ))?;
+        let url = self
+            .base_url
+            .join(&self.paths.member_res(component_id, "/status/restart"))?;
 
         let body = serde_json::json!({
             "reset_type": reset_type
         });
 
         let response = self.client.put(url).json(&body).send().await?;
-        self.handle_response(response).await
+        if !self.paths.is_v1() {
+            return self.handle_response(response).await;
+        }
+        // `/v1` answers 202 with no body and `Location: {entity}/status`, where
+        // the reset's effect is read: report it as triggered, `href` = Location.
+        if !response.status().is_success() {
+            return Err(self.extract_error(response).await);
+        }
+        Ok(EcuResetResponse {
+            status: "running".to_string(),
+            exec_id: String::new(),
+            reset_type: reset_type.to_string(),
+            message: String::new(),
+            power_down_time: None,
+            href: location(&response),
+        })
     }
 
     // =========================================================================
@@ -1781,10 +1856,9 @@ impl SovdClient {
         data_format: u8,
         address_and_length_format: u8,
     ) -> Result<StartDownloadResponse> {
-        let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/software/download",
-            component_id
-        ))?;
+        let url = self
+            .base_url
+            .join(&self.paths.member_res(component_id, "/software/download"))?;
 
         let body = serde_json::json!({
             "memory_address": format!("0x{:08X}", memory_address),
@@ -1806,8 +1880,9 @@ impl SovdClient {
         data: &[u8],
     ) -> Result<TransferDataResponse> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/software/download/{}",
-            component_id, session_id
+            "{}/software/download/{}",
+            self.paths.member(component_id),
+            session_id
         ))?;
 
         let response = self
@@ -1828,8 +1903,9 @@ impl SovdClient {
         session_id: &str,
     ) -> Result<FinalizeDownloadResponse> {
         let url = self.base_url.join(&format!(
-            "/vehicle/v1/components/{}/software/download/{}",
-            component_id, session_id
+            "{}/software/download/{}",
+            self.paths.member(component_id),
+            session_id
         ))?;
 
         let response = self.client.delete(url).send().await?;

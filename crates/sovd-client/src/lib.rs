@@ -24,6 +24,37 @@
 //! }
 //! ```
 //!
+//! # Path dialects
+//!
+//! A client speaks one of two SOVD trees ([`Dialect`], module [`paths`]):
+//!
+//! - **`legacy`** (default): `/vehicle/v1`, flat. Every constructor builds a legacy
+//!   client, and its requests are exactly those of the client before dialects existed.
+//! - **`v1`**: the ISO 17978-3 tree. [`SovdClient::with_dialect`] /
+//!   [`FlashClient::with_dialect`] discover once whether the server presents a node
+//!   (`GET /v1/components` lists one item whose `subcomponents` answer). On a node
+//!   server every path is the node form — members
+//!   `/v1/components/{node}/subcomponents/{id}/…`, node-level resources
+//!   `/v1/components/{node}/{status|updates|operations|data}…` — and
+//!   [`SovdClient::list_components`] lists the node's subcomponents; without a node,
+//!   flat `/v1/components/{id}/…` and `/v1/…`. The resolved [`Paths`] can be handed to
+//!   further clients ([`SovdClient::with_paths`], [`flash::FlashConfigBuilder::paths`]).
+//!
+//! What `v1` changes for callers, beyond the paths: `ecu_reset` (both clients) accepts
+//! the `/v1` answer (202, no body) and reports `status: "running"` with `href` = the
+//! `Location`; [`FlashClient::execute`] is always orchestrated (the server requires
+//! it), so it returns at `awaiting-verdict` for a banked update whatever its argument.
+//!
+//! ```rust,no_run
+//! # async fn f() -> anyhow::Result<()> {
+//! use sovd_client::{Dialect, SovdClient};
+//! let client = SovdClient::new("https://device:8443")?
+//!     .with_dialect(Dialect::V1)
+//!     .await?;
+//! let status = client.read_status("vm1").await?; // node form on a node server
+//! # Ok(()) }
+//! ```
+//!
 //! # Private Data / Client-Side Conversion
 //!
 //! For scenarios where the server doesn't have DID definitions (private data),
@@ -66,6 +97,7 @@
 mod client;
 mod error;
 pub mod flash;
+pub mod paths;
 pub mod streaming;
 #[cfg(feature = "test-util")]
 pub mod testing;
@@ -73,6 +105,7 @@ mod types;
 
 pub use client::SovdClient;
 pub use error::{Result, SovdClientError};
+pub use paths::{Dialect, Paths};
 pub use types::*;
 
 // Re-export flash client for convenience

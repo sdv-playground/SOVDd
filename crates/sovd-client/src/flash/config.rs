@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use crate::paths::Paths;
+
 /// Flash client configuration
 ///
 /// Can be loaded from YAML, TOML, or constructed programmatically.
@@ -25,9 +27,15 @@ pub struct FlashConfig {
 
     /// Gateway component ID (for sub-entity SOVD paths)
     /// When set together with component_id, produces sub-entity routes:
-    /// `/vehicle/v1/components/{gateway_id}/apps/{component_id}/...`
+    /// `{components}/{gateway_id}/apps/{component_id}/...`
     #[serde(default)]
     pub gateway_id: Option<String>,
+
+    /// The SOVD tree the SOVD-style paths are on (see [`crate::paths`]).
+    /// Default legacy, and then not serialized, so configs
+    /// written before dialects existed read and write unchanged.
+    #[serde(default, skip_serializing_if = "Paths::is_legacy")]
+    pub paths: Paths,
 
     /// Skip TLS certificate verification — the `curl -k` equivalent, for a dev
     /// device whose leaf SAN won't match the dialled host. Default `false`
@@ -260,16 +268,12 @@ impl FlashConfig {
     /// Get the base path prefix (includes component_id for SOVD-style paths)
     ///
     /// When both `gateway_id` and `component_id` are set, produces sub-entity
-    /// paths per SOVD §6.5:
-    /// `/vehicle/v1/components/{gateway}/apps/{app}`
+    /// paths per SOVD §6.5: [`Paths::app`]`(gateway, app)`; with only
+    /// `component_id`, [`Paths::member`]`(id)`.
     pub fn base_prefix(&self) -> String {
         match (&self.gateway_id, &self.component_id) {
-            (Some(gw), Some(app)) => format!(
-                "/vehicle/v1/components/{}/apps/{}",
-                gw,
-                app.replace('/', "%2F")
-            ),
-            (None, Some(id)) => format!("/vehicle/v1/components/{}", id),
+            (Some(gw), Some(app)) => self.paths.app(gw, &app.replace('/', "%2F")),
+            (None, Some(id)) => self.paths.member(id),
             _ => String::new(),
         }
     }
@@ -391,7 +395,7 @@ impl FlashConfig {
     }
 
     /// Get the resolved endpoint path for ECU reset
-    /// Note: SOVD reset is at /vehicle/v1/components/:id/reset, not under /flash/.
+    /// Note: SOVD reset is at `{base_prefix}/reset`, not under /flash/.
     /// **DEPRECATED** — prefer [`flash_status_restart_path`] (PUT
     /// `status/restart`) per ISO 17978-3 §7.19.
     pub fn flash_reset_path(&self) -> String {
@@ -404,7 +408,7 @@ impl FlashConfig {
 
     /// Get the resolved endpoint path for spec-conforming PUT
     /// `status/restart` (ISO 17978-3 §7.19). Lives at
-    /// `/vehicle/v1/components/:id/status/restart`.
+    /// `{base_prefix}/status/restart`.
     pub fn flash_status_restart_path(&self) -> String {
         format!("{}/status/restart", self.base_prefix())
     }
@@ -511,6 +515,7 @@ impl FlashConfigBuilder {
                 timeouts: TimeoutsConfig::default(),
                 component_id: None,
                 gateway_id: None,
+                paths: Paths::legacy(),
                 insecure: false,
                 ca_cert_pem: None,
             },
@@ -557,6 +562,14 @@ impl FlashConfigBuilder {
     /// Set the gateway ID (for sub-entity SOVD paths)
     pub fn gateway_id(mut self, id: impl Into<String>) -> Self {
         self.config.gateway_id = Some(id.into());
+        self
+    }
+
+    /// Speak the resolved path map `paths` (see [`crate::paths`]); default
+    /// legacy. [`FlashClient::with_dialect`](crate::FlashClient::with_dialect)
+    /// resolves one by discovery.
+    pub fn paths(mut self, paths: Paths) -> Self {
+        self.config.paths = paths;
         self
     }
 
@@ -715,5 +728,40 @@ timeouts:
         let yaml = config.to_yaml().unwrap();
         assert!(yaml.contains("base_url"));
         assert!(yaml.contains("http://localhost:8080"));
+    }
+
+    #[test]
+    fn paths_default_legacy_and_round_trip() {
+        // A legacy config serializes as before (no `paths` key) and reads back legacy.
+        let legacy = FlashConfig::builder("http://localhost:8080")
+            .component_id("vm1")
+            .build();
+        let yaml = legacy.to_yaml().unwrap();
+        assert!(!yaml.contains("paths"));
+        assert_eq!(
+            FlashConfig::from_yaml(&yaml).unwrap().paths,
+            Paths::legacy()
+        );
+
+        let node = FlashConfig::builder("http://localhost:8080")
+            .gateway_id("uds_gw")
+            .component_id("engine_ecu")
+            .paths(Paths::v1(Some("cvc".into())))
+            .build();
+        assert_eq!(
+            node.updates_collection_path(),
+            "/v1/components/cvc/subcomponents/uds_gw/apps/engine_ecu/updates"
+        );
+        let back = FlashConfig::from_yaml(&node.to_yaml().unwrap()).unwrap();
+        assert_eq!(back.paths, Paths::v1(Some("cvc".into())));
+
+        let flat = FlashConfig::from_yaml(
+            "connection:\n  base_url: http://x\ncomponent_id: vm1\npaths:\n  dialect: v1\n",
+        )
+        .unwrap();
+        assert_eq!(
+            flat.flash_status_restart_path(),
+            "/v1/components/vm1/status/restart"
+        );
     }
 }
