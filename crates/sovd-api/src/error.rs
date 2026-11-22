@@ -42,6 +42,13 @@ pub(crate) const INVALID_TOKEN_CHALLENGE: &str = r#"Bearer realm="sovd", error="
 pub enum ApiError {
     /// 400 Bad Request — `incomplete-request`
     BadRequest(String),
+    /// 400 Bad Request — `incomplete-request` naming the missing request
+    /// parameter in `parameters`, with the values it accepts.
+    MissingParameter {
+        message: String,
+        name: &'static str,
+        accepted: &'static [&'static str],
+    },
     /// 404 Not Found — `incomplete-request`
     NotFound(String),
     /// 401 Unauthorized — `insufficient-access-rights`.
@@ -121,6 +128,17 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest(msg) => (
                 StatusCode::BAD_REQUEST,
                 GenericError::new(error_code::INCOMPLETE_REQUEST, msg),
+            ),
+            ApiError::MissingParameter {
+                message,
+                name,
+                accepted,
+            } => (
+                StatusCode::BAD_REQUEST,
+                accepted.iter().fold(
+                    GenericError::new(error_code::INCOMPLETE_REQUEST, message),
+                    |body, value| body.with_param(name, *value),
+                ),
             ),
             ApiError::NotFound(msg) => (
                 StatusCode::NOT_FOUND,

@@ -356,8 +356,10 @@ pub struct PartCreatedResponse {
 /// orchestrated-extension flow: the execute task pauses post-activation
 /// at `substate=awaiting-verdict` and waits for the orchestrator to
 /// issue `PUT /x-ota-commit` or `/x-ota-rollback` before transitioning
-/// to a terminal status.  Absent or any other value → standard
-/// server-driven flow (Phase A behaviour).
+/// to a terminal status.  On `/v1` it is required ([`EXECUTE_CONTROL`]):
+/// absent or any other value → 400 `incomplete-request`.  On the legacy
+/// tree, absent or any other value → standard server-driven flow
+/// (Phase A behaviour, deprecated).
 ///
 /// `tasks/spec-aligned-updates-wire.md` §2.2.
 #[derive(Debug, Deserialize, Default)]
@@ -365,6 +367,10 @@ pub struct ExecuteQuery {
     #[serde(rename = "x-ota-control", default)]
     pub control: Option<String>,
 }
+
+/// The `x-ota-control` values `PUT /v1/.../execute` accepts: this server
+/// settles an update only on the tester's verdict.
+pub(crate) const EXECUTE_CONTROL: &[&str] = &["orchestrated"];
 
 impl ExecuteQuery {
     fn is_orchestrated(&self) -> bool {
@@ -1118,6 +1124,18 @@ async fn put_execute_inner(
         let entry = store
             .get_mut(&key)
             .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?;
+        // `/v1` never runs an execute nobody will settle: without the
+        // orchestrated control mode a banked update would sit in an
+        // uncommitted trial.  Refused before any state change.
+        if tree == Tree::V1 && !query.is_orchestrated() {
+            return Err(ApiError::MissingParameter {
+                message: "execute requires x-ota-control=orchestrated: this server \
+                          settles an update only on the tester's verdict"
+                    .into(),
+                name: "x-ota-control",
+                accepted: EXECUTE_CONTROL,
+            });
+        }
         if expected_token.is_some_and(|token| token != entry.registration_token) {
             return Err(ApiError::Conflict(format!(
                 "update {update_id} was replaced before execute started"
@@ -1429,7 +1447,8 @@ async fn put_execute_inner(
 /// — ISO 17978-3 §7.18.4.  Server-driven prepare+execute chain.
 /// Phase A: thin wrapper that runs prepare followed by execute when
 /// prepare completes.  Returns `409` if the package isn't marked
-/// `automated`.
+/// `automated` — and always on `/v1`, whose execute requires the
+/// orchestrated control mode an automated chain cannot give.
 pub async fn put_automated(
     State(state): State<AppState>,
     Extension(tree): Extension<Tree>,
@@ -1464,7 +1483,7 @@ async fn automated(
             entry.registration_token,
         )
     };
-    if !allowed {
+    if tree == Tree::V1 || !allowed {
         return Err(ApiError::UpdateAutomatedNotSupported(
             "the package cannot be installed automatically".into(),
         ));

@@ -335,7 +335,7 @@ async fn v1_serves_verdict_scope_on_update_bodies() {
         let body = get_json(&f.server, &format!("/v1/components/{component}")).await;
         assert_eq!(
             body["capabilities"]["x-update"],
-            serde_json::json!({ "verdict": true, "verdict_scope": scope }),
+            serde_json::json!({ "verdict": true, "verdict_scope": scope, "control": ["orchestrated"] }),
             "{body}"
         );
     }

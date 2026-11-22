@@ -72,7 +72,9 @@ struct MockBackend {
     activation_query_gate: AsyncGate,
     rollback_flash_gate: AsyncGate,
     abort_flash_gate: AsyncGate,
-    /// Hook calls in arrival order: `note:<id>`, `start_flash`, `part:<id>`.
+    /// Hook calls in arrival order: `note:<id>`, `start_flash`, `part:<id>`,
+    /// and the execute-phase calls (`finalize_flash`, `validate`, `activate`,
+    /// `commit_flash`).
     hook_log: Mutex<Vec<String>>,
     /// What `note_update_id` answers: 0 = Ok, 1 = Busy, 2 = NotSupported.
     note_update_id_mode: AtomicU64,
@@ -328,6 +330,7 @@ impl DiagnosticBackend for MockBackend {
     }
 
     async fn finalize_flash(&self) -> BackendResult<()> {
+        self.hook_log.lock().push("finalize_flash".into());
         let mut state = self.flash_state.lock();
         *state = if self.shape.shape == "singleshot" {
             CoreFlashState::Activated
@@ -338,6 +341,7 @@ impl DiagnosticBackend for MockBackend {
     }
 
     async fn validate(&self) -> BackendResult<()> {
+        self.hook_log.lock().push("validate".into());
         let mut state = self.flash_state.lock();
         if matches!(
             *state,
@@ -356,6 +360,7 @@ impl DiagnosticBackend for MockBackend {
     }
 
     async fn activate(&self) -> BackendResult<()> {
+        self.hook_log.lock().push("activate".into());
         let mut state = self.flash_state.lock();
         if *state == CoreFlashState::Validated {
             *state = if self.shape.shape == "singleshot" {
@@ -373,6 +378,7 @@ impl DiagnosticBackend for MockBackend {
     }
 
     async fn commit_flash(&self) -> BackendResult<()> {
+        self.hook_log.lock().push("commit_flash".into());
         *self.flash_state.lock() = CoreFlashState::Committed;
         Ok(())
     }
@@ -2873,4 +2879,286 @@ async fn reading_back_without_backend_support_is_501() {
         let body: Value = resp.json().await.unwrap();
         assert_eq!(body["error_code"], "vendor-specific", "{body}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// /v1 execute requires x-ota-control=orchestrated
+// ---------------------------------------------------------------------------
+
+/// The exact 400 a `/v1` execute without `x-ota-control=orchestrated` answers.
+const EXECUTE_NEEDS_ORCHESTRATED: &str = r#"{"error_code":"incomplete-request","message":"execute requires x-ota-control=orchestrated: this server settles an update only on the tester's verdict","parameters":{"x-ota-control":["orchestrated"]}}"#;
+
+/// The `/v1` execute requests that lack the orchestrated control mode.
+const WITHOUT_ORCHESTRATED: [&str; 4] = [
+    "",
+    "?x-ota-control=auto",
+    "?x-ota-control=",
+    "?x-ota-control=Orchestrated",
+];
+
+async fn get_text(server: &TestServer, path: &str) -> (reqwest::StatusCode, String) {
+    let resp = http()
+        .get(format!("{}{path}", server.base_url()))
+        .send()
+        .await
+        .unwrap();
+    (resp.status(), resp.text().await.unwrap())
+}
+
+/// Poll the `/v1` status of `update` until it is terminal.
+async fn poll_terminal_at(server: &TestServer, update: &str) -> Value {
+    for _ in 0..200 {
+        let (st, body) = get_json(server, &format!("{update}/status")).await;
+        assert_eq!(st, reqwest::StatusCode::OK);
+        match body["status"].as_str() {
+            Some("completed") | Some("failed") => return body,
+            _ => tokio::time::sleep(Duration::from_millis(25)).await,
+        }
+    }
+    panic!("{update} never reached terminal");
+}
+
+/// Register `id` on dev1 under `/v1`, upload its parts and prepare it; the
+/// `/v1` update path.
+async fn v1_prepared(server: &TestServer, id: &str) -> String {
+    register_on(server, "/v1", id).await;
+    let update = format!("/v1/components/dev1/updates/{id}");
+    put_part(server, &format!("{update}/bulk-data/manifest"), None, b"m").await;
+    put_part(
+        server,
+        &format!("{update}/bulk-data/%23kernel"),
+        None,
+        b"\xCAk",
+    )
+    .await;
+    let resp = put(server, &format!("{update}/prepare")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let prepared = poll_terminal_at(server, &update).await;
+    assert_eq!(prepared["phase"], "prepare");
+    assert_eq!(prepared["status"], "completed");
+    update
+}
+
+/// Every `/v1` execute without the orchestrated control mode on `id`, on
+/// both collections, answers the exact 400 and changes nothing: the status
+/// body is unchanged and no backend call is made.
+async fn assert_execute_refused(server: &TestServer, backend: &MockBackend, id: &str) {
+    let update = format!("/v1/components/dev1/updates/{id}");
+    let (_, before) = get_text(server, &format!("{update}/status")).await;
+    backend.hook_log.lock().clear();
+    for execute in [
+        format!("{update}/execute"),
+        format!("/v1/updates/{id}/execute"),
+    ] {
+        for query in WITHOUT_ORCHESTRATED {
+            let resp = put(server, &format!("{execute}{query}")).await;
+            assert_eq!(
+                resp.status(),
+                reqwest::StatusCode::BAD_REQUEST,
+                "{execute}{query}"
+            );
+            assert_eq!(
+                resp.text().await.unwrap(),
+                EXECUTE_NEEDS_ORCHESTRATED,
+                "{execute}{query}"
+            );
+        }
+    }
+    let (_, after) = get_text(server, &format!("{update}/status")).await;
+    assert_eq!(after, before);
+    assert!(
+        backend.hook_log.lock().is_empty(),
+        "{:?}",
+        backend.hook_log.lock()
+    );
+}
+
+#[tokio::test]
+async fn v1_banked_execute_without_orchestrated_is_refused_then_orchestrated_commits() {
+    let (server, backend) = spawn_with("banked").await;
+    let update = v1_prepared(&server, "v1-banked").await;
+    assert_execute_refused(&server, &backend, "v1-banked").await;
+
+    let resp = put(
+        &server,
+        &format!("{update}/execute?x-ota-control=orchestrated"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let mut body = Value::Null;
+    for _ in 0..200 {
+        body = get_json(&server, &format!("{update}/status")).await.1;
+        if body["x-ota-substate"] == "awaiting-verdict" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(body["x-ota-substate"], "awaiting-verdict", "{body}");
+    assert_eq!(
+        *backend.hook_log.lock(),
+        ["finalize_flash", "validate", "activate"]
+    );
+
+    *backend.flash_state.lock() = CoreFlashState::Activated;
+    let resp = put(&server, &format!("{update}/x-update-commit")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let body = poll_terminal_at(&server, &update).await;
+    assert_eq!(body["phase"], "execute");
+    assert_eq!(body["status"], "completed");
+    assert_eq!(body["x-update"]["state"], "COMMITTED");
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::Committed);
+}
+
+#[tokio::test]
+async fn v1_singleshot_execute_without_orchestrated_is_refused_then_orchestrated_commits() {
+    let (server, backend) = spawn_with("singleshot").await;
+    let update = v1_prepared(&server, "v1-singleshot").await;
+    assert_execute_refused(&server, &backend, "v1-singleshot").await;
+
+    let resp = put(
+        &server,
+        &format!("{update}/execute?x-ota-control=orchestrated"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let body = poll_terminal_at(&server, &update).await;
+    assert_eq!(body["status"], "completed");
+    assert_eq!(body["x-update"]["state"], "COMMITTED");
+    assert!(body.get("x-ota-substate").is_none());
+    assert_eq!(*backend.hook_log.lock(), ["finalize_flash", "commit_flash"]);
+}
+
+#[tokio::test]
+async fn v1_execute_ordering_404_then_400_then_state_checks() {
+    let (server, _backend) = spawn_with("banked").await;
+    for execute in [
+        "/v1/components/dev1/updates/nope/execute",
+        "/v1/updates/nope/execute",
+    ] {
+        let resp = put(&server, execute).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND, "{execute}");
+    }
+    // Not prepared: without the mode the 400 comes first; with it the
+    // state check answers as before.
+    register_on(&server, "/v1", "v1-unprepared").await;
+    let execute = "/v1/components/dev1/updates/v1-unprepared/execute";
+    let resp = put(&server, execute).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(resp.text().await.unwrap(), EXECUTE_NEEDS_ORCHESTRATED);
+    let resp = put(&server, &format!("{execute}?x-ota-control=orchestrated")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error_code"], "precondition-not-fulfilled", "{body}");
+}
+
+/// The legacy tree keeps main's standard mode: a banked execute without the
+/// control mode runs to activation and ends at execute/completed.
+#[tokio::test]
+async fn legacy_execute_without_orchestrated_is_unchanged() {
+    let (server, backend) = spawn_with("banked").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"banked").await;
+    upload_part(&server, &id, "#kernel", b"\xCAfake").await;
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/prepare"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    poll_terminal(&server, &id).await;
+
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/execute"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(
+        resp.headers()["location"],
+        format!("/vehicle/v1/components/dev1/updates/{id}/status").as_str()
+    );
+    assert_eq!(resp.text().await.unwrap(), "");
+    poll_terminal(&server, &id).await;
+    let (_, body) = get_text(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/status"),
+    )
+    .await;
+    assert_eq!(
+        body,
+        r#"{"phase":"execute","status":"completed","progress":100,"step":"staged for reset","x-ota-reset-kind":"local","x-update":{"state":"EXECUTING","reset_kind":"component"}}"#
+    );
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::AwaitingReboot);
+}
+
+#[tokio::test]
+async fn v1_automated_is_not_supported() {
+    let (server, backend) = spawn_with("singleshot").await;
+    register_on(&server, "/v1", "v1-automated").await;
+    let update = "/v1/components/dev1/updates/v1-automated";
+    let (_, before) = get_text(&server, &format!("{update}/status")).await;
+    backend.hook_log.lock().clear();
+    for automated in [
+        format!("{update}/automated"),
+        "/v1/updates/v1-automated/automated".to_string(),
+    ] {
+        let resp = put(&server, &automated).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT, "{automated}");
+        assert_eq!(
+            resp.text().await.unwrap(),
+            r#"{"error_code":"update-automated-not-supported","message":"the package cannot be installed automatically"}"#,
+            "{automated}"
+        );
+    }
+    let (_, after) = get_text(&server, &format!("{update}/status")).await;
+    assert_eq!(after, before);
+    assert!(backend.hook_log.lock().is_empty());
+    let resp = put(&server, "/v1/components/dev1/updates/nope/automated").await;
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn execute_control_is_documented_on_v1_only() {
+    let (server, _backend) = spawn_with("banked").await;
+    let (st, doc) = get_json(&server, "/v1/docs").await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+    for path in [
+        "/v1/components/{component_id}/updates/{update_id}/execute",
+        "/v1/updates/{update_id}/execute",
+    ] {
+        let params = &doc["paths"][path]["put"]["parameters"];
+        assert_eq!(params.as_array().map(Vec::len), Some(1), "{path}: {params}");
+        let param = &params[0];
+        assert_eq!(param["name"], "x-ota-control", "{path}");
+        assert_eq!(param["in"], "query", "{path}");
+        assert_eq!(param["required"], true, "{path}");
+        assert_eq!(param["schema"]["enum"], serde_json::json!(["orchestrated"]));
+        assert!(param["description"].is_string(), "{path}");
+    }
+    let (st, doc) = get_json(&server, "/vehicle/v1/docs").await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+    let paths = doc["paths"].as_object().unwrap();
+    assert!(!paths.keys().any(|path| path.ends_with("/execute")));
+
+    for (shape, verdict) in [("banked", true), ("singleshot", false)] {
+        let (server, _backend) = spawn_with(shape).await;
+        let (_, body) = get_json(&server, "/v1/components/dev1").await;
+        assert_eq!(
+            body["capabilities"]["x-update"],
+            serde_json::json!({ "verdict": verdict, "verdict_scope": "update", "control": ["orchestrated"] }),
+            "{shape}"
+        );
+        let (_, body) = get_json(&server, "/vehicle/v1/components/dev1").await;
+        assert_eq!(
+            body["capabilities"]["x-update"],
+            serde_json::json!({ "verdict": verdict }),
+            "{shape}"
+        );
+    }
+
+    let (_, exts) = get_json(&server, "/.well-known/sovd-extensions").await;
+    assert_eq!(
+        exts["extensions"]["x-ota-control"]["required_on"],
+        serde_json::json!(["/v1"])
+    );
 }

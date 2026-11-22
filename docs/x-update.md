@@ -97,6 +97,29 @@ updates.
   collections; `/vehicle/v1` bodies are unchanged.
 - `x-ota-force-rollback` is component-rooted and has no node-level form.
 
+## Execute
+
+Under `/v1`, `PUT {entity}/updates/{update_id}/execute` (component and node-level collections)
+requires the query parameter `x-ota-control=orchestrated`: this server settles an update only on
+the tester's verdict. Without it, or with any other value, the answer is 400 before anything
+runs, and the update stays as it was:
+
+```json
+{"error_code": "incomplete-request", "message": "execute requires x-ota-control=orchestrated: this server settles an update only on the tester's verdict", "parameters": {"x-ota-control": ["orchestrated"]}}
+```
+
+An unknown update answers 404 first; with the parameter, the state checks answer as before (409).
+The same request serves every update shape: a single-shot update takes it and commits on its own
+as before. The capability description (`GET /v1/docs`) lists the parameter as required, and the
+component capabilities carry `x-update.control` (see "Capability flag").
+
+Under `/v1`, `PUT {entity}/updates/{update_id}/automated` answers 409
+`update-automated-not-supported`: an automated chain gives no verdict.
+
+Under `/vehicle/v1` both are unchanged and deprecated: execute without the parameter runs a
+banked update to activation and leaves it in a trial no verdict can settle, and `automated` chains
+prepare into that execute.
+
 ## Verdicts: `x-update-commit`, `x-update-rollback`
 
 `PUT {entity}/updates/{update_id}/x-update-commit` and `…/x-update-rollback` decide this one
@@ -216,10 +239,11 @@ The x-ota member `x-ota-reset-kind` keeps its old vocabulary (`none`, `local`,
 `GET {entity}` (component body) carries:
 
 ```json
-"capabilities": { "...": "...", "x-update": { "verdict": true, "verdict_scope": "update" | "node" } }
+"capabilities": { "...": "...", "x-update": { "verdict": true, "verdict_scope": "update" | "node", "control": ["orchestrated"] } }
 ```
 
-`verdict_scope` is served under `/v1` only, with the values of the status member.
+`verdict_scope` is served under `/v1` only, with the values of the status member. `control`, also
+`/v1` only, lists the `x-ota-control` values execute accepts; one of them is required.
 
 | `verdict` | meaning |
 |---|---|
@@ -227,8 +251,8 @@ The x-ota member `x-ota-reset-kind` keeps its old vocabulary (`none`, `local`,
 | false | `execute` commits on its own |
 | absent | the server cannot tell |
 
-The client does not choose whether a verdict is needed; there is no request option for it. The
-standard `automated` verb is the way to ask the executor to decide for itself.
+The client does not choose whether a verdict is needed: under `/v1` every execute is orchestrated,
+and a verdict (commit or rollback) is how every banked update is settled.
 
 ## Node state: `x-update-state`
 
@@ -252,7 +276,7 @@ restart and the verdict.
 1. Register one update per component (`POST {entity}/updates`).
 2. Upload the manifest and parts.
 3. `PUT prepare` on each; wait for PREPARED.
-4. `PUT execute` on each; each goes EXECUTING.
+4. `PUT execute?x-ota-control=orchestrated` on each; each goes EXECUTING.
 5. The restart named by `reset_kind` happens: whoever is authorized issues
    `PUT {entity}/status/restart`, or a power cycle does it. The client awaits EXECUTED.
 6. When the updates report EXECUTED: send the verdict and await COMMITTED or ROLLED_BACK. A
@@ -269,13 +293,13 @@ restart and the verdict.
 | `x-ota-commit-trials`, `x-ota-rollback-trials` | node `x-update-commit`, `x-update-rollback` operations | machine manager |
 | `x-ota-update-state` | `x-update-state` | machine manager |
 | `x-ota-reset-kind`, `x-ota-substate` | `x-update.reset_kind`, `x-update.state` | this crate |
-| `?x-ota-control=orchestrated` | unchanged for now; the executor's `verdict` property replaces it later | this crate |
+| `?x-ota-control=orchestrated` | unchanged; required on `/v1` (see "Execute") | this crate |
 | `x-ota-force-rollback` | unchanged (admin operation, not lifecycle) | this crate |
 | `x-ota-pull-update` | unchanged (admin operation, not lifecycle) | machine manager |
 
 ## Not in this version
 
-- Executors that need a verdict refusing `automated` with 409.
+- Executors that need a verdict refusing `automated` with 409 under `/vehicle/v1`.
 - Retiring the x-ota names.
 - Adopting a re-registration the executor still holds.
 - Executor-side recording of the update id (which the listing needs).
