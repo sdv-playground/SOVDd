@@ -1025,6 +1025,17 @@ pub trait DiagnosticBackend: Send + Sync {
         ))
     }
 
+    /// Stream back a part by the file_id `receive_package_part` returned,
+    /// exactly the bytes received, for `GET /updates/{id}/bulk-data/{part}`.
+    /// `EntityNotFound` once the part is no longer kept. Default impl is
+    /// `NotSupported`.
+    async fn read_part(&self, file_id: &str) -> BackendResult<PackageStream> {
+        let _ = file_id;
+        Err(crate::error::BackendError::NotSupported(
+            "read_part".to_string(),
+        ))
+    }
+
     /// Delete a stored package
     async fn delete_package(&self, package_id: &str) -> BackendResult<()> {
         let _ = package_id;
@@ -1551,6 +1562,11 @@ mod held_update_tests {
         assert!(ready(backend.held_updates()).unwrap().is_empty());
         // The id hook defaults to accepting anything.
         assert!(ready(backend.note_update_id("pkg-1")).is_ok());
+        // Reading a part back is opt-in.
+        assert!(matches!(
+            ready(backend.read_part("pkg-1")),
+            Err(crate::error::BackendError::NotSupported(_))
+        ));
 
         let held = HeldUpdate {
             id: "pkg-1".into(),

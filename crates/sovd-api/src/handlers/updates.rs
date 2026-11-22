@@ -11,6 +11,7 @@
 //! | `POST /updates`                 | (none — SOVD-side allocation of update_id) |
 //! | `POST /bulk-data`               | `receive_package_part` (returns file_id, recorded per part) |
 //! | `PUT /bulk-data/{part_id}`      | same; legacy alias of `POST /bulk-data` |
+//! | `GET /bulk-data/{part_id}`      | `read_part(file_id)`, streamed back |
 //! | `POST /executions {verify}`     | `verify_package` per part, then `start_flash` (allocates transfer_id) |
 //! | `POST /executions {finalize}`   | `finalize_flash` + `activate` |
 //! | `POST /executions {commit}`     | `commit_flash` |
@@ -2058,6 +2059,47 @@ pub async fn put_bulk_data_part(
     .await
 }
 
+/// GET /vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data/{part_id}
+pub async fn get_bulk_data_part(
+    State(state): State<AppState>,
+    Path((component_id, update_id, part_id)): Path<(String, String, String)>,
+) -> Result<Response, ApiError> {
+    read_part(&state, &component_id, &update_id, &part_id).await
+}
+
+/// A part as uploaded, streamed from the backend ([`sovd_core::DiagnosticBackend::read_part`])
+/// with its recorded `Content-Type`, its size as `Content-Length` and its `ETag`. 404 for an
+/// update or part this server holds no record of, or a part the backend no longer keeps; 501
+/// when the backend cannot read parts back.
+async fn read_part(
+    state: &AppState,
+    component_id: &str,
+    update_id: &str,
+    part_id: &str,
+) -> Result<Response, ApiError> {
+    let backend = state.get_backend(component_id)?;
+    let part = state
+        .updates
+        .0
+        .lock()
+        .get(&UpdateKey::new(component_id, update_id))
+        .ok_or_else(|| ApiError::NotFound(format!("update {update_id} not found")))?
+        .parts
+        .iter()
+        .find(|p| p.part_id == part_id)
+        .cloned()
+        .ok_or_else(|| ApiError::NotFound(format!("update {update_id} has no part {part_id:?}")))?;
+    let stream = backend.read_part(&part.file_id).await?;
+    let mut headers = etag_headers(&part.sha256)?;
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(part.mimetype.as_deref().unwrap_or(DEFAULT_PART_MIMETYPE))
+            .map_err(|e| ApiError::Internal(format!("bad Content-Type header: {e}")))?,
+    );
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(part.size));
+    Ok((StatusCode::OK, headers, Body::from_stream(stream)).into_response())
+}
+
 /// POST /vehicle/v1/components/{component_id}/updates/{update_id}/bulk-data
 pub async fn post_bulk_data_part(
     State(state): State<AppState>,
@@ -2497,6 +2539,18 @@ pub async fn put_node_bulk_data_part(
     let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
     let path = (owner, update_id, part_id);
     bulk_data_part(state, tree, UpdatePath::Node, path, headers, body).await
+}
+
+/// `GET {base}/updates/{update_id}/bulk-data/{part_id}`.
+pub async fn get_node_bulk_data_part(
+    State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
+    client: Option<Extension<ClientContext>>,
+    uri: Uri,
+    Path((update_id, part_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let owner = node_owner(&state, tree, client.as_deref(), &uri, &update_id).await?;
+    read_part(&state, &owner, &update_id, &part_id).await
 }
 
 /// `POST {base}/updates/{update_id}/bulk-data`.

@@ -313,3 +313,30 @@ async fn component_admin_needs_its_bare_hyphenated_verb() {
             .is_err()
     );
 }
+
+// Reading an update part back is authorized as uploading it: the same
+// capability (`updates:transfer`) and component scope as the PUT, on both
+// trees. (Past authorization the unknown update answers 404.)
+#[tokio::test]
+async fn reading_back_an_update_part_is_authorized_as_uploading_it() {
+    let server = server_with_injected_authorizer().await;
+    let client = reqwest::Client::new();
+    for base in ["/vehicle/v1", "/v1"] {
+        let url = format!(
+            "{}{base}/components/vm1/updates/u1/bulk-data/%23rt-firmware.s19",
+            server.base_url()
+        );
+        for (scopes, granted) in [
+            (&["component:vm1", "updates:transfer"][..], true),
+            (&["component:vm1"][..], false),
+            (&["component:other", "updates:transfer"][..], false),
+        ] {
+            let token = mint(scopes);
+            let put = client.put(&url).bearer_auth(&token).send().await.unwrap();
+            let get = client.get(&url).bearer_auth(&token).send().await.unwrap();
+            assert_eq!(get.status(), put.status(), "{base} {scopes:?}");
+            // Denials are 401 on the legacy tree, 403 under /v1.
+            assert_eq!(get.status() == 404, granted, "{base} {scopes:?}");
+        }
+    }
+}

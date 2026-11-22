@@ -577,7 +577,7 @@ fn api_routes(tree: Tree) -> Router<AppState> {
         )
         .route(
             &format!("{}{}", tree.base(), "/components/{component_id}/updates/{update_id}/bulk-data/{part_id}"),
-            put(handlers::updates::put_bulk_data_part),
+            put(handlers::updates::put_bulk_data_part).get(handlers::updates::get_bulk_data_part),
         )
         // ISO 17978-3 §7.18 spec verbs — async 202 + Location :: /status.
         // The F.D8b vendor-extension `/executions{action}` wire (deprecated
@@ -654,7 +654,8 @@ fn api_routes(tree: Tree) -> Router<AppState> {
         )
         .route(
             &format!("{}{}", tree.base(), "/updates/{update_id}/bulk-data/{part_id}"),
-            put(handlers::updates::put_node_bulk_data_part),
+            put(handlers::updates::put_node_bulk_data_part)
+                .get(handlers::updates::get_node_bulk_data_part),
         )
         .route(
             &format!("{}{}", tree.base(), "/updates/{update_id}/prepare"),

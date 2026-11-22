@@ -80,6 +80,10 @@ struct MockBackend {
     held: Mutex<Vec<HeldUpdate>>,
     /// Make `held_updates` fail with a transport error.
     held_error: AtomicBool,
+    /// The bytes received per file_id, for `read_part`.
+    received: Mutex<HashMap<String, Vec<u8>>>,
+    /// Make `read_part` answer as a backend that cannot read parts back.
+    read_part_unsupported: AtomicBool,
     /// Optional gateway-style child sub-entity (drives the C-073
     /// gateway-child subscription-resource path).
     child: Option<Arc<MockBackend>>,
@@ -127,6 +131,8 @@ impl MockBackend {
             note_update_id_mode: AtomicU64::new(0),
             held: Mutex::new(Vec::new()),
             held_error: AtomicBool::new(false),
+            received: Mutex::new(HashMap::new()),
+            read_part_unsupported: AtomicBool::new(false),
             child,
             data_tx: tokio::sync::broadcast::channel(16).0,
         }
@@ -239,9 +245,26 @@ impl DiagnosticBackend for MockBackend {
         let mut counter = self.next_id.lock();
         *counter += 1;
         let id = format!("pkg-{}", *counter);
+        self.received.lock().insert(id.clone(), buf);
         // Pretend the manifest is at AwaitingActivation after streaming.
         *self.flash_state.lock() = CoreFlashState::AwaitingActivation;
         Ok(id)
+    }
+
+    async fn read_part(&self, file_id: &str) -> BackendResult<PackageStream> {
+        if self.read_part_unsupported.load(Ordering::SeqCst) {
+            return Err(BackendError::NotSupported("read_part".into()));
+        }
+        let bytes = self
+            .received
+            .lock()
+            .get(file_id)
+            .cloned()
+            .ok_or_else(|| BackendError::EntityNotFound(file_id.into()))?;
+        // Two chunks, so the response is streamed rather than one buffer.
+        let (a, b) = bytes.split_at(bytes.len() / 2);
+        let chunks = [a.to_vec(), b.to_vec()].map(|c| Ok(axum::body::Bytes::from(c)));
+        Ok(Box::pin(futures::stream::iter(chunks)))
     }
 
     async fn verify_part(&self, file_id: &str, expected_sha256: &str) -> BackendResult<()> {
@@ -2685,4 +2708,143 @@ async fn registered_parts_report_present_by_name() {
         parts(&body),
         vec![("manifest".into(), false), ("#kernel".into(), false)]
     );
+}
+
+// ---------------------------------------------------------------------------
+// GET {update}/bulk-data/{part_id}: reading an uploaded part back
+// ---------------------------------------------------------------------------
+
+/// Register `id` on dev1 under `base`.
+async fn register_on(server: &TestServer, base: &str, id: &str) {
+    let resp = http()
+        .post(format!(
+            "{}{base}/components/dev1/updates",
+            server.base_url()
+        ))
+        .json(&serde_json::json!({ "id": id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+}
+
+async fn put_part(server: &TestServer, path: &str, mimetype: Option<&str>, data: &[u8]) {
+    let mut req = http()
+        .put(format!("{}{path}", server.base_url()))
+        .body(data.to_vec());
+    if let Some(mimetype) = mimetype {
+        req = req.header("content-type", mimetype);
+    }
+    assert_eq!(
+        req.send().await.unwrap().status(),
+        reqwest::StatusCode::CREATED
+    );
+}
+
+async fn get_part(server: &TestServer, path: &str) -> reqwest::Response {
+    http()
+        .get(format!("{}{path}", server.base_url()))
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn uploaded_part_reads_back_on_both_trees_and_collections() {
+    let (server, _backend) = spawn_with("banked").await;
+    let image: Vec<u8> = (0..=255u8).cycle().take(10_000).collect();
+    let manifest = b"{\"suit\":1}".to_vec();
+    for (n, base) in ["/vehicle/v1", "/v1"].into_iter().enumerate() {
+        let id = format!("readback-{n}");
+        register_on(&server, base, &id).await;
+        let component = format!("{base}/components/dev1/updates/{id}/bulk-data");
+        let node = format!("{base}/updates/{id}/bulk-data");
+        put_part(&server, &format!("{component}/manifest"), None, &manifest).await;
+        put_part(
+            &server,
+            &format!("{node}/%23rt-firmware.s19"),
+            Some("application/x-srec"),
+            &image,
+        )
+        .await;
+        for collection in [&component, &node] {
+            for (part, mimetype, bytes) in [
+                ("manifest", "application/octet-stream", &manifest),
+                ("%23rt-firmware.s19", "application/x-srec", &image),
+            ] {
+                let resp = get_part(&server, &format!("{collection}/{part}")).await;
+                assert_eq!(
+                    resp.status(),
+                    reqwest::StatusCode::OK,
+                    "{collection}/{part}"
+                );
+                let headers = resp.headers().clone();
+                assert_eq!(headers["content-type"], mimetype);
+                assert_eq!(headers["content-length"], bytes.len().to_string().as_str());
+                assert!(headers.contains_key("etag"));
+                assert_eq!(&resp.bytes().await.unwrap()[..], &bytes[..]);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn reading_back_an_unknown_part_or_update_is_404() {
+    let (server, _backend) = spawn_with("banked").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"m").await;
+    for path in [
+        format!("/vehicle/v1/components/dev1/updates/{id}/bulk-data/nope"),
+        format!("/vehicle/v1/updates/{id}/bulk-data/nope"),
+        "/vehicle/v1/components/dev1/updates/nope/bulk-data/manifest".to_string(),
+        "/vehicle/v1/updates/nope/bulk-data/manifest".to_string(),
+    ] {
+        let resp = get_part(&server, &path).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND, "{path}");
+        let body: Value = resp.json().await.unwrap();
+        assert!(body["error_code"].is_string(), "{path}: {body}");
+    }
+
+    // Deleted: the record is gone.
+    let base = format!("/vehicle/v1/components/dev1/updates/{id}");
+    let resp = http()
+        .delete(format!("{}{base}", server.base_url()))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let resp = get_part(&server, &format!("{base}/bulk-data/manifest")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn reading_back_a_part_the_backend_no_longer_keeps_is_404() {
+    let (server, backend) = spawn_with("banked").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"m").await;
+    backend.received.lock().clear();
+    let path = format!("/vehicle/v1/components/dev1/updates/{id}/bulk-data/manifest");
+    let resp = get_part(&server, &path).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn reading_back_without_backend_support_is_501() {
+    let (server, backend) = spawn_with("banked").await;
+    backend.read_part_unsupported.store(true, Ordering::SeqCst);
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"m").await;
+    for path in [
+        format!("/vehicle/v1/components/dev1/updates/{id}/bulk-data/manifest"),
+        format!("/vehicle/v1/updates/{id}/bulk-data/manifest"),
+    ] {
+        let resp = get_part(&server, &path).await;
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::NOT_IMPLEMENTED,
+            "{path}"
+        );
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error_code"], "vendor-specific", "{body}");
+    }
 }

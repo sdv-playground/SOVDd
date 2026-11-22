@@ -255,7 +255,8 @@ pub fn route_capability(method: &Method, path: &str) -> Capability {
     } else if path.ends_with("/status/restart") || path.contains("/reset") {
         Capability::ResetExecute
     } else if path.contains("/updates") {
-        if is_get {
+        // Reading an uploaded part back needs what uploading it needs.
+        if is_get && !path.contains("/bulk-data/") {
             Capability::Read
         } else if path.ends_with("/execute") || path.ends_with("/automated") {
             Capability::UpdateExecute
