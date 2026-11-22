@@ -994,8 +994,10 @@ pub struct FinalizeDownloadResponse {
     pub crc32: Option<String>,
 }
 
-/// Response from ECU reset on the legacy `/vehicle/v1` tree — a vendor
-/// legacy body, not an ISO 17978-3 shape (`/v1` answers 202 with no body).
+/// Response from ECU reset on the legacy tree — a vendor legacy body, not an
+/// ISO 17978-3 shape. The ISO tree answers 202 with no body; a
+/// [`Dialect::V1`](crate::Dialect::V1) client then fills `status: "running"`,
+/// `reset_type` and `href` (the `Location`) and leaves the rest empty.
 ///
 /// Server returns 202 + `Location` header to a status sub-resource.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -36,8 +36,9 @@ pub struct Subscription {
     /// Subscription ID (for cleanup)
     subscription_id: String,
 
-    /// Component ID
-    component_id: Option<String>,
+    /// Path of the cyclic-subscription resource (for cleanup); `None` ⇒
+    /// nothing addressable to delete.
+    resource_path: Option<String>,
 
     /// Base URL for API calls
     base_url: Url,
@@ -69,7 +70,7 @@ impl Subscription {
         base_url: Url,
         http_client: Client,
         subscription_id: String,
-        component_id: Option<String>,
+        resource_path: Option<String>,
         stream_url: &str,
     ) -> StreamResult<Self> {
         // Build full stream URL
@@ -98,7 +99,7 @@ impl Subscription {
 
         Ok(Self {
             subscription_id,
-            component_id,
+            resource_path,
             base_url,
             http_client,
             inner: Box::pin(SubscriptionInner {
@@ -137,18 +138,14 @@ impl Subscription {
     /// (`DELETE …/cyclic-subscriptions/{id}`, ISO 17978-3 §7.10) — the
     /// same resource the SSE stream is served from.
     async fn cleanup(&self) -> StreamResult<()> {
-        let Some(comp_id) = &self.component_id else {
+        let Some(delete_url) = &self.resource_path else {
             // No component scope ⇒ nothing addressable to delete.
             return Ok(());
         };
-        let delete_url = format!(
-            "/vehicle/v1/components/{}/cyclic-subscriptions/{}",
-            comp_id, self.subscription_id
-        );
 
         let url = self
             .base_url
-            .join(&delete_url)
+            .join(delete_url)
             .map_err(|e| StreamError::Parse(format!("Invalid cleanup URL: {}", e)))?;
 
         debug!("Cleaning up subscription: {}", url);
@@ -217,17 +214,12 @@ impl Drop for Subscription {
             // resource (ISO 17978-3 §7.10) the stream was served from.
             let http_client = self.http_client.clone();
             let base_url = self.base_url.clone();
-            let subscription_id = self.subscription_id.clone();
-            let component_id = self.component_id.clone();
+            let resource_path = self.resource_path.clone();
 
             tokio::spawn(async move {
-                let Some(comp_id) = component_id else {
+                let Some(delete_url) = resource_path else {
                     return;
                 };
-                let delete_url = format!(
-                    "/vehicle/v1/components/{}/cyclic-subscriptions/{}",
-                    comp_id, subscription_id
-                );
 
                 if let Ok(url) = base_url.join(&delete_url) {
                     let _ = http_client.delete(url).send().await;

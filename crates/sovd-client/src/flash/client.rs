@@ -1,7 +1,8 @@
 //! SOVD update client — ISO 17978-3 §7.18 `/updates` lifecycle.
 //!
 //! Thin wrapper over the spec-compliant
-//! `/vehicle/v1/components/{id}/updates` wire.  Lifecycle:
+//! `{component}/updates` wire, on the tree [`FlashConfig::paths`] names
+//! (the legacy tree by default, see [`crate::paths`]).  Lifecycle:
 //!
 //! ```text
 //! open_update                                 (POST /updates)
@@ -55,6 +56,7 @@ const PART_SEGMENT_ENCODE: &AsciiSet = &CONTROLS
 
 use super::config::FlashConfig;
 use super::types::*;
+use crate::paths::{Dialect, Paths};
 
 /// SOVD update client.
 #[derive(Debug, Clone)]
@@ -300,6 +302,31 @@ impl FlashClient {
         &self.config
     }
 
+    /// Speak `dialect` (see [`crate::paths`]). [`Dialect::Legacy`] sends nothing;
+    /// [`Dialect::V1`] discovers the node once
+    /// ([`discover_node`](Self::discover_node)) and stores the resolved map in
+    /// the config. Every constructor builds a client on the config's paths
+    /// (legacy unless [`FlashConfigBuilder::paths`] set them); this switches it.
+    ///
+    /// [`FlashConfigBuilder::paths`]: super::FlashConfigBuilder::paths
+    pub async fn with_dialect(mut self, dialect: Dialect) -> Result<Self> {
+        self.config.paths = match dialect {
+            Dialect::Legacy => Paths::legacy(),
+            Dialect::V1 => Paths::v1(self.discover_node().await?),
+        };
+        Ok(self)
+    }
+
+    /// The node a `/v1` server presents, as
+    /// [`SovdClient::discover_node`](crate::SovdClient::discover_node) finds it,
+    /// with this client's auth.
+    pub async fn discover_node(&self) -> Result<Option<String>> {
+        Ok(
+            crate::paths::discover_node(&self.base_url, |url| self.add_auth(self.client.get(url)))
+                .await?,
+        )
+    }
+
     /// The currently-open update_id, if any.
     pub async fn current_update_id(&self) -> Option<String> {
         self.update_id.lock().await.clone()
@@ -339,7 +366,7 @@ fn package_id_from(name: &str, version: &str) -> String {
 // ---------------------------------------------------------------------------
 
 impl FlashClient {
-    /// `POST /vehicle/v1/components/{id}/updates` with an empty body —
+    /// `POST {component}/updates` with an empty body —
     /// the server mints a fresh update_id.  Subsequent lifecycle calls
     /// operate on it.  Errors if a session is already open — call
     /// `commit` / `rollback` / `abort` first.
@@ -350,7 +377,7 @@ impl FlashClient {
         self.post_open(&serde_json::json!({ "id": id })).await
     }
 
-    /// `POST /vehicle/v1/components/{id}/updates` declaring a meaningful
+    /// `POST {component}/updates` declaring a meaningful
     /// package identity.  Forms a stable, spec-exemplar §7.18 package-id from
     /// the human `name` + `version` (e.g. `("ADAS feature update", "2.3.0")`
     /// → `adas-feature-update-2.3.0`) and declares `name` as the Table 261
@@ -391,7 +418,7 @@ impl FlashClient {
         Ok(body)
     }
 
-    /// `PUT /vehicle/v1/components/{id}/updates/{update_id}/bulk-data/{part_id}`
+    /// `PUT {component}/updates/{update_id}/bulk-data/{part_id}`
     /// from any [`reqwest::Body`] — a file, a wrapped byte stream, or in-memory
     /// bytes. **Constant-memory** when `body` is a stream (the engine wraps a
     /// `tokio::fs::File` so a multi-hundred-MB image never lands in RAM). `len`,
@@ -520,6 +547,10 @@ impl FlashClient {
     /// Reset the ECU (PUT `status/restart`) — unchanged by the
     /// /updates migration since it lives at the entity root, not
     /// under /updates.
+    ///
+    /// On `/v1` the server answers 202 with no body; the result is then
+    /// `status: "running"` (triggered), `href` = the `Location` header (the
+    /// entity's `status`, where readiness is read), `exec_id` empty.
     #[instrument(skip(self))]
     pub async fn ecu_reset(&self, reset_type: &str) -> Result<ResetResponse> {
         let url = self.build_url(&self.config.flash_status_restart_path())?;
@@ -528,7 +559,19 @@ impl FlashClient {
         });
         req = self.add_auth(req);
         let resp = req.send().await?;
-        self.handle_response(resp).await
+        if !self.config.paths.is_v1() {
+            return self.handle_response(resp).await;
+        }
+        if !resp.status().is_success() {
+            return Err(self.error_from(resp).await);
+        }
+        Ok(ResetResponse {
+            status: "running".to_string(),
+            exec_id: String::new(),
+            reset_type: reset_type.to_string(),
+            message: None,
+            href: crate::client::location(&resp),
+        })
     }
 }
 
@@ -540,7 +583,7 @@ impl FlashClient {
 // ---------------------------------------------------------------------------
 
 impl FlashClient {
-    /// `GET /vehicle/v1/components/{id}/updates/{update_id}/status` — returns
+    /// `GET {component}/updates/{update_id}/status` — returns
     /// the ISO 17978-3 §7.18.7 Table 270 `UpdateStatusBody`
     /// (`{phase, status, progress?, step?, error?, x-ota-substate?}`).
     /// This is the lifecycle-state source of truth; `GET /updates/{id}`
@@ -556,7 +599,7 @@ impl FlashClient {
         self.handle_response(resp).await
     }
 
-    /// `PUT /vehicle/v1/components/{id}/updates/{update_id}/prepare`.
+    /// `PUT {component}/updates/{update_id}/prepare`.
     ///
     /// Issues the async PUT (server returns 202 + `Location: .../status`),
     /// then polls `/status` until `phase=prepare, status ∈ {completed,
@@ -585,7 +628,7 @@ impl FlashClient {
         .await
     }
 
-    /// `PUT /vehicle/v1/components/{id}/updates/{update_id}/execute`.
+    /// `PUT {component}/updates/{update_id}/execute`.
     ///
     /// When `orchestrated == true`, sends
     /// `?x-ota-control=orchestrated` and returns once the entry hits
@@ -593,8 +636,15 @@ impl FlashClient {
     /// up with [`commit`](Self::commit) or [`rollback`](Self::rollback)
     /// (Phase B).  When `false`, polls until the standard terminal
     /// (`status=completed|failed`).
+    ///
+    /// On `/v1` every execute is orchestrated (the server refuses one
+    /// without `x-ota-control=orchestrated`), so `orchestrated` is ignored
+    /// there and the call behaves as `execute(true)`: it returns at
+    /// `awaiting-verdict` (a banked update, which then needs a verdict) or
+    /// at the terminal status (an update that settles on its own).
     #[instrument(skip(self))]
     pub async fn execute(&self, orchestrated: bool) -> Result<UpdateStatusBody> {
+        let orchestrated = orchestrated || self.config.paths.is_v1();
         let update_id = self
             .current_update_id()
             .await
@@ -621,7 +671,7 @@ impl FlashClient {
         }
     }
 
-    /// `PUT /vehicle/v1/components/{id}/updates/{update_id}/automated`.
+    /// `PUT {component}/updates/{update_id}/automated`.
     /// Server-driven prepare → execute chain.  Polls until terminal.
     #[instrument(skip(self))]
     pub async fn automated(&self) -> Result<UpdateStatusBody> {
@@ -919,24 +969,29 @@ impl FlashClient {
         &self,
         response: reqwest::Response,
     ) -> Result<T> {
-        let status = response.status();
-        if status.is_success() {
+        if response.status().is_success() {
             response
                 .json()
                 .await
                 .map_err(|e| FlashError::Parse(e.to_string()))
         } else {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| format!("HTTP {}", status));
-            match status {
-                StatusCode::NOT_FOUND => Err(FlashError::NotFound(message)),
-                _ => Err(FlashError::Server {
-                    status: status.as_u16(),
-                    message,
-                }),
-            }
+            Err(self.error_from(response).await)
+        }
+    }
+
+    /// The error a non-success `response` stands for.
+    async fn error_from(&self, response: reqwest::Response) -> FlashError {
+        let status = response.status();
+        let message = response
+            .text()
+            .await
+            .unwrap_or_else(|_| format!("HTTP {}", status));
+        match status {
+            StatusCode::NOT_FOUND => FlashError::NotFound(message),
+            _ => FlashError::Server {
+                status: status.as_u16(),
+                message,
+            },
         }
     }
 }
