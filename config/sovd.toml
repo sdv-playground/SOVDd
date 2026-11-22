@@ -15,6 +15,7 @@ request_timeout_ms = 5000
 # [server.node]
 # id = "cvc"
 # name = "Central vehicle computer"
+# identification = "cvc-host-f88a13a329a72db1"   # the unit's own name on the node document (x-identification), not its id
 
 # Transport configuration
 # Options: "socketcan", "someip", "mock"

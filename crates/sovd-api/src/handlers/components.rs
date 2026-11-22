@@ -64,11 +64,17 @@ pub struct NodeDetailResponse {
     pub name: String,
     #[serde(rename = "type")]
     pub entity_type: String,
+    /// The unit's own name ([`NodeTopology::identification`]), distinct from
+    /// the node's `id`. Vendor property: the `x-sovd-` prefix is reserved for
+    /// spec-defined names (§5.4.5). Absent when not configured.
+    #[serde(rename = "x-identification", skip_serializing_if = "Option::is_none")]
+    pub identification: Option<String>,
     pub status: String,
     /// Present when a backend supports software update, as on the root document.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updates: Option<String>,
     pub operations: String,
+    pub data: String,
     pub subcomponents: String,
 }
 
@@ -200,9 +206,11 @@ pub async fn get_node(
         id: node.id().to_owned(),
         name: node.name().to_owned(),
         entity_type: NODE_TYPE.to_owned(),
+        identification: node.identification().map(str::to_owned),
         status: format!("{href}/status"),
         updates,
         operations: format!("{href}/operations"),
+        data: format!("{href}/data"),
         subcomponents: node.subcomponents_href(),
     }))
 }

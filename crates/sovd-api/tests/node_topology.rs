@@ -6,7 +6,8 @@
 //! first and the backends still flat; the node document; the subcomponents
 //! listing; a member's entity API under the node form, with node-form hrefs
 //! and `Location`s; node-level resources under the node served by their root
-//! forms' handlers, embedder routes included; other node paths 404; the flat
+//! forms' handlers, embedder routes (node-level data items included); other
+//! node paths 404; the node's identification; the flat
 //! member paths carry the deprecation headers; the legacy tree is unchanged
 //! with a node; the `/v1` capability doc lists the node paths; the component
 //! scope applies through both forms; refused configurations.
@@ -55,7 +56,8 @@ fn banked() -> AppState {
 }
 
 /// An embedder's own root-form node-level routes, merged into the router: each
-/// answers the path it was routed as, the restart with a root-form `Location`.
+/// answers the path it was routed as, the restart with a root-form `Location`;
+/// the data item `x-update-state` answers a fixed value.
 fn embedder_routes() -> Router {
     async fn served(uri: Uri) -> impl IntoResponse {
         axum::Json(serde_json::json!({ "served": uri.path() }))
@@ -67,8 +69,12 @@ fn embedder_routes() -> Router {
             axum::Json(serde_json::json!({ "served": uri.path() })),
         )
     }
+    async fn update_state() -> impl IntoResponse {
+        axum::Json(serde_json::json!({ "id": "x-update-state", "data": { "state": "idle" } }))
+    }
     Router::new()
         .route("/v1/status", axum::routing::get(served))
+        .route("/v1/data/x-update-state", axum::routing::get(update_state))
         .route("/v1/status/restart", axum::routing::put(restart))
         .route(
             "/v1/operations/x-update-commit/executions",
@@ -189,6 +195,7 @@ async fn the_node_document_links_node_level_resources_and_subcomponents() {
             "type": "node",
             "status": "/v1/components/cvc/status",
             "operations": "/v1/components/cvc/operations",
+            "data": "/v1/components/cvc/data",
             "subcomponents": "/v1/components/cvc/subcomponents",
         })
     );
@@ -199,8 +206,33 @@ async fn the_node_document_links_node_level_resources_and_subcomponents() {
     assert_eq!(status, 200);
     let body = json(&body);
     assert_eq!(body["updates"], "/v1/components/cvc/updates");
-    assert!(body.get("data").is_none(), "{body}");
+    assert!(body.get("faults").is_none(), "{body}");
     assert!(body.get("capabilities").is_none(), "{body}");
+}
+
+#[tokio::test]
+async fn the_node_document_carries_the_identification_when_set() {
+    // Not set: absent, not null (the exact document above).
+    let server = node_server(members(&["vm1"])).await;
+    let (_, body) = get(&server, "/v1/components/cvc", None).await;
+    assert!(json(&body).get("x-identification").is_none());
+
+    let node = NodeTopology::new("cvc", "CVC").with_identification("cvc-host-f88a13a329a72db1");
+    assert_eq!(node.identification(), Some("cvc-host-f88a13a329a72db1"));
+    let state = members(&["vm1"]).with_node(node).expect("valid node");
+    let server = TestServer::start(with_node_topology(create_router(state.clone()), &state))
+        .await
+        .expect("test server");
+    let (status, body) = get(&server, "/v1/components/cvc", None).await;
+    assert_eq!(status, 200);
+    let body = json(&body);
+    assert_eq!(body["x-identification"], "cvc-host-f88a13a329a72db1");
+    // The node's id stays its logical id; the listing does not carry it.
+    assert_eq!(body["id"], "cvc");
+    let (_, list) = get(&server, "/v1/components", None).await;
+    assert!(!String::from_utf8(list)
+        .unwrap()
+        .contains("x-identification"));
 }
 
 #[tokio::test]
@@ -375,11 +407,51 @@ async fn node_level_resources_reach_the_embedders_root_routes() {
 }
 
 #[tokio::test]
+async fn node_level_data_is_the_root_data() {
+    let server = node_server(members(&["vm1"])).await;
+    let root = get(&server, "/v1/data/x-update-state", None).await;
+    assert_eq!(root.0, 200);
+    assert_eq!(json(&root.1)["data"]["state"], "idle");
+    assert_eq!(
+        get(&server, "/v1/components/cvc/data/x-update-state", None).await,
+        root
+    );
+    // The query is kept.
+    assert_eq!(
+        get(
+            &server,
+            "/v1/components/cvc/data/x-update-state?include-schema=true",
+            None
+        )
+        .await,
+        root
+    );
+    // An item, or a collection, the root form does not serve: what the root form answers.
+    for rest in ["/data/nope", "/data"] {
+        let root = get(&server, &format!("/v1{rest}"), None).await;
+        assert_eq!(root.0, 404, "{rest}");
+        assert_eq!(
+            get(&server, &format!("/v1/components/cvc{rest}"), None).await,
+            root,
+            "{rest}"
+        );
+    }
+    // The legacy tree has no node-level data.
+    let (status, _) = get(
+        &server,
+        "/vehicle/v1/components/cvc/data/x-update-state",
+        None,
+    )
+    .await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test]
 async fn other_node_paths_are_not_served() {
     let server = node_server(members(&["vm1"])).await;
     for path in [
-        "/v1/components/cvc/data",
         "/v1/components/cvc/faults",
+        "/v1/components/cvc/data-lists",
         "/v1/components/cvc/status/x-boot-id",
         "/v1/components/cvc/subcomponents/cvc",
     ] {
@@ -494,6 +566,7 @@ async fn the_legacy_tree_is_unchanged_with_a_node() {
         "/vehicle/v1/components/cvc/subcomponents/ecu_a",
         "/vehicle/v1/components/cvc/subcomponents/ecu_a/data",
         "/vehicle/v1/components/cvc/updates",
+        "/vehicle/v1/components/cvc/data",
     ] {
         let resp = send_json(&node, reqwest::Method::GET, path, None).await;
         assert!(header(&resp, "deprecation").is_none(), "{path}");
@@ -530,6 +603,18 @@ async fn the_v1_docs_list_the_node_paths() {
         paths["/v1/components/cvc/subcomponents/{component_id}/data/{param_id}"],
         paths["/v1/components/{component_id}/data/{param_id}"]
     );
+
+    // An embedder's root-form node-level data item is listed under the node too.
+    let item = serde_json::json!({ "get": { "summary": "Update state" } });
+    let extensions = sovd_api::CapabilityExtensions::from_openapi(&serde_json::json!({
+        "paths": { "/v1/data/x-update-state": item },
+    }));
+    let with_data = node_server(members(&["vm1"]).with_capability_extensions(extensions)).await;
+    let (status, body) = get(&with_data, "/v1/docs", None).await;
+    assert_eq!(status, 200);
+    let doc = json(&body);
+    assert_eq!(doc["paths"]["/v1/data/x-update-state"], item);
+    assert_eq!(doc["paths"]["/v1/components/cvc/data/x-update-state"], item);
 
     // The legacy doc is that of a server without a node.
     let (_, legacy) = get(&server, "/vehicle/v1/docs", None).await;
