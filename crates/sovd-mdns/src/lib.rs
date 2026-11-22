@@ -251,11 +251,12 @@ fn dns_label(raw: &str) -> Option<String> {
 
 /// Derive the DNS-SD instance id from a TLS leaf certificate (DER).
 ///
-/// Prefers the `<id>.local` `subjectAltName` dNSName (stripping the `.local`
-/// suffix): that is exactly the hostname a discovery client dials and verifies
-/// against the certificate. Falls back to the subject CommonName (the
-/// identity-tower CA sets both `CN=<device_id>` and the `<device_id>.local`
-/// SAN). Returns `None` if neither is present / parseable.
+/// Prefers the first `<id>.local` `subjectAltName` dNSName (see
+/// [`local_host_label`]; returned lowercased): that is exactly the hostname a
+/// discovery client dials and verifies against the certificate. Falls back to
+/// the subject CommonName (the identity-tower CA sets both `CN=<device_id>` and
+/// the `<device_id>.local` SAN). Returns `None` if neither is present /
+/// parseable.
 pub fn instance_from_cert_der(der: &[u8]) -> Option<String> {
     use const_oid::db::rfc4519::COMMON_NAME;
     use x509_cert::der::Decode;
@@ -268,17 +269,16 @@ pub fn instance_from_cert_der(der: &[u8]) -> Option<String> {
     if let Ok(Some((_critical, san))) = cert.tbs_certificate.get::<SubjectAltName>() {
         for name in san.0.iter() {
             if let GeneralName::DnsName(dns) = name {
-                if let Some(id) = dns.as_str().strip_suffix(".local") {
-                    if !id.is_empty() {
-                        return Some(id.to_string());
-                    }
+                if let Some(id) = local_host_label(dns.as_str()) {
+                    return Some(id.to_ascii_lowercase());
                 }
             }
         }
     }
 
     // 2) Fall back to the subject CommonName.
-    cert.tbs_certificate
+    let cn = cert
+        .tbs_certificate
         .subject
         .0
         .iter()
@@ -286,7 +286,28 @@ pub fn instance_from_cert_der(der: &[u8]) -> Option<String> {
         .find(|atv| atv.oid == COMMON_NAME)
         .and_then(|atv| std::str::from_utf8(atv.value.value()).ok())
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
+        .map(|s| s.to_string());
+    tracing::info!(
+        cn = ?cn,
+        "SOVD mDNS: TLS leaf has no `<label>.local` dNSName SAN (service names, wildcards, \
+         multi-label and non-.local names are skipped); using the subject CN, else the next \
+         identity source"
+    );
+    cn
+}
+
+/// `<label>.local` (ASCII case-insensitive) → `<label>`, when `<label>` is one
+/// plain host label: non-empty, no `.`, no `*`, not `_`-prefixed. DNS-SD service
+/// names (`<id>._sovd._tcp.local`), wildcards (`*.local`), multi-label hosts and
+/// names outside `.local` yield `None`.
+fn local_host_label(name: &str) -> Option<&str> {
+    let split = name.len().checked_sub(".local".len())?;
+    let (label, suffix) = (name.get(..split)?, name.get(split..)?);
+    (suffix.eq_ignore_ascii_case(".local")
+        && !label.is_empty()
+        && !label.starts_with('_')
+        && !label.contains(['.', '*']))
+    .then_some(label)
 }
 
 /// Parse the port from a bind address like `"0.0.0.0:4000"` or `"[::]:4000"`.
@@ -328,6 +349,86 @@ mod tests {
             instance_from_cert_der(LEAF_DER).as_deref(),
             Some("cvc-host-rig1")
         );
+    }
+
+    // Leaves with no CN (subject `O=sovd-mdns test`), so the instance can only
+    // come from a SAN. Generated with OpenSSL 3.5 as
+    //   openssl req -x509 -newkey ed25519 -nodes -keyout /dev/null \
+    //     -subj "/O=sovd-mdns test" -days 36500 \
+    //     -addext "subjectAltName=<SANs>" -outform DER -out <file>.der
+    // with <SANs> as noted on each fixture.
+    macro_rules! fixture {
+        ($file:literal) => {
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/",
+                $file
+            ))
+        };
+    }
+    // DNS:cvc-host-4c6ff3d8a60d6655._sovd._tcp.local,DNS:cvc-host-4c6ff3d8a60d6655.local
+    const SERVICE_SAN_FIRST_DER: &[u8] = fixture!("leaf-service-san-first.der");
+    // DNS:cvc-host-4c6ff3d8a60d6655._sovd._tcp.local
+    const SERVICE_SAN_ONLY_DER: &[u8] = fixture!("leaf-service-san-only.der");
+    // DNS:*.local
+    const WILDCARD_ONLY_DER: &[u8] = fixture!("leaf-wildcard-only.der");
+    // DNS:CVC-HOST-4C6FF3D8A60D6655.LOCAL
+    const UPPERCASE_SAN_DER: &[u8] = fixture!("leaf-uppercase-san.der");
+    // IP:192.0.2.1,DNS:host.example.com,DNS:cvc.rig1.local,DNS:cvc-host-4c6ff3d8a60d6655.local
+    const IP_AND_FOREIGN_SANS_DER: &[u8] = fixture!("leaf-ip-and-foreign-sans.der");
+
+    #[test]
+    fn service_name_san_is_skipped_for_the_host_san() {
+        assert_eq!(
+            instance_from_cert_der(SERVICE_SAN_FIRST_DER).as_deref(),
+            Some("cvc-host-4c6ff3d8a60d6655")
+        );
+    }
+
+    #[test]
+    fn wildcard_only_leaf_yields_no_instance() {
+        assert_eq!(instance_from_cert_der(WILDCARD_ONLY_DER), None);
+    }
+
+    #[test]
+    fn service_name_only_leaf_yields_no_instance() {
+        assert_eq!(instance_from_cert_der(SERVICE_SAN_ONLY_DER), None);
+    }
+
+    #[test]
+    fn uppercase_local_san_is_lowercased() {
+        assert_eq!(
+            instance_from_cert_der(UPPERCASE_SAN_DER).as_deref(),
+            Some("cvc-host-4c6ff3d8a60d6655")
+        );
+    }
+
+    #[test]
+    fn ip_foreign_and_multi_label_sans_are_skipped() {
+        assert_eq!(
+            instance_from_cert_der(IP_AND_FOREIGN_SANS_DER).as_deref(),
+            Some("cvc-host-4c6ff3d8a60d6655")
+        );
+    }
+
+    #[test]
+    fn local_host_label_accepts_only_single_label_local_hosts() {
+        for (name, label) in [
+            ("cvc-host-rig1.local", Some("cvc-host-rig1")),
+            ("ID.LOCAL", Some("ID")),
+            ("cvc-host-rig1", None),
+            ("x._sovd._tcp.local", None),
+            ("_x.local", None),
+            ("*.local", None),
+            ("a.b.local", None),
+            ("host.example.com", None),
+            ("cvc.local.", None),
+            (".local", None),
+            ("local", None),
+            ("", None),
+        ] {
+            assert_eq!(local_host_label(name), label, "{name:?}");
+        }
     }
 
     #[test]
@@ -387,6 +488,29 @@ mod tests {
         assert_eq!(a.instance, "cvc-host-rig1");
         assert_eq!(a.identification, "cvc");
         assert_eq!(a.accessurl, "https://cvc-host-rig1.local:4000/v1");
+    }
+
+    #[test]
+    fn leaf_without_a_usable_san_falls_through_to_configured() {
+        for der in [WILDCARD_ONLY_DER, SERVICE_SAN_ONLY_DER] {
+            let a = adv(&[Identity::Leaf(der), Identity::Configured("x")]).unwrap();
+            assert_eq!(a.instance, "x");
+            assert_eq!(a.identification, "x");
+            assert_eq!(a.accessurl, "https://x.local:4000/v1");
+        }
+        // A usable SAN behind a service-name SAN still wins over (and differs
+        // from) the configured id: the "leaf != configured" path.
+        let a = adv(&[
+            Identity::Leaf(SERVICE_SAN_FIRST_DER),
+            Identity::Configured("x"),
+        ])
+        .unwrap();
+        assert_eq!(a.instance, "cvc-host-4c6ff3d8a60d6655");
+        assert_eq!(a.identification, "x");
+        // No configured id: on to the OS hostname.
+        let expected = os_hostname().as_deref().and_then(dns_label);
+        let a = adv(&[Identity::Leaf(WILDCARD_ONLY_DER), Identity::Hostname]);
+        assert_eq!(a.map(|a| a.instance), expected);
     }
 
     #[test]
