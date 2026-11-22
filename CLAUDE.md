@@ -138,14 +138,14 @@ The retired offboard `SOVD-security-helper` (seed/key over a side channel) is su
 
 ### DID Conversion Pipeline (sovd-conv)
 
-Raw ECU bytes ↔ physical values via YAML definitions in `config/did-definitions/`. `DidStore` uses `DashMap` for lock-free concurrent lookups. Supported shapes: scalar, array, map, histogram, bitfield, enum. Inline TOML definitions and ISO 14229-1 standard DIDs are also supported.
+Raw ECU bytes ↔ physical values via YAML definitions in `examples/config/did-definitions/`. `DidStore` uses `DashMap` for lock-free concurrent lookups. Supported shapes: scalar, array, map, histogram, bitfield, enum. Inline TOML definitions and ISO 14229-1 standard DIDs are also supported.
 
 ### Configuration
 
-Server config is TOML (`config/*.toml`). DID definitions are YAML (`config/did-definitions/`). Key configs:
+Server config is TOML (`config/sovd.toml`, examples in `examples/config/*.toml`). DID definitions are YAML (`examples/config/did-definitions/`). Key configs:
 - `config/sovd.toml` — Mock transport demo (no hardware needed, good for development). Also the no-config fallback: a bare `sovdd` run from the repo root serves this file (with a warning) and errors out if it is missing.
-- `config/sovd-socketcan.toml` — SocketCAN on vcan0
-- `config/gateway-socketcan.toml` — Multi-ECU gateway
+- `examples/config/sovd-socketcan.toml` — SocketCAN on vcan0
+- `examples/config/gateway-socketcan.toml` — Multi-ECU gateway
 
 ## Conventions
 

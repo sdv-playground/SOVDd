@@ -12,7 +12,9 @@ Rust ASAM SOVD server workspace translating `/vehicle/v1` REST/SSE calls to UDS,
 - `crates/sovd-api/` — axum REST handlers and app state.
 - `crates/sovd-uds/` — UDS transports and services.
 - `crates/sovd-client/`, `crates/sovd-cli/`, `crates/sovd-tests/` — client, CLI, integration tests.
-- `config/`, `simulations/` — TOML/YAML configs and runnable ECU simulations.
+- `config/sovd.toml` — the server's default config.
+- `examples/config/` — example configurations (simulated ECU, CAN, gateway).
+- `simulations/` — runnable test networks.
 
 ## Essential commands
 

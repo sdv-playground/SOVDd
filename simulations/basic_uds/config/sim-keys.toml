@@ -1,3 +1,5 @@
+# Simulation only: security-access keys of the simulated ECUs in this test network (the example ECU's XOR scheme). Not credentials.
+#
 # Security Helper - ECU Secrets for basic_uds simulation
 #
 # ECU type keys MUST match the component IDs in gateway.toml so the

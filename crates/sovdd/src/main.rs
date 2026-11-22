@@ -105,7 +105,7 @@ Examples:
   sovdd config.toml
 
   # Run with DID definitions
-  sovdd --did-definitions config/did-definitions/ config.toml
+  sovdd --did-definitions examples/config/did-definitions/ config.toml
 
   # Multiple definition files
   sovdd -d engine.did.yaml -d transmission.did.yaml config.toml

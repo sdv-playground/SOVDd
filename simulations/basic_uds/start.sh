@@ -25,7 +25,7 @@ sim_start_ecu engine_ecu       "$CONFIG/ecu-engine.toml"
 sim_start_ecu transmission_ecu "$CONFIG/ecu-transmission.toml"
 sim_start_ecu body_ecu         "$CONFIG/ecu-body.toml"
 
-sim_start_helper "$HELPER_PORT_NUM" "$CONFIG/secrets.toml"
+sim_start_helper "$HELPER_PORT_NUM" "$CONFIG/sim-keys.toml"
 
 sim_start_server "$PORT" "$CONFIG/gateway.toml" \
     "$CONFIG/dids-engine.yaml" \

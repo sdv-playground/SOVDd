@@ -223,7 +223,7 @@ impl GatewayTestHarness {
             format!("{}/target/debug/sovdd", workspace)
         };
 
-        let config = format!("{}/config/gateway-socketcan.toml", workspace);
+        let config = format!("{}/examples/config/gateway-socketcan.toml", workspace);
 
         let child = Command::new(&binary)
             .arg(&config)

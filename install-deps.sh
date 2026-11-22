@@ -275,7 +275,7 @@ print_instructions() {
     echo "  4. Or test manually:"
     echo "     ./scripts/setup-vcan.sh"
     echo "     ./target/release/example-ecu -v &"
-    echo "     ./target/release/sovd-server config/sovd-socketcan.toml"
+    echo "     ./target/release/sovd-server examples/config/sovd-socketcan.toml"
     echo ""
 }
 

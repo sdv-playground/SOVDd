@@ -78,9 +78,6 @@ slow_hz = 1
 medium_hz = 5
 fast_hz = 10
 
-[ecu.vtx_ecm.parameters]
-config_file = "parameters/vtx_ecm.toml"
-
 # ECU Configuration: demo Engine ECU
 # The demo entities the no-config server exposes (previously hardcoded in
 # sovdd's create_mock_backends). Rides the shared mock [transport] above.
