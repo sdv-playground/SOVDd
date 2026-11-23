@@ -407,12 +407,12 @@ impl DiagnosticBackend for MockBackend {
 // ---------------------------------------------------------------------------
 
 async fn spawn_with(shape: &'static str) -> (TestServer, Arc<MockBackend>) {
-    spawn_with_watchdog(shape, Duration::from_secs(600)).await
+    spawn_with_watchdog(shape, None).await
 }
 
 async fn spawn_with_watchdog(
     shape: &'static str,
-    watchdog: Duration,
+    watchdog: Option<Duration>,
 ) -> (TestServer, Arc<MockBackend>) {
     let (server, backend, _) = spawn_with_watchdog_and_state(shape, watchdog).await;
     (server, backend)
@@ -420,7 +420,7 @@ async fn spawn_with_watchdog(
 
 async fn spawn_with_watchdog_and_state(
     shape: &'static str,
-    watchdog: Duration,
+    watchdog: Option<Duration>,
 ) -> (TestServer, Arc<MockBackend>, AppState) {
     let backend = Arc::new(MockBackend::new("dev1", shape));
     let mut backends = HashMap::new();
@@ -873,10 +873,41 @@ async fn opposing_verdicts_cannot_both_be_accepted() {
     assert_eq!(poll_terminal(&server, &id).await["status"], "failed");
 }
 
+/// By default no watchdog ends the wait: an executed banked update is still
+/// awaiting its verdict long after a watchdog would have fired, and its verdict
+/// still settles it.
+#[tokio::test]
+async fn by_default_a_banked_update_waits_for_its_verdict_however_long_it_takes() {
+    let (server, backend) = spawn_with("banked").await;
+    let id = open_update(&server).await;
+    upload_part(&server, &id, "manifest", b"banked").await;
+    upload_part(&server, &id, "#kernel", b"\xCAfake").await;
+    prepare_and_orchestrated_execute(&server, &id).await;
+    wait_for_substate(&server, &id, "awaiting-verdict").await;
+
+    // Four times the 250 ms the watchdog test below sets.
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    let body = get_status(&server, &id).await;
+    assert_eq!(body["status"], "inProgress");
+    assert_eq!(body["x-ota-substate"], "awaiting-verdict");
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::AwaitingReboot);
+
+    *backend.flash_state.lock() = CoreFlashState::Activated;
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{}/x-ota-commit", id),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    let final_body = poll_terminal(&server, &id).await;
+    assert_eq!(final_body["status"], "completed");
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::Committed);
+}
+
 #[tokio::test]
 async fn orchestrated_banked_watchdog_auto_rollback() {
-    // Short watchdog so the test doesn't wait the default 10 minutes.
-    let (server, backend) = spawn_with_watchdog("banked", Duration::from_millis(250)).await;
+    // A server that sets a watchdog (none by default); short so the test is quick.
+    let (server, backend) = spawn_with_watchdog("banked", Some(Duration::from_millis(250))).await;
     let id = open_update(&server).await;
     upload_part(&server, &id, "manifest", b"banked").await;
     upload_part(&server, &id, "#kernel", b"\xCAfake").await;
@@ -892,7 +923,7 @@ async fn orchestrated_banked_watchdog_auto_rollback() {
 #[tokio::test]
 async fn watchdog_claims_verdict_before_backend_rollback() {
     let (server, backend, state) =
-        spawn_with_watchdog_and_state("banked", Duration::from_millis(50)).await;
+        spawn_with_watchdog_and_state("banked", Some(Duration::from_millis(50))).await;
     backend
         .rollback_flash_gate
         .enabled

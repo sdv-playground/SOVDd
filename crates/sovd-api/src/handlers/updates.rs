@@ -1320,10 +1320,17 @@ async fn put_execute_inner(
             entry.verdict_tx = Some(verdict_tx);
         });
 
-        // Phase B watchdog: default 10 min, configurable via
-        // AppState::updates_config.  On expiry the verdict is forced
-        // to Rollback so the device doesn't stay stuck in trial.
+        // The verdict watchdog, when the embedding server sets one
+        // (AppState::updates_config; none by default, so the update waits for
+        // its verdict however long it takes). On expiry the verdict is forced
+        // to Rollback.
         let watchdog = task_state.updates_config.orchestrated_watchdog;
+        let expired = async move {
+            match watchdog {
+                Some(limit) => tokio::time::sleep(limit).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
         let verdict = tokio::select! {
             res = verdict_rx.changed() => {
                 if res.is_err() {
@@ -1333,7 +1340,7 @@ async fn put_execute_inner(
                     *verdict_rx.borrow()
                 }
             }
-            _ = tokio::time::sleep(watchdog) => {
+            _ = expired => {
                 let claimed = {
                     let mut store = task_state.updates.0.lock();
                     match store

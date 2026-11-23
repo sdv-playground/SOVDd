@@ -285,24 +285,17 @@ impl Status {
     }
 }
 
-/// Per-server tuning for the `/updates` collection.  The orchestrated
-/// watchdog gates how long the execute task will pause at
-/// `substate=awaiting-verdict` before auto-rolling-back; the default
-/// matches the upper bound a real OEM workshop tester typically needs
-/// to complete a multi-ECU health check.
-#[derive(Clone, Debug)]
+/// Per-server tuning for the `/updates` collection.
+#[derive(Clone, Debug, Default)]
 pub struct UpdatesConfig {
-    /// Time the execute task will wait for an `x-ota-commit` or
-    /// `x-ota-rollback` verdict before timing out.
-    pub orchestrated_watchdog: std::time::Duration,
-}
-
-impl Default for UpdatesConfig {
-    fn default() -> Self {
-        Self {
-            orchestrated_watchdog: std::time::Duration::from_secs(600),
-        }
-    }
+    /// How long an executed banked update waits at
+    /// `substate=awaiting-verdict` for its verdict before the server rolls it
+    /// back. `None`, the default, waits for the verdict however long it takes:
+    /// a vehicle's update waits for the restart its executor needs (on the road
+    /// a power cycle, whenever it comes) and for the tester's verdict after
+    /// it, and a server that gave up on its own would roll back an update
+    /// nobody judged. A server that wants a limit (a workshop bench) sets one.
+    pub orchestrated_watchdog: Option<std::time::Duration>,
 }
 
 /// Capability-description content contributed by the embedding server, merged
