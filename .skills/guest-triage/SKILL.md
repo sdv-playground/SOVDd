@@ -43,7 +43,7 @@ S="--server https://<device>:443"   # or http://localhost:8080 in dev
 Never assume an endpoint exists; read the entity's capabilities first.
 
 ```bash
-sovd-cli $S list                 # components (vm1, vm2, supernova, hsm, …)
+sovd-cli $S list                 # components (vm1, vm2, hsm, …)
 sovd-cli $S info vm1             # capabilities: logs / scripts / diagnostics / …
 ```
 
