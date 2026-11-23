@@ -14,7 +14,9 @@ use axum::routing::put;
 use axum::{Json, Router};
 use sovd_api::{create_router, with_node_topology, AppState, NodeTopology};
 use sovd_client::testing::TestServer;
-use sovd_client::{Dialect, FlashClient, FlashConfig, Paths, SovdClient};
+use sovd_client::{
+    Dialect, FlashClient, FlashConfig, FlashError, Paths, SovdClient, SovdClientError,
+};
 use sovd_core::{
     ActivationState, BackendError, BackendResult, Capabilities, DataValue, DiagnosticBackend,
     EntityInfo, FaultFilter, FaultsResult, FlashProgress, FlashState, FlashStatus,
@@ -180,6 +182,13 @@ impl Server {
     /// The real router over `ids`, with node `hpc` when `node`. The root `status/restart` is
     /// the embedder's (not SOVDd's): stubbed here as an embedder would mount it.
     async fn start(ids: &[&str], node: bool) -> Self {
+        Self::start_answering(ids, node, None).await
+    }
+
+    /// [`start`](Self::start), but every `.../subcomponents` request is answered `status`
+    /// (when given) in front of the router: an auth layer, a rate limiter, a failing or
+    /// restarting server.
+    async fn start_answering(ids: &[&str], node: bool, subcomponents: Option<StatusCode>) -> Self {
         let backends = ids
             .iter()
             .map(|id| (id.to_string(), Mock::new(id) as Arc<dyn DiagnosticBackend>))
@@ -224,7 +233,12 @@ impl Server {
                             log.push(line);
                         }
                     }
-                    next.run(req).await.into_response()
+                    match subcomponents {
+                        Some(status) if req.uri().path().ends_with("/subcomponents") => {
+                            (status, "not now").into_response()
+                        }
+                        _ => next.run(req).await.into_response(),
+                    }
                 }
             }));
         let server = TestServer::start(router).await.expect("test server");
@@ -321,6 +335,124 @@ async fn discovery_single_component_is_not_mistaken_for_a_node() {
     );
     let client = client.with_dialect(Dialect::V1).await.unwrap();
     assert_eq!(client.paths(), &Paths::v1(None));
+}
+
+/// A node server whose subcomponents request answers `status`: what discovery and both
+/// clients built by it make of it, and the requests sent.
+async fn discover_answering(
+    status: StatusCode,
+) -> (Result<Option<String>, SovdClientError>, bool, bool) {
+    let s = Server::start_answering(&["vm1", "vm2"], true, Some(status)).await;
+    let found = SovdClient::new(&s.base()).unwrap().discover_node().await;
+    assert_eq!(
+        s.take(),
+        ["GET /v1/components", "GET /v1/components/hpc/subcomponents"],
+        "{status}"
+    );
+    let client = SovdClient::new(&s.base())
+        .unwrap()
+        .with_dialect(Dialect::V1)
+        .await;
+    let flash = FlashClient::for_sovd(&s.base(), "vm1")
+        .unwrap()
+        .with_dialect(Dialect::V1)
+        .await;
+    if let Ok(client) = &client {
+        assert_eq!(client.paths(), &Paths::v1(found.as_ref().unwrap().clone()));
+    }
+    if let Err(e) = &flash {
+        assert!(
+            matches!(e, FlashError::Server { status: st, .. } if *st == status.as_u16()),
+            "{e:?}"
+        );
+    }
+    (found, client.is_ok(), flash.is_ok())
+}
+
+#[tokio::test]
+async fn discovery_is_undecided_when_subcomponents_answer_an_error() {
+    for status in [
+        StatusCode::UNAUTHORIZED,
+        StatusCode::FORBIDDEN,
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::SERVICE_UNAVAILABLE,
+    ] {
+        let (found, client, flash) = discover_answering(status).await;
+        match found {
+            Err(SovdClientError::ServerError {
+                status: st,
+                message,
+            }) => {
+                assert_eq!(st, status.as_u16());
+                assert_eq!(message, "not now");
+            }
+            other => panic!("{status}: {other:?}"),
+        }
+        // No client is built, so none can speak the flat form or keep it.
+        assert!(!client && !flash, "{status}");
+    }
+}
+
+#[tokio::test]
+async fn discovery_is_flat_when_subcomponents_do_not_exist() {
+    for status in [StatusCode::NOT_FOUND, StatusCode::METHOD_NOT_ALLOWED] {
+        let (found, client, flash) = discover_answering(status).await;
+        assert_eq!(found.unwrap(), None, "{status}");
+        assert!(client && flash, "{status}");
+    }
+}
+
+#[tokio::test]
+async fn discovery_is_the_node_when_subcomponents_answer_2xx() {
+    for status in [StatusCode::OK, StatusCode::NO_CONTENT] {
+        // The body is not read: an answer that is no listing still makes the node.
+        let (found, client, flash) = discover_answering(status).await;
+        assert_eq!(found.unwrap().as_deref(), Some("hpc"), "{status}");
+        assert!(client && flash, "{status}");
+    }
+}
+
+#[tokio::test]
+async fn discovery_without_components_is_flat() {
+    let s = Server::start(&[], false).await;
+    let client = SovdClient::new(&s.base()).unwrap();
+    assert_eq!(client.discover_node().await.unwrap(), None);
+    assert_eq!(s.take(), ["GET /v1/components"]);
+}
+
+#[tokio::test]
+async fn discovery_is_undecided_on_a_transport_error() {
+    // The single component's href points at a port nobody listens on.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let href = format!("http://{}/v1/components/hpc", closed.local_addr().unwrap());
+    drop(closed);
+    let router = Router::new().route(
+        "/v1/components",
+        axum::routing::get(move || {
+            let href = href.clone();
+            async move {
+                Json(serde_json::json!({ "items": [{ "id": "hpc", "name": "HPC", "href": href }] }))
+            }
+        }),
+    );
+    let server = TestServer::start(router).await.unwrap();
+    let base = server.base_url();
+    let found = SovdClient::new(&base).unwrap().discover_node().await;
+    assert!(
+        matches!(found, Err(SovdClientError::HttpError(_))),
+        "{found:?}"
+    );
+    assert!(SovdClient::new(&base)
+        .unwrap()
+        .with_dialect(Dialect::V1)
+        .await
+        .is_err());
+    let flash = FlashClient::for_sovd(&base, "vm1")
+        .unwrap()
+        .with_dialect(Dialect::V1)
+        .await;
+    assert!(matches!(flash, Err(FlashError::Http(_))), "{flash:?}");
 }
 
 #[tokio::test]

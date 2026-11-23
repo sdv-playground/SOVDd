@@ -261,8 +261,10 @@ impl SovdClient {
 
     /// The node an ISO-tree server presents: `GET {base}/components`; a single item
     /// whose `{href}/subcomponents` answers 2xx is the node (its `type` is not
-    /// looked at). `None` for a server without a node. Errors when the listing
-    /// itself fails (e.g. a server without `/v1`).
+    /// looked at). `None` for a server without a node: zero or several items, or
+    /// a single item whose `{href}/subcomponents` answers 404 or 405. Errors when
+    /// the listing fails (e.g. a server without `/v1`) and when the subcomponents
+    /// request answers anything else or fails: that decides neither.
     #[instrument(skip(self))]
     pub async fn discover_node(&self) -> Result<Option<String>> {
         Ok(paths::discover_node(&self.base_url, |url| self.client.get(url)).await?)

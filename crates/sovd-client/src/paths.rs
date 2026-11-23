@@ -143,8 +143,8 @@ impl Paths {
     }
 
     /// A node-level resource: `{base}{rest}`; on a node server `/v1/components/{node}{rest}`.
-    /// The node form serves `/status`, `/status/restart`, `/updates...`, `/operations...` and
-    /// `/data...` only.
+    /// The node form serves `/status...` (e.g. `/status/restart`, `/status/x-boot-id`),
+    /// `/updates...`, `/operations...` and `/data...` only.
     pub fn node_level(&self, rest: &str) -> String {
         match &self.node {
             Some(node) => format!("{V1_BASE}/components/{node}{rest}"),
@@ -172,9 +172,16 @@ pub(crate) enum DiscoveryError {
     Parse(String),
 }
 
-/// Discover the node a `/v1` server presents: `GET /v1/components`; when it lists exactly one
-/// item, `GET {item.href}/subcomponents` answering 2xx makes that item the node. Anything else
-/// (several items, none, or a single component without subcomponents) is a server without a node.
+/// Discover the node a `/v1` server presents: `GET /v1/components`, then
+///
+/// - zero or several top-level components: a server without a node (flat), with no further
+///   request — a node server lists exactly its node;
+/// - exactly one component: it is the node only if its subcomponents resource exists, so
+///   `GET {item.href}/subcomponents` decides: 2xx is the node (the body is not read: the
+///   resource exists), 404 or 405 is flat (the resource does not exist). Any other status
+///   (401, 403, 429, 5xx, ...) or a transport error decides nothing and is an error, as is a
+///   failing listing: an undecided server is never taken for a flat one.
+///
 /// Independent of the item's `type`. `get` builds an authenticated GET for a URL.
 pub(crate) async fn discover_node(
     base_url: &Url,
@@ -209,7 +216,17 @@ pub(crate) async fn discover_node(
         .send()
         .await
         .map_err(DiscoveryError::Http)?;
-    Ok(response.status().is_success().then(|| item.id.clone()))
+    let status = response.status();
+    if status.is_success() {
+        return Ok(Some(item.id.clone()));
+    }
+    if matches!(status.as_u16(), 404 | 405) {
+        return Ok(None);
+    }
+    Err(DiscoveryError::Status {
+        status: status.as_u16(),
+        message: response.text().await.unwrap_or_default(),
+    })
 }
 
 impl From<DiscoveryError> for crate::SovdClientError {
@@ -404,7 +421,7 @@ mod tests {
                 [
                     "/vehicle/v1/status/x-boot-id",
                     "/v1/status/x-boot-id",
-                    // Not served by SOVDd's node form (only /status, /status/restart).
+                    // SOVDd's node form routes it to the embedder's `/v1/status/x-boot-id`.
                     "/v1/components/hpc/status/x-boot-id",
                 ],
             ),
