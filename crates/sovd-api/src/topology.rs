@@ -74,7 +74,7 @@ impl NodeTopology {
     }
 
     /// The node with the identification `identification`: the unit's own name (its mDNS/TLS
-    /// identity, e.g. `cvc-host-f88a13a329a72db1`), distinct from the node's logical id (`cvc`).
+    /// identity, e.g. `hpc-host-f88a13a329a72db1`), distinct from the node's logical id (`hpc`).
     /// The node's document carries it as `x-identification`.
     pub fn with_identification(mut self, identification: impl Into<String>) -> Self {
         self.identification = Some(identification.into());
@@ -259,7 +259,7 @@ mod tests {
     use super::*;
 
     fn route(path: &str) -> Route {
-        NodeTopology::new("cvc", "CVC").route(path)
+        NodeTopology::new("hpc", "HPC").route(path)
     }
 
     fn rewrite(path: &str) -> Route {
@@ -269,16 +269,16 @@ mod tests {
     #[test]
     fn a_subcomponent_path_is_routed_as_its_flat_path() {
         assert_eq!(
-            route("/v1/components/cvc/subcomponents/vm1/data/sw-version"),
+            route("/v1/components/hpc/subcomponents/vm1/data/sw-version"),
             rewrite("/v1/components/vm1/data/sw-version")
         );
         assert_eq!(
-            route("/v1/components/cvc/subcomponents/vm1"),
+            route("/v1/components/hpc/subcomponents/vm1"),
             rewrite("/v1/components/vm1")
         );
         // An unknown member is routed too, to the answer an unknown component gets.
         assert_eq!(
-            route("/v1/components/cvc/subcomponents/nope/faults"),
+            route("/v1/components/hpc/subcomponents/nope/faults"),
             rewrite("/v1/components/nope/faults")
         );
     }
@@ -297,7 +297,7 @@ mod tests {
             "/data/x-update-state",
         ] {
             assert_eq!(
-                route(&format!("/v1/components/cvc{rest}")),
+                route(&format!("/v1/components/hpc{rest}")),
                 rewrite(&format!("/v1{rest}"))
             );
         }
@@ -306,8 +306,8 @@ mod tests {
     #[test]
     fn the_node_document_and_listing_are_routes_of_their_own() {
         for path in [
-            "/v1/components/cvc",
-            "/v1/components/cvc/subcomponents",
+            "/v1/components/hpc",
+            "/v1/components/hpc/subcomponents",
             // The rest of `/v1` and the server root.
             "/v1/",
             "/v1/components",
@@ -321,14 +321,14 @@ mod tests {
     #[test]
     fn other_node_paths_are_not_served() {
         for path in [
-            "/v1/components/cvc/",
-            "/v1/components/cvc/faults",
-            "/v1/components/cvc/data-lists",
-            "/v1/components/cvc/docs",
-            "/v1/components/cvc/statusx",
-            "/v1/components/cvc/updatesx",
-            "/v1/components/cvc/subcomponents/",
-            "/v1/components/cvc/subcomponents/cvc",
+            "/v1/components/hpc/",
+            "/v1/components/hpc/faults",
+            "/v1/components/hpc/data-lists",
+            "/v1/components/hpc/docs",
+            "/v1/components/hpc/statusx",
+            "/v1/components/hpc/updatesx",
+            "/v1/components/hpc/subcomponents/",
+            "/v1/components/hpc/subcomponents/hpc",
         ] {
             assert!(matches!(route(path), Route::NotFound(_)), "{path}");
         }
@@ -339,8 +339,8 @@ mod tests {
         assert_eq!(
             route("/v1/components/vm1/data/x"),
             Route::NotFound(
-                "No resource at /v1/components/vm1/data/x: on /v1 this server is node 'cvc', \
-                 whose path for it is /v1/components/cvc/subcomponents/vm1/data/x"
+                "No resource at /v1/components/vm1/data/x: on /v1 this server is node 'hpc', \
+                 whose path for it is /v1/components/hpc/subcomponents/vm1/data/x"
                     .into()
             )
         );
@@ -361,7 +361,7 @@ mod tests {
         for path in [
             "/vehicle/v1/components/vm1/data",
             "/vehicle/v1/updates",
-            "/vehicle/v1/components/cvc/subcomponents/vm1",
+            "/vehicle/v1/components/hpc/subcomponents/vm1",
         ] {
             assert_eq!(route(path), Route::AsIs, "{path}");
         }
@@ -369,25 +369,25 @@ mod tests {
 
     #[test]
     fn node_form_maps_flat_and_root_paths() {
-        let node = NodeTopology::new("cvc", "CVC");
+        let node = NodeTopology::new("hpc", "HPC");
         assert_eq!(
             node.node_form("/v1/components/{component_id}/data")
                 .as_deref(),
-            Some("/v1/components/cvc/subcomponents/{component_id}/data")
+            Some("/v1/components/hpc/subcomponents/{component_id}/data")
         );
         assert_eq!(
             node.node_form("/v1/updates/u1/status").as_deref(),
-            Some("/v1/components/cvc/updates/u1/status")
+            Some("/v1/components/hpc/updates/u1/status")
         );
         assert_eq!(
             node.node_form("/v1/data/x-update-state").as_deref(),
-            Some("/v1/components/cvc/data/x-update-state")
+            Some("/v1/components/hpc/data/x-update-state")
         );
         assert_eq!(
             node.node_form("/v1/status/x-boot-id").as_deref(),
-            Some("/v1/components/cvc/status/x-boot-id")
+            Some("/v1/components/hpc/status/x-boot-id")
         );
-        assert_eq!(node.node_form("/v1/components/cvc/updates"), None);
+        assert_eq!(node.node_form("/v1/components/hpc/updates"), None);
         assert_eq!(node.node_form("/v1/components"), None);
         assert_eq!(node.node_form("/v1/docs"), None);
         assert_eq!(node.node_form("/vehicle/v1/updates"), None);

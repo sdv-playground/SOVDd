@@ -707,12 +707,12 @@ mod tests {
     /// `logs <ecu> get <id>` fills both.
     #[test]
     fn logs_action_and_id_are_positional() {
-        let list = Cli::try_parse_from(["sovd-cli", "logs", "supernova"]).expect("parse list");
+        let list = Cli::try_parse_from(["sovd-cli", "logs", "vm1"]).expect("parse list");
         match list.command {
             Commands::Logs {
                 ecu, action, id, ..
             } => {
-                assert_eq!(ecu, "supernova");
+                assert_eq!(ecu, "vm1");
                 assert_eq!(action, "list"); // default
                 assert!(id.is_none());
             }

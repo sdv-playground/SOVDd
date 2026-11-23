@@ -6,7 +6,7 @@
 //! ## Advertised shape (ISO 17978-3 §5.11)
 //! - service type `_sovd._tcp` in domain `local.` (see [`SERVICE_TYPE`]);
 //! - instance name = the SOVD-server id — we use the role-prefixed device id,
-//!   e.g. `cvc-host-rig1`;
+//!   e.g. `hpc-host-rig1`;
 //! - hostname = `<instance>.local`. This MUST equal the `tls-identity` leaf's
 //!   `.local` `subjectAltName`, so a discovery client that dials
 //!   `<instance>.local` verifies the server certificate with ordinary hostname
@@ -26,7 +26,7 @@
 //! - instance / hostname — what TLS clients verify — come from the TLS leaf
 //!   (see [`instance_from_cert_der`]) when there is one, else the configured
 //!   server identification, else the OS hostname. TLS truth comes first: the
-//!   tower issues role-prefixed SANs (e.g. `cvc-host-<hash>`) that a device
+//!   tower issues role-prefixed SANs (e.g. `hpc-host-<hash>`) that a device
 //!   cannot know before enrolment, so the hostname may change at the
 //!   http→https switch, but on https it always matches the certificate;
 //! - TXT `identification` — the stable id of the SOVD server — is the
@@ -37,9 +37,9 @@
 //! ```no_run
 //! # fn leaf_der() -> Vec<u8> { Vec::new() }
 //! use sovd_mdns::{Identity, Scheme, SovdAdvertiser};
-//! // Hostname from the leaf (else `cvc`, else the OS hostname); identification `cvc`:
+//! // Hostname from the leaf (else `hpc`, else the OS hostname); identification `hpc`:
 //! let der = leaf_der();
-//! let ids = [Identity::Configured("cvc"), Identity::Leaf(&der), Identity::Hostname];
+//! let ids = [Identity::Configured("hpc"), Identity::Leaf(&der), Identity::Hostname];
 //! if let Some(adv) = SovdAdvertiser::new(&ids, Scheme::Https, "0.0.0.0:4000") {
 //!     match adv.start() {
 //!         Ok(guard) => { /* hold `guard` for the server's lifetime */ }
@@ -57,7 +57,7 @@
 //!
 //! The split exists because `mdns-sd`'s transitive deps (`mio`, `if-addrs`,
 //! `socket-pktinfo`) have no `nto` support, whereas `simple-dns` (only dep:
-//! `bitflags`) and `socket2` (only dep: `libc`, the line the supernova QNX
+//! `bitflags`) and `socket2` (only dep: `libc`, the line the node manager's QNX
 //! cross-build already carries) both cross-compile to
 //! `aarch64-unknown-nto-qnx710`. The [`responder`] is compiled on every target
 //! (so it stays testable on Linux) but is only *selected* as the live backend on
@@ -110,7 +110,7 @@ impl fmt::Display for Scheme {
 #[derive(Debug, Clone)]
 pub enum Identity<'a> {
     /// Configured server identification (the device id the tower puts in the
-    /// leaf SAN), e.g. `cvc`.
+    /// leaf SAN), e.g. `hpc`.
     Configured(&'a str),
     /// Derive from the TLS leaf (DER): `<id>.local` SAN, else CN (see
     /// [`instance_from_cert_der`]).
@@ -139,7 +139,7 @@ impl Identity<'_> {
 /// address.
 #[derive(Debug, Clone)]
 pub struct SovdAdvertiser {
-    /// DNS-SD instance name == the SOVD-server id, e.g. `cvc-host-rig1`. The
+    /// DNS-SD instance name == the SOVD-server id, e.g. `hpc-host-rig1`. The
     /// advertised hostname is `<instance>.local`.
     pub instance: String,
     /// SRV port — the SOVD server's actual bind port.
@@ -148,7 +148,7 @@ pub struct SovdAdvertiser {
     /// id or VIN).
     pub identification: String,
     /// TXT `accessurl` — the SOVD API base, e.g.
-    /// `https://cvc-host-rig1.local:4000/v1`.
+    /// `https://hpc-host-rig1.local:4000/v1`.
     pub accessurl: String,
 }
 
@@ -334,12 +334,12 @@ impl std::error::Error for AdvertiseError {}
 mod tests {
     use super::*;
 
-    // A leaf mirroring the identity-tower CA shape: CN=cvc-host-rig1 with SAN
-    // dNSNames [cvc-host-rig1, cvc-host-rig1.local] (see
+    // A leaf mirroring the identity-tower CA shape: CN=hpc-host-rig1 with SAN
+    // dNSNames [hpc-host-rig1, hpc-host-rig1.local] (see
     // sumo-provision/crates/identity-tower/src/ca.rs).
     const LEAF_DER: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/leaf-cvc-host-rig1.der"
+        "/tests/fixtures/leaf-hpc-host-rig1.der"
     ));
 
     #[test]
@@ -347,7 +347,7 @@ mod tests {
         // The `.local` SAN is preferred and the `.local` suffix is stripped.
         assert_eq!(
             instance_from_cert_der(LEAF_DER).as_deref(),
-            Some("cvc-host-rig1")
+            Some("hpc-host-rig1")
         );
     }
 
@@ -366,22 +366,22 @@ mod tests {
             ))
         };
     }
-    // DNS:cvc-host-4c6ff3d8a60d6655._sovd._tcp.local,DNS:cvc-host-4c6ff3d8a60d6655.local
+    // DNS:hpc-host-4c6ff3d8a60d6655._sovd._tcp.local,DNS:hpc-host-4c6ff3d8a60d6655.local
     const SERVICE_SAN_FIRST_DER: &[u8] = fixture!("leaf-service-san-first.der");
-    // DNS:cvc-host-4c6ff3d8a60d6655._sovd._tcp.local
+    // DNS:hpc-host-4c6ff3d8a60d6655._sovd._tcp.local
     const SERVICE_SAN_ONLY_DER: &[u8] = fixture!("leaf-service-san-only.der");
     // DNS:*.local
     const WILDCARD_ONLY_DER: &[u8] = fixture!("leaf-wildcard-only.der");
-    // DNS:CVC-HOST-4C6FF3D8A60D6655.LOCAL
+    // DNS:HPC-HOST-4C6FF3D8A60D6655.LOCAL
     const UPPERCASE_SAN_DER: &[u8] = fixture!("leaf-uppercase-san.der");
-    // IP:192.0.2.1,DNS:host.example.com,DNS:cvc.rig1.local,DNS:cvc-host-4c6ff3d8a60d6655.local
+    // IP:192.0.2.1,DNS:host.example.com,DNS:hpc.rig1.local,DNS:hpc-host-4c6ff3d8a60d6655.local
     const IP_AND_FOREIGN_SANS_DER: &[u8] = fixture!("leaf-ip-and-foreign-sans.der");
 
     #[test]
     fn service_name_san_is_skipped_for_the_host_san() {
         assert_eq!(
             instance_from_cert_der(SERVICE_SAN_FIRST_DER).as_deref(),
-            Some("cvc-host-4c6ff3d8a60d6655")
+            Some("hpc-host-4c6ff3d8a60d6655")
         );
     }
 
@@ -399,7 +399,7 @@ mod tests {
     fn uppercase_local_san_is_lowercased() {
         assert_eq!(
             instance_from_cert_der(UPPERCASE_SAN_DER).as_deref(),
-            Some("cvc-host-4c6ff3d8a60d6655")
+            Some("hpc-host-4c6ff3d8a60d6655")
         );
     }
 
@@ -407,22 +407,22 @@ mod tests {
     fn ip_foreign_and_multi_label_sans_are_skipped() {
         assert_eq!(
             instance_from_cert_der(IP_AND_FOREIGN_SANS_DER).as_deref(),
-            Some("cvc-host-4c6ff3d8a60d6655")
+            Some("hpc-host-4c6ff3d8a60d6655")
         );
     }
 
     #[test]
     fn local_host_label_accepts_only_single_label_local_hosts() {
         for (name, label) in [
-            ("cvc-host-rig1.local", Some("cvc-host-rig1")),
+            ("hpc-host-rig1.local", Some("hpc-host-rig1")),
             ("ID.LOCAL", Some("ID")),
-            ("cvc-host-rig1", None),
+            ("hpc-host-rig1", None),
             ("x._sovd._tcp.local", None),
             ("_x.local", None),
             ("*.local", None),
             ("a.b.local", None),
             ("host.example.com", None),
-            ("cvc.local.", None),
+            ("hpc.local.", None),
             (".local", None),
             ("local", None),
             ("", None),
@@ -441,10 +441,10 @@ mod tests {
     fn from_leaf_and_bind_builds_conformant_fields() {
         let adv = SovdAdvertiser::from_leaf_and_bind(LEAF_DER, "0.0.0.0:4000")
             .expect("leaf has a parseable instance");
-        assert_eq!(adv.instance, "cvc-host-rig1");
+        assert_eq!(adv.instance, "hpc-host-rig1");
         assert_eq!(adv.port, 4000);
-        assert_eq!(adv.identification, "cvc-host-rig1");
-        assert_eq!(adv.accessurl, "https://cvc-host-rig1.local:4000/v1");
+        assert_eq!(adv.identification, "hpc-host-rig1");
+        assert_eq!(adv.accessurl, "https://hpc-host-rig1.local:4000/v1");
     }
 
     #[test]
@@ -452,7 +452,7 @@ mod tests {
         // The SRV port follows the bind addr — never a hardcoded default.
         let adv = SovdAdvertiser::from_leaf_and_bind(LEAF_DER, "127.0.0.1:8443").unwrap();
         assert_eq!(adv.port, 8443);
-        assert_eq!(adv.accessurl, "https://cvc-host-rig1.local:8443/v1");
+        assert_eq!(adv.accessurl, "https://hpc-host-rig1.local:8443/v1");
     }
 
     #[test]
@@ -463,13 +463,13 @@ mod tests {
 
     #[test]
     fn new_sets_the_accessurl_scheme_from_the_transport() {
-        let ids = [Identity::Configured("cvc")];
+        let ids = [Identity::Configured("hpc")];
         let http = SovdAdvertiser::new(&ids, Scheme::Http, "0.0.0.0:9080").unwrap();
-        assert_eq!(http.accessurl, "http://cvc.local:9080/v1");
+        assert_eq!(http.accessurl, "http://hpc.local:9080/v1");
         let https = SovdAdvertiser::new(&ids, Scheme::Https, "0.0.0.0:4000").unwrap();
-        assert_eq!(https.accessurl, "https://cvc.local:4000/v1");
-        assert_eq!(https.instance, "cvc");
-        assert_eq!(https.identification, "cvc");
+        assert_eq!(https.accessurl, "https://hpc.local:4000/v1");
+        assert_eq!(https.instance, "hpc");
+        assert_eq!(https.identification, "hpc");
     }
 
     fn adv(ids: &[Identity<'_>]) -> Option<SovdAdvertiser> {
@@ -480,14 +480,14 @@ mod tests {
     fn configured_and_leaf_hostname_from_leaf_identification_from_config() {
         // Whatever the list order, the hostname follows the TLS leaf.
         let ids = [
-            Identity::Configured("cvc"),
+            Identity::Configured("hpc"),
             Identity::Leaf(LEAF_DER),
             Identity::Hostname,
         ];
         let a = adv(&ids).unwrap();
-        assert_eq!(a.instance, "cvc-host-rig1");
-        assert_eq!(a.identification, "cvc");
-        assert_eq!(a.accessurl, "https://cvc-host-rig1.local:4000/v1");
+        assert_eq!(a.instance, "hpc-host-rig1");
+        assert_eq!(a.identification, "hpc");
+        assert_eq!(a.accessurl, "https://hpc-host-rig1.local:4000/v1");
     }
 
     #[test]
@@ -505,7 +505,7 @@ mod tests {
             Identity::Configured("x"),
         ])
         .unwrap();
-        assert_eq!(a.instance, "cvc-host-4c6ff3d8a60d6655");
+        assert_eq!(a.instance, "hpc-host-4c6ff3d8a60d6655");
         assert_eq!(a.identification, "x");
         // No configured id: on to the OS hostname.
         let expected = os_hostname().as_deref().and_then(dns_label);
@@ -516,21 +516,21 @@ mod tests {
     #[test]
     fn leaf_only() {
         let a = adv(&[Identity::Leaf(LEAF_DER), Identity::Hostname]).unwrap();
-        assert_eq!(a.instance, "cvc-host-rig1");
-        assert_eq!(a.identification, "cvc-host-rig1");
+        assert_eq!(a.instance, "hpc-host-rig1");
+        assert_eq!(a.identification, "hpc-host-rig1");
     }
 
     #[test]
     fn configured_only() {
         // Unenrolled: no (usable) leaf, so the configured id is the hostname.
         let a = adv(&[
-            Identity::Configured("CVC_1"),
+            Identity::Configured("HPC_1"),
             Identity::Leaf(b"junk"),
             Identity::Hostname,
         ])
         .unwrap();
-        assert_eq!(a.instance, "cvc-1");
-        assert_eq!(a.identification, "CVC_1", "identification is verbatim");
+        assert_eq!(a.instance, "hpc-1");
+        assert_eq!(a.identification, "HPC_1", "identification is verbatim");
     }
 
     #[test]
@@ -547,9 +547,9 @@ mod tests {
 
     #[test]
     fn dns_label_sanitises_or_rejects() {
-        assert_eq!(dns_label("CVC").as_deref(), Some("cvc"));
-        assert_eq!(dns_label("cvc_host.rig1").as_deref(), Some("cvc-host-rig1"));
-        assert_eq!(dns_label("-_cvc_-").as_deref(), Some("cvc"));
+        assert_eq!(dns_label("HPC").as_deref(), Some("hpc"));
+        assert_eq!(dns_label("hpc_host.rig1").as_deref(), Some("hpc-host-rig1"));
+        assert_eq!(dns_label("-_hpc_-").as_deref(), Some("hpc"));
         assert_eq!(dns_label(&"a".repeat(70)).map(|s| s.len()), Some(63));
         assert_eq!(dns_label(""), None);
         assert_eq!(dns_label("___"), None);
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn new_without_a_port_does_not_advertise() {
         assert!(
-            SovdAdvertiser::new(&[Identity::Configured("cvc")], Scheme::Http, "0.0.0.0").is_none()
+            SovdAdvertiser::new(&[Identity::Configured("hpc")], Scheme::Http, "0.0.0.0").is_none()
         );
     }
 

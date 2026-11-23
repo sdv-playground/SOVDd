@@ -86,7 +86,7 @@ fn embedder_routes() -> Router {
         )
 }
 
-/// `state` as node `cvc`, its router (with the embedder's routes merged in)
+/// `state` as node `hpc`, its router (with the embedder's routes merged in)
 /// wrapped in the node topology.
 async fn node_server(state: AppState) -> TestServer {
     node_server_with(state, Router::new()).await
@@ -95,7 +95,7 @@ async fn node_server(state: AppState) -> TestServer {
 /// [`node_server`] with the embedder's `extra` routes merged in too.
 async fn node_server_with(state: AppState, extra: Router) -> TestServer {
     let state = state
-        .with_node(NodeTopology::new("cvc", "Central vehicle computer"))
+        .with_node(NodeTopology::new("hpc", "High-performance computer"))
         .expect("valid node");
     let router = create_router(state.clone())
         .merge(embedder_routes())
@@ -147,7 +147,7 @@ async fn a_server_without_a_node_is_unchanged() {
         "/v1/components/ecu_a/data",
         "/v1/components/ecu_a/faults",
         "/v1/components/ecu_a/subcomponents",
-        "/v1/components/cvc/subcomponents/ecu_a",
+        "/v1/components/hpc/subcomponents/ecu_a",
         "/v1/docs",
         "/vehicle/v1/components/ecu_a",
     ] {
@@ -185,10 +185,10 @@ async fn components_lists_the_node_alone() {
     assert_eq!(
         json(&body),
         serde_json::json!({ "items": [{
-            "id": "cvc",
-            "name": "Central vehicle computer",
+            "id": "hpc",
+            "name": "High-performance computer",
             "type": "node",
-            "href": "/v1/components/cvc",
+            "href": "/v1/components/hpc",
         }] })
     );
 }
@@ -196,27 +196,27 @@ async fn components_lists_the_node_alone() {
 #[tokio::test]
 async fn the_node_document_links_node_level_resources_and_subcomponents() {
     let server = node_server(members(&["vm1", "vm2"])).await;
-    let (status, body) = get(&server, "/v1/components/cvc", None).await;
+    let (status, body) = get(&server, "/v1/components/hpc", None).await;
     assert_eq!(status, 200);
     assert_eq!(
         json(&body),
         serde_json::json!({
-            "id": "cvc",
-            "name": "Central vehicle computer",
+            "id": "hpc",
+            "name": "High-performance computer",
             "type": "node",
-            "status": "/v1/components/cvc/status",
-            "operations": "/v1/components/cvc/operations",
-            "data": "/v1/components/cvc/data",
-            "subcomponents": "/v1/components/cvc/subcomponents",
+            "status": "/v1/components/hpc/status",
+            "operations": "/v1/components/hpc/operations",
+            "data": "/v1/components/hpc/data",
+            "subcomponents": "/v1/components/hpc/subcomponents",
         })
     );
     // With an update target, the node links its update collection, as the root
     // document does; it aliases no member's resources.
     let server = node_server(banked()).await;
-    let (status, body) = get(&server, "/v1/components/cvc", None).await;
+    let (status, body) = get(&server, "/v1/components/hpc", None).await;
     assert_eq!(status, 200);
     let body = json(&body);
-    assert_eq!(body["updates"], "/v1/components/cvc/updates");
+    assert_eq!(body["updates"], "/v1/components/hpc/updates");
     assert!(body.get("faults").is_none(), "{body}");
     assert!(body.get("capabilities").is_none(), "{body}");
 }
@@ -225,21 +225,21 @@ async fn the_node_document_links_node_level_resources_and_subcomponents() {
 async fn the_node_document_carries_the_identification_when_set() {
     // Not set: absent, not null (the exact document above).
     let server = node_server(members(&["vm1"])).await;
-    let (_, body) = get(&server, "/v1/components/cvc", None).await;
+    let (_, body) = get(&server, "/v1/components/hpc", None).await;
     assert!(json(&body).get("x-identification").is_none());
 
-    let node = NodeTopology::new("cvc", "CVC").with_identification("cvc-host-f88a13a329a72db1");
-    assert_eq!(node.identification(), Some("cvc-host-f88a13a329a72db1"));
+    let node = NodeTopology::new("hpc", "HPC").with_identification("hpc-host-f88a13a329a72db1");
+    assert_eq!(node.identification(), Some("hpc-host-f88a13a329a72db1"));
     let state = members(&["vm1"]).with_node(node).expect("valid node");
     let server = TestServer::start(with_node_topology(create_router(state.clone()), &state))
         .await
         .expect("test server");
-    let (status, body) = get(&server, "/v1/components/cvc", None).await;
+    let (status, body) = get(&server, "/v1/components/hpc", None).await;
     assert_eq!(status, 200);
     let body = json(&body);
-    assert_eq!(body["x-identification"], "cvc-host-f88a13a329a72db1");
+    assert_eq!(body["x-identification"], "hpc-host-f88a13a329a72db1");
     // The node's id stays its logical id; the listing does not carry it.
-    assert_eq!(body["id"], "cvc");
+    assert_eq!(body["id"], "hpc");
     let (_, list) = get(&server, "/v1/components", None).await;
     assert!(!String::from_utf8(list)
         .unwrap()
@@ -249,7 +249,7 @@ async fn the_node_document_carries_the_identification_when_set() {
 #[tokio::test]
 async fn subcomponents_lists_the_members_with_nested_hrefs() {
     let server = node_server(members(&["vm1", "vm2"])).await;
-    let (status, body) = get(&server, "/v1/components/cvc/subcomponents", None).await;
+    let (status, body) = get(&server, "/v1/components/hpc/subcomponents", None).await;
     assert_eq!(status, 200);
     let mut items: Vec<Value> = json(&body)["items"].as_array().unwrap().clone();
     items.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
@@ -258,11 +258,11 @@ async fn subcomponents_lists_the_members_with_nested_hrefs() {
         [
             serde_json::json!({
                 "id": "vm1", "name": "vm1 ecu", "type": "ecu",
-                "href": "/v1/components/cvc/subcomponents/vm1",
+                "href": "/v1/components/hpc/subcomponents/vm1",
             }),
             serde_json::json!({
                 "id": "vm2", "name": "vm2 ecu", "type": "ecu",
-                "href": "/v1/components/cvc/subcomponents/vm2",
+                "href": "/v1/components/hpc/subcomponents/vm2",
             }),
         ]
     );
@@ -277,7 +277,7 @@ async fn a_member_serves_under_the_node_what_it_serves_flat_without_one() {
         assert_eq!(status, 200, "{rest}");
         let (status, nested) = get(
             &server,
-            &format!("/v1/components/cvc/subcomponents/vm1{rest}"),
+            &format!("/v1/components/hpc/subcomponents/vm1{rest}"),
             None,
         )
         .await;
@@ -285,7 +285,7 @@ async fn a_member_serves_under_the_node_what_it_serves_flat_without_one() {
         // The same resources, at the node-form URLs.
         let expected = String::from_utf8(flat)
             .unwrap()
-            .replace("/v1/components/vm1", "/v1/components/cvc/subcomponents/vm1");
+            .replace("/v1/components/vm1", "/v1/components/hpc/subcomponents/vm1");
         assert_eq!(
             String::from_utf8(nested.clone()).unwrap(),
             expected,
@@ -296,7 +296,7 @@ async fn a_member_serves_under_the_node_what_it_serves_flat_without_one() {
         // (`/v1` itself is the docs' server URL.)
         for url in found.iter().filter(|url| url.starts_with("/v1/")) {
             assert!(
-                url.starts_with("/v1/components/cvc/subcomponents/vm1"),
+                url.starts_with("/v1/components/hpc/subcomponents/vm1"),
                 "{rest}: {url} is not a node-form URL"
             );
         }
@@ -352,7 +352,7 @@ async fn node_form_step(
     assert!(headers.get("link").is_none(), "{method} {path}");
     for url in response_urls(&headers, &body) {
         assert!(
-            url.starts_with("/v1/components/cvc/"),
+            url.starts_with("/v1/components/hpc/"),
             "{method} {path}: {url} is not a node-form URL"
         );
     }
@@ -388,7 +388,7 @@ async fn poll_node_form(server: &TestServer, update: &str, done: impl Fn(&Value)
 #[tokio::test]
 async fn a_member_update_flow_renders_node_form_urls_only() {
     let server = node_server(banked()).await;
-    let member = "/v1/components/cvc/subcomponents/vm1";
+    let member = "/v1/components/hpc/subcomponents/vm1";
     let update = format!("{member}/updates/u1");
     let get_ = reqwest::Method::GET;
     let put = reqwest::Method::PUT;
@@ -488,7 +488,7 @@ async fn a_node_transaction_refusal_names_the_node_operations() {
         Arc::new(BankedBackend::new("vm1", VerdictScope::Node)) as Arc<dyn DiagnosticBackend>,
     )]);
     let server = node_server(AppState::new(backends)).await;
-    let member = "/v1/components/cvc/subcomponents/vm1";
+    let member = "/v1/components/hpc/subcomponents/vm1";
     let resp = send_json(
         &server,
         reqwest::Method::POST,
@@ -507,7 +507,7 @@ async fn a_node_transaction_refusal_names_the_node_operations() {
     assert_eq!(status, 409);
     let message = json(&body)["message"].as_str().unwrap().to_owned();
     assert!(
-        message.contains("POST /v1/components/cvc/operations/x-update-commit/executions"),
+        message.contains("POST /v1/components/hpc/operations/x-update-commit/executions"),
         "{message}"
     );
     assert!(!message.contains("POST /v1/operations"), "{message}");
@@ -519,16 +519,16 @@ async fn node_level_updates_render_node_form_urls_only() {
     let (location, _) = node_form_step(
         &server,
         reqwest::Method::POST,
-        "/v1/components/cvc/updates",
+        "/v1/components/hpc/updates",
         Some(serde_json::json!({ "id": "u1", "target": "vm2" })),
         None,
         201,
     )
     .await;
-    assert_eq!(location.as_deref(), Some("/v1/components/cvc/updates/u1"));
+    assert_eq!(location.as_deref(), Some("/v1/components/hpc/updates/u1"));
     for path in [
-        "/v1/components/cvc/updates",
-        "/v1/components/cvc/updates/u1",
+        "/v1/components/hpc/updates",
+        "/v1/components/hpc/updates/u1",
     ] {
         node_form_step(&server, reqwest::Method::GET, path, None, None, 200).await;
     }
@@ -536,7 +536,7 @@ async fn node_level_updates_render_node_form_urls_only() {
     node_form_step(
         &server,
         reqwest::Method::GET,
-        "/v1/components/cvc/subcomponents/vm2/updates/u1",
+        "/v1/components/hpc/subcomponents/vm2/updates/u1",
         None,
         None,
         200,
@@ -544,12 +544,12 @@ async fn node_level_updates_render_node_form_urls_only() {
     .await;
 }
 
-/// The 404 a flat or root form answers on `/v1` of node `cvc`.
+/// The 404 a flat or root form answers on `/v1` of node `hpc`.
 fn not_served(path: &str, node_form: &str) -> Value {
     serde_json::json!({
         "error_code": "incomplete-request",
         "message": format!(
-            "No resource at {path}: on /v1 this server is node 'cvc', whose path for it is {node_form}"
+            "No resource at {path}: on /v1 this server is node 'hpc', whose path for it is {node_form}"
         ),
         "parameters": { "http_code": ["404"] },
     })
@@ -582,7 +582,7 @@ async fn flat_member_paths_answer_404() {
                 resp.json::<Value>().await.unwrap(),
                 not_served(
                     &path,
-                    &format!("/v1/components/cvc/subcomponents/{id}{rest}")
+                    &format!("/v1/components/hpc/subcomponents/{id}{rest}")
                 ),
                 "{method} {path}"
             );
@@ -591,7 +591,7 @@ async fn flat_member_paths_answer_404() {
     // Nothing was registered through them.
     let (_, body) = get(
         &server,
-        "/v1/components/cvc/subcomponents/vm1/updates",
+        "/v1/components/hpc/subcomponents/vm1/updates",
         None,
     )
     .await;
@@ -622,26 +622,26 @@ async fn root_forms_of_node_level_resources_answer_404_but_route_the_node_forms(
         assert_eq!(resp.status().as_u16(), 404, "{method} {path}");
         assert_eq!(
             resp.json::<Value>().await.unwrap(),
-            not_served(&path, &format!("/v1/components/cvc{rest}")),
+            not_served(&path, &format!("/v1/components/hpc{rest}")),
             "{method} {path}"
         );
     }
 
     // The node forms reach the embedder's root-form routes all the same.
     for rest in ["/status", "/status/x-boot-id"] {
-        let (status, body) = get(&server, &format!("/v1/components/cvc{rest}"), None).await;
+        let (status, body) = get(&server, &format!("/v1/components/hpc{rest}"), None).await;
         assert_eq!(status, 200, "{rest}");
         assert_eq!(json(&body)["served"], format!("/v1{rest}"));
     }
     let resp = send_json(
         &server,
         reqwest::Method::PUT,
-        "/v1/components/cvc/status/restart",
+        "/v1/components/hpc/status/restart",
         None,
     )
     .await;
     // The embedder's root-form `Location`, in the node form.
-    assert_eq!(location(&resp, 202), "/v1/components/cvc/status");
+    assert_eq!(location(&resp, 202), "/v1/components/hpc/status");
     assert_eq!(
         resp.json::<Value>().await.unwrap()["served"],
         "/v1/status/restart"
@@ -649,7 +649,7 @@ async fn root_forms_of_node_level_resources_answer_404_but_route_the_node_forms(
     let resp = send_json(
         &server,
         reqwest::Method::POST,
-        "/v1/components/cvc/operations/x-update-commit/executions",
+        "/v1/components/hpc/operations/x-update-commit/executions",
         None,
     )
     .await;
@@ -659,7 +659,7 @@ async fn root_forms_of_node_level_resources_answer_404_but_route_the_node_forms(
         "/v1/operations/x-update-commit/executions"
     );
     // And SOVDd's own root-form routes.
-    let (status, _) = get(&server, "/v1/components/cvc/updates", None).await;
+    let (status, _) = get(&server, "/v1/components/hpc/updates", None).await;
     assert_eq!(status, 200);
 }
 
@@ -673,7 +673,7 @@ async fn the_documents_a_client_starts_from_stay_served() {
         let body = json(&body);
         assert_eq!(body["components"], "/v1/components", "{path}");
         // The node-level update collection, in the node form.
-        assert_eq!(body["updates"], "/v1/components/cvc/updates", "{path}");
+        assert_eq!(body["updates"], "/v1/components/hpc/updates", "{path}");
         assert_eq!(
             body["x-update"]["update-targets"],
             serde_json::json!(["vm1", "vm2"])
@@ -694,14 +694,14 @@ async fn the_documents_a_client_starts_from_stay_served() {
 #[tokio::test]
 async fn node_level_data_is_the_root_data() {
     let server = node_server(members(&["vm1"])).await;
-    let node = get(&server, "/v1/components/cvc/data/x-update-state", None).await;
+    let node = get(&server, "/v1/components/hpc/data/x-update-state", None).await;
     assert_eq!(node.0, 200);
     assert_eq!(json(&node.1)["data"]["state"], "idle");
     // The query is kept.
     assert_eq!(
         get(
             &server,
-            "/v1/components/cvc/data/x-update-state?include-schema=true",
+            "/v1/components/hpc/data/x-update-state?include-schema=true",
             None
         )
         .await,
@@ -709,16 +709,16 @@ async fn node_level_data_is_the_root_data() {
     );
     // An item the root form does not serve: the router's 404, naming the
     // node-form path.
-    let (status, body) = get(&server, "/v1/components/cvc/data/nope", None).await;
+    let (status, body) = get(&server, "/v1/components/hpc/data/nope", None).await;
     assert_eq!(status, 404);
     assert_eq!(
         json(&body)["message"],
-        "No resource at /v1/components/cvc/data/nope"
+        "No resource at /v1/components/hpc/data/nope"
     );
     // The legacy tree has no node-level data.
     let (status, _) = get(
         &server,
-        "/vehicle/v1/components/cvc/data/x-update-state",
+        "/vehicle/v1/components/hpc/data/x-update-state",
         None,
     )
     .await;
@@ -760,21 +760,21 @@ async fn node_level_collections_list_the_contributed_items() {
     let state = members(&["vm1"]).with_capability_extensions(contributed_items());
     let server = node_server_with(state, items).await;
 
-    let (status, body) = get(&server, "/v1/components/cvc/data", None).await;
+    let (status, body) = get(&server, "/v1/components/hpc/data", None).await;
     assert_eq!(status, 200);
     let data = json(&body);
     assert_eq!(
         data,
         serde_json::json!({ "items": [
-            { "id": "x-plain", "name": "x-plain", "href": "/v1/components/cvc/data/x-plain" },
+            { "id": "x-plain", "name": "x-plain", "href": "/v1/components/hpc/data/x-plain" },
             {
                 "id": "x-update-state",
                 "name": "Update state",
-                "href": "/v1/components/cvc/data/x-update-state",
+                "href": "/v1/components/hpc/data/x-update-state",
             },
         ] })
     );
-    let (status, body) = get(&server, "/v1/components/cvc/operations", None).await;
+    let (status, body) = get(&server, "/v1/components/hpc/operations", None).await;
     assert_eq!(status, 200);
     let operations = json(&body);
     assert_eq!(
@@ -783,17 +783,17 @@ async fn node_level_collections_list_the_contributed_items() {
             {
                 "id": "x-ota-pull-update",
                 "name": "Pull an update",
-                "href": "/v1/components/cvc/operations/x-ota-pull-update",
+                "href": "/v1/components/hpc/operations/x-ota-pull-update",
             },
             {
                 "id": "x-reboot",
                 "name": "Reboot the node",
-                "href": "/v1/components/cvc/operations/x-reboot",
+                "href": "/v1/components/hpc/operations/x-reboot",
             },
             {
                 "id": "x-update-commit",
                 "name": "Commit the node's update transaction",
-                "href": "/v1/components/cvc/operations/x-update-commit",
+                "href": "/v1/components/hpc/operations/x-update-commit",
             },
         ] })
     );
@@ -814,7 +814,7 @@ async fn node_level_collections_list_the_contributed_items() {
         assert_eq!(status, 404, "{path}");
         assert_eq!(
             json(&body),
-            not_served(path, &format!("/v1/components/cvc{}", &path[3..]))
+            not_served(path, &format!("/v1/components/hpc{}", &path[3..]))
         );
     }
 }
@@ -822,7 +822,7 @@ async fn node_level_collections_list_the_contributed_items() {
 #[tokio::test]
 async fn node_level_collections_without_contributed_items_are_empty() {
     let server = node_server(members(&["vm1"])).await;
-    for path in ["/v1/components/cvc/data", "/v1/components/cvc/operations"] {
+    for path in ["/v1/components/hpc/data", "/v1/components/hpc/operations"] {
         let (status, body) = get(&server, path, None).await;
         assert_eq!(status, 200, "{path}");
         assert_eq!(json(&body), serde_json::json!({ "items": [] }), "{path}");
@@ -837,11 +837,11 @@ async fn an_embedder_route_serving_a_node_level_collection_wins() {
     let state = members(&["vm1"]).with_capability_extensions(contributed_items());
     let own = Router::new().route("/v1/data", axum::routing::get(served));
     let server = node_server_with(state, own).await;
-    let (status, body) = get(&server, "/v1/components/cvc/data", None).await;
+    let (status, body) = get(&server, "/v1/components/hpc/data", None).await;
     assert_eq!(status, 200);
     assert_eq!(json(&body), serde_json::json!({ "served": "/v1/data" }));
     // The other collection is still SOVDd's.
-    let (status, body) = get(&server, "/v1/components/cvc/operations", None).await;
+    let (status, body) = get(&server, "/v1/components/hpc/operations", None).await;
     assert_eq!(status, 200);
     assert_eq!(ids(&json(&body)).len(), 3);
 }
@@ -852,7 +852,7 @@ async fn node_level_collections_need_what_the_node_document_needs() {
         .with_authorizer(Arc::new(ScopedAuthorizer))
         .with_capability_extensions(contributed_items());
     let server = node_server(state).await;
-    for path in ["/v1/components/cvc/data", "/v1/components/cvc/operations"] {
+    for path in ["/v1/components/hpc/data", "/v1/components/hpc/operations"] {
         for (token, expected) in [
             (Some("token-all"), 200),
             (Some("token-vm1"), 200),
@@ -861,7 +861,7 @@ async fn node_level_collections_need_what_the_node_document_needs() {
         ] {
             let (status, _) = get(&server, path, token).await;
             assert_eq!(status, expected, "{path} {token:?}");
-            let (status, _) = get(&server, "/v1/components/cvc", token).await;
+            let (status, _) = get(&server, "/v1/components/hpc", token).await;
             assert_eq!(status, expected, "node document {token:?}");
         }
     }
@@ -871,10 +871,10 @@ async fn node_level_collections_need_what_the_node_document_needs() {
 async fn other_node_paths_are_not_served() {
     let server = node_server(members(&["vm1"])).await;
     for path in [
-        "/v1/components/cvc/faults",
-        "/v1/components/cvc/data-lists",
-        "/v1/components/cvc/statusx",
-        "/v1/components/cvc/subcomponents/cvc",
+        "/v1/components/hpc/faults",
+        "/v1/components/hpc/data-lists",
+        "/v1/components/hpc/statusx",
+        "/v1/components/hpc/subcomponents/hpc",
     ] {
         let (status, body) = get(&server, path, None).await;
         assert_eq!(status, 404, "{path}");
@@ -895,7 +895,7 @@ async fn an_unknown_member_answers_what_an_unknown_component_does() {
         assert_eq!(
             get(
                 &server,
-                &format!("/v1/components/cvc/subcomponents/nope{rest}"),
+                &format!("/v1/components/hpc/subcomponents/nope{rest}"),
                 None
             )
             .await,
@@ -945,12 +945,12 @@ async fn the_legacy_tree_is_unchanged_with_a_node() {
         "/vehicle/v1/components/ecu_a",
         "/vehicle/v1/components/ecu_a/data",
         "/vehicle/v1/components/ecu_a/faults",
-        "/vehicle/v1/components/cvc",
-        "/vehicle/v1/components/cvc/subcomponents",
-        "/vehicle/v1/components/cvc/subcomponents/ecu_a",
-        "/vehicle/v1/components/cvc/subcomponents/ecu_a/data",
-        "/vehicle/v1/components/cvc/updates",
-        "/vehicle/v1/components/cvc/data",
+        "/vehicle/v1/components/hpc",
+        "/vehicle/v1/components/hpc/subcomponents",
+        "/vehicle/v1/components/hpc/subcomponents/ecu_a",
+        "/vehicle/v1/components/hpc/subcomponents/ecu_a/data",
+        "/vehicle/v1/components/hpc/updates",
+        "/vehicle/v1/components/hpc/data",
     ] {
         assert_eq!(
             get(&node, path, None).await,
@@ -973,28 +973,28 @@ async fn the_v1_docs_list_the_node_forms_only() {
     for path in [
         "/v1/components",
         "/v1/docs",
-        "/v1/components/cvc",
-        "/v1/components/cvc/subcomponents",
-        "/v1/components/cvc/subcomponents/{component_id}",
-        "/v1/components/cvc/subcomponents/{component_id}/data/{param_id}",
-        "/v1/components/cvc/updates",
-        "/v1/components/cvc/updates/{update_id}/bulk-data",
-        "/v1/components/cvc/data",
-        "/v1/components/cvc/operations",
+        "/v1/components/hpc",
+        "/v1/components/hpc/subcomponents",
+        "/v1/components/hpc/subcomponents/{component_id}",
+        "/v1/components/hpc/subcomponents/{component_id}/data/{param_id}",
+        "/v1/components/hpc/updates",
+        "/v1/components/hpc/updates/{update_id}/bulk-data",
+        "/v1/components/hpc/data",
+        "/v1/components/hpc/operations",
     ] {
         assert!(paths.contains_key(path), "{path} missing");
     }
     // Neither the flat member paths nor the root node-level ones.
     for path in paths.keys().filter(|p| p.starts_with("/v1/")) {
         let served = ["/v1/components", "/v1/docs", "/v1/"].contains(&path.as_str())
-            || path == "/v1/components/cvc"
-            || path.starts_with("/v1/components/cvc/");
+            || path == "/v1/components/hpc"
+            || path.starts_with("/v1/components/hpc/");
         assert!(served, "{path} is not served");
     }
     // Their items are those of the flat paths of a server without a node.
     let (_, flat) = get(&flat_server(members(&["vm1"])).await, "/v1/docs", None).await;
     assert_eq!(
-        paths["/v1/components/cvc/subcomponents/{component_id}/data/{param_id}"],
+        paths["/v1/components/hpc/subcomponents/{component_id}/data/{param_id}"],
         json(&flat)["paths"]["/v1/components/{component_id}/data/{param_id}"]
     );
 
@@ -1008,17 +1008,17 @@ async fn the_v1_docs_list_the_node_forms_only() {
     assert_eq!(status, 200);
     let doc = json(&body);
     assert!(doc["paths"].get("/v1/data/x-update-state").is_none());
-    assert_eq!(doc["paths"]["/v1/components/cvc/data/x-update-state"], item);
+    assert_eq!(doc["paths"]["/v1/components/hpc/data/x-update-state"], item);
 
     // A member's scoped doc lists its node-form paths.
-    let (status, body) = get(&server, "/v1/components/cvc/subcomponents/vm1/docs", None).await;
+    let (status, body) = get(&server, "/v1/components/hpc/subcomponents/vm1/docs", None).await;
     assert_eq!(status, 200);
     let doc = json(&body);
     let paths = doc["paths"].as_object().expect("paths");
-    assert!(paths.contains_key("/v1/components/cvc/subcomponents/vm1/data/{param_id}"));
+    assert!(paths.contains_key("/v1/components/hpc/subcomponents/vm1/data/{param_id}"));
     for path in paths.keys() {
         assert!(
-            path.starts_with("/v1/components/cvc/subcomponents/vm1"),
+            path.starts_with("/v1/components/hpc/subcomponents/vm1"),
             "{path}"
         );
     }
@@ -1065,9 +1065,9 @@ async fn v1_only_contributed_paths_are_listed_on_v1_only() {
     // With a node: the node form.
     let (_, body) = get(&node, "/v1/docs", None).await;
     let paths = &json(&body)["paths"];
-    assert_eq!(paths["/v1/components/cvc/status"], status_row);
-    assert_eq!(paths["/v1/components/cvc/data/x-boot-id"], only_v1);
-    assert_eq!(paths["/v1/components/cvc/data/x-update-state"], ordinary);
+    assert_eq!(paths["/v1/components/hpc/status"], status_row);
+    assert_eq!(paths["/v1/components/hpc/data/x-boot-id"], only_v1);
+    assert_eq!(paths["/v1/components/hpc/data/x-update-state"], ordinary);
     assert!(paths.get("/v1/status").is_none());
 
     // Never in the legacy doc, which is that of the ordinary rows alone.
@@ -1083,7 +1083,7 @@ async fn v1_only_contributed_paths_are_listed_on_v1_only() {
     }
 
     // They feed the node-level collections like the ordinary rows.
-    let (status, body) = get(&node, "/v1/components/cvc/data", None).await;
+    let (status, body) = get(&node, "/v1/components/hpc/data", None).await;
     assert_eq!(status, 200);
     assert_eq!(ids(&json(&body)), ["x-boot-id", "x-update-state"]);
 }
@@ -1095,12 +1095,12 @@ async fn the_component_scope_applies_through_the_node_form() {
 
     let (status, _) = get(
         &server,
-        "/v1/components/cvc/subcomponents/vm1/data",
+        "/v1/components/hpc/subcomponents/vm1/data",
         Some("token-vm1"),
     )
     .await;
     assert_eq!(status, 200);
-    let path = "/v1/components/cvc/subcomponents/vm2/data";
+    let path = "/v1/components/hpc/subcomponents/vm2/data";
     let (status, _) = get(&server, path, Some("token-vm1")).await;
     assert_eq!(status, 403);
     let (status, _) = get(&server, path, Some("token-all")).await;
@@ -1115,25 +1115,25 @@ async fn the_component_scope_applies_through_the_node_form() {
     // access any member.
     let (status, body) = get(&server, "/v1/components", Some("token-vm1")).await;
     assert_eq!(status, 200);
-    assert_eq!(ids(&json(&body)), ["cvc"]);
+    assert_eq!(ids(&json(&body)), ["hpc"]);
     let (status, body) = get(
         &server,
-        "/v1/components/cvc/subcomponents",
+        "/v1/components/hpc/subcomponents",
         Some("token-vm1"),
     )
     .await;
     assert_eq!(status, 200);
     assert_eq!(ids(&json(&body)), ["vm1"]);
-    let (status, body) = get(&server, "/v1/components/cvc", Some("token-vm1")).await;
+    let (status, body) = get(&server, "/v1/components/hpc", Some("token-vm1")).await;
     assert_eq!(status, 200);
-    assert_eq!(json(&body)["id"], "cvc");
+    assert_eq!(json(&body)["id"], "hpc");
 
     let (status, body) = get(&server, "/v1/components", Some("token-none")).await;
     assert_eq!(status, 200);
     assert!(ids(&json(&body)).is_empty());
-    let (status, _) = get(&server, "/v1/components/cvc", Some("token-none")).await;
+    let (status, _) = get(&server, "/v1/components/hpc", Some("token-none")).await;
     assert_eq!(status, 403);
-    let (status, _) = get(&server, "/v1/components/cvc", None).await;
+    let (status, _) = get(&server, "/v1/components/hpc", None).await;
     assert_eq!(status, 401);
 }
 
@@ -1150,5 +1150,5 @@ fn a_node_needs_an_id_of_its_own() {
             "{id:?}"
         );
     }
-    assert!(state().with_node(NodeTopology::new("cvc", "CVC")).is_ok());
+    assert!(state().with_node(NodeTopology::new("hpc", "HPC")).is_ok());
 }

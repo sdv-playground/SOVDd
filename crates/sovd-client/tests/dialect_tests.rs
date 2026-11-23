@@ -165,7 +165,7 @@ enum Shape {
     Legacy,
     /// `/v1` client on a server without a node.
     V1Flat,
-    /// `/v1` client on a node server (node `cvc`).
+    /// `/v1` client on a node server (node `hpc`).
     V1Node,
 }
 
@@ -177,7 +177,7 @@ struct Server {
 }
 
 impl Server {
-    /// The real router over `ids`, with node `cvc` when `node`. The root `status/restart` is
+    /// The real router over `ids`, with node `hpc` when `node`. The root `status/restart` is
     /// the embedder's (not SOVDd's): stubbed here as an embedder would mount it.
     async fn start(ids: &[&str], node: bool) -> Self {
         let backends = ids
@@ -186,7 +186,7 @@ impl Server {
             .collect();
         let mut state = AppState::new(backends);
         if node {
-            state = state.with_node(NodeTopology::new("cvc", "CVC")).unwrap();
+            state = state.with_node(NodeTopology::new("hpc", "HPC")).unwrap();
         }
         let embedder = Router::new()
             .route(
@@ -285,21 +285,21 @@ async fn discovery_finds_the_node() {
     let client = SovdClient::new(&s.base()).unwrap();
     assert_eq!(
         client.discover_node().await.unwrap().as_deref(),
-        Some("cvc")
+        Some("hpc")
     );
     assert_eq!(
         s.take(),
-        ["GET /v1/components", "GET /v1/components/cvc/subcomponents"]
+        ["GET /v1/components", "GET /v1/components/hpc/subcomponents"]
     );
     let client = client.with_dialect(Dialect::V1).await.unwrap();
-    assert_eq!(client.paths(), &Paths::v1(Some("cvc".into())));
+    assert_eq!(client.paths(), &Paths::v1(Some("hpc".into())));
 
     let flash = FlashClient::for_sovd(&s.base(), "vm1")
         .unwrap()
         .with_dialect(Dialect::V1)
         .await
         .unwrap();
-    assert_eq!(flash.config().paths, Paths::v1(Some("cvc".into())));
+    assert_eq!(flash.config().paths, Paths::v1(Some("hpc".into())));
 }
 
 #[tokio::test]
@@ -363,7 +363,7 @@ async fn component_listing_on_every_shape() {
             [
                 "GET /vehicle/v1/components",
                 "GET /v1/components",
-                "GET /v1/components/cvc/subcomponents",
+                "GET /v1/components/hpc/subcomponents",
             ],
         );
         assert_eq!(s.take(), [want], "{shape:?}");
@@ -387,7 +387,7 @@ async fn data_read_on_every_shape() {
             [
                 "/vehicle/v1/components/vm1",
                 "/v1/components/vm1",
-                "/v1/components/cvc/subcomponents/vm1",
+                "/v1/components/hpc/subcomponents/vm1",
             ],
         );
         assert_eq!(
@@ -427,7 +427,7 @@ async fn update_flow_on_every_shape() {
             [
                 "/vehicle/v1/components/vm1",
                 "/v1/components/vm1",
-                "/v1/components/cvc/subcomponents/vm1",
+                "/v1/components/hpc/subcomponents/vm1",
             ],
         );
         let u = format!("{m}/updates/kernel-1.0");
@@ -466,7 +466,7 @@ async fn restart_on_every_shape() {
             [
                 "/vehicle/v1/components/vm1",
                 "/v1/components/vm1",
-                "/v1/components/cvc/subcomponents/vm1",
+                "/v1/components/hpc/subcomponents/vm1",
             ],
         );
         let root = pick(
@@ -474,7 +474,7 @@ async fn restart_on_every_shape() {
             [
                 "/vehicle/v1/status/restart",
                 "/v1/status/restart",
-                "/v1/components/cvc/status/restart",
+                "/v1/components/hpc/status/restart",
             ],
         );
         assert_eq!(
@@ -531,8 +531,8 @@ async fn resolved_paths_are_reused_without_discovery() {
     assert_eq!(
         s.take(),
         [
-            "GET /v1/components/cvc/subcomponents/vm2/status",
-            "GET /v1/components/cvc/subcomponents/vm2/updates",
+            "GET /v1/components/hpc/subcomponents/vm2/status",
+            "GET /v1/components/hpc/subcomponents/vm2/updates",
         ]
     );
 }

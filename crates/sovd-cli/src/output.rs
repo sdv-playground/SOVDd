@@ -290,7 +290,7 @@ pub struct LogRow {
     #[tabled(rename = "Source")]
     pub source: String,
     /// The emitter within a multi-emitter source (the slog2 buffer name:
-    /// supernova / vhsm-ssd / devb_sdmmc / …). Blank for single-emitter sources
+    /// the node manager / vhsm-ssd / devb_sdmmc / …). Blank for single-emitter sources
     /// (files, guest agent) that don't carry `fields.emitter`.
     #[tabled(rename = "Emitter")]
     pub emitter: String,

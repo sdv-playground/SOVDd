@@ -860,7 +860,7 @@ mod tests {
 
     #[test]
     fn destructive_trial_verdicts_map_to_update_verdict() {
-        // Security-load-bearing: an embedder (supernova) enforces the entity-root
+        // Security-load-bearing: an embedder (the node manager) enforces the entity-root
         // x-ota-{commit,rollback}-trials routes by applying require_auth, which
         // gates on this capability. They must resolve to UpdateVerdict — NOT Read
         // (the `/operations` GET case) and NOT ResetExecute (no `/reset` substring).

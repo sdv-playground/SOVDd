@@ -7,15 +7,15 @@
 [server]
 host = "0.0.0.0"
 port = 9080
-# identification = "cvc"   # mDNS instance / <id>.local hostname; defaults to the TLS leaf's SAN, then the OS hostname
+# identification = "hpc"   # mDNS instance / <id>.local hostname; defaults to the TLS leaf's SAN, then the OS hostname
 request_timeout_ms = 5000
 
 # Node topology (opt-in): on /v1, serve the components only as the subcomponents
 # of one node, /v1/components/<id>/subcomponents/... (ARCHITECTURE.md §7.1).
 # [server.node]
-# id = "cvc"
-# name = "Central vehicle computer"
-# identification = "cvc-host-f88a13a329a72db1"   # the unit's own name on the node document (x-identification), not its id
+# id = "hpc"
+# name = "High-performance computer"
+# identification = "hpc-host-f88a13a329a72db1"   # the unit's own name on the node document (x-identification), not its id
 
 # Transport configuration
 # Options: "socketcan", "someip", "mock"

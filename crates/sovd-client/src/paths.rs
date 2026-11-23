@@ -242,7 +242,7 @@ mod tests {
         [
             Paths::legacy(),
             Paths::v1(None),
-            Paths::v1(Some("cvc".into())),
+            Paths::v1(Some("hpc".into())),
         ]
     }
 
@@ -266,7 +266,7 @@ mod tests {
                 [
                     "/vehicle/v1/components",
                     "/v1/components",
-                    "/v1/components/cvc/subcomponents",
+                    "/v1/components/hpc/subcomponents",
                 ],
             ),
         ]);
@@ -280,7 +280,7 @@ mod tests {
                 [
                     "/vehicle/v1/components/vm1",
                     "/v1/components/vm1",
-                    "/v1/components/cvc/subcomponents/vm1",
+                    "/v1/components/hpc/subcomponents/vm1",
                 ],
             ),
             (
@@ -288,7 +288,7 @@ mod tests {
                 [
                     "/vehicle/v1/components/vm1/status",
                     "/v1/components/vm1/status",
-                    "/v1/components/cvc/subcomponents/vm1/status",
+                    "/v1/components/hpc/subcomponents/vm1/status",
                 ],
             ),
             (
@@ -296,7 +296,7 @@ mod tests {
                 [
                     "/vehicle/v1/components/vm1/status/restart",
                     "/v1/components/vm1/status/restart",
-                    "/v1/components/cvc/subcomponents/vm1/status/restart",
+                    "/v1/components/hpc/subcomponents/vm1/status/restart",
                 ],
             ),
             (
@@ -304,7 +304,7 @@ mod tests {
                 [
                     "/vehicle/v1/components/vm1/data/x-ota-update-mode",
                     "/v1/components/vm1/data/x-ota-update-mode",
-                    "/v1/components/cvc/subcomponents/vm1/data/x-ota-update-mode",
+                    "/v1/components/hpc/subcomponents/vm1/data/x-ota-update-mode",
                 ],
             ),
             (
@@ -312,7 +312,7 @@ mod tests {
                 [
                     "/vehicle/v1/components/vm1/updates/u1/bulk-data/p1",
                     "/v1/components/vm1/updates/u1/bulk-data/p1",
-                    "/v1/components/cvc/subcomponents/vm1/updates/u1/bulk-data/p1",
+                    "/v1/components/hpc/subcomponents/vm1/updates/u1/bulk-data/p1",
                 ],
             ),
             (
@@ -320,7 +320,7 @@ mod tests {
                 [
                     "/vehicle/v1/components/vm1/updates/u1/execute",
                     "/v1/components/vm1/updates/u1/execute",
-                    "/v1/components/cvc/subcomponents/vm1/updates/u1/execute",
+                    "/v1/components/hpc/subcomponents/vm1/updates/u1/execute",
                 ],
             ),
             (
@@ -328,7 +328,7 @@ mod tests {
                 [
                     "/vehicle/v1/components/vm1/x-ota-force-rollback",
                     "/v1/components/vm1/x-ota-force-rollback",
-                    "/v1/components/cvc/subcomponents/vm1/x-ota-force-rollback",
+                    "/v1/components/hpc/subcomponents/vm1/x-ota-force-rollback",
                 ],
             ),
             (
@@ -336,7 +336,7 @@ mod tests {
                 [
                     "/vehicle/v1/components/hsm/x-ecu-id",
                     "/v1/components/hsm/x-ecu-id",
-                    "/v1/components/cvc/subcomponents/hsm/x-ecu-id",
+                    "/v1/components/hpc/subcomponents/hsm/x-ecu-id",
                 ],
             ),
             (
@@ -344,7 +344,7 @@ mod tests {
                 [
                     "/vehicle/v1/components/hsm/operations/x-csr/executions",
                     "/v1/components/hsm/operations/x-csr/executions",
-                    "/v1/components/cvc/subcomponents/hsm/operations/x-csr/executions",
+                    "/v1/components/hpc/subcomponents/hsm/operations/x-csr/executions",
                 ],
             ),
             (
@@ -352,7 +352,7 @@ mod tests {
                 [
                     "/vehicle/v1/components/ecu/cyclic-subscriptions/s1",
                     "/v1/components/ecu/cyclic-subscriptions/s1",
-                    "/v1/components/cvc/subcomponents/ecu/cyclic-subscriptions/s1",
+                    "/v1/components/hpc/subcomponents/ecu/cyclic-subscriptions/s1",
                 ],
             ),
         ]);
@@ -366,7 +366,7 @@ mod tests {
                 [
                     "/vehicle/v1/components/uds_gw/apps/engine_ecu",
                     "/v1/components/uds_gw/apps/engine_ecu",
-                    "/v1/components/cvc/subcomponents/uds_gw/apps/engine_ecu",
+                    "/v1/components/hpc/subcomponents/uds_gw/apps/engine_ecu",
                 ],
             ),
             (
@@ -374,7 +374,7 @@ mod tests {
                 [
                     "/vehicle/v1/components/uds_gw/apps/engine_ecu/updates",
                     "/v1/components/uds_gw/apps/engine_ecu/updates",
-                    "/v1/components/cvc/subcomponents/uds_gw/apps/engine_ecu/updates",
+                    "/v1/components/hpc/subcomponents/uds_gw/apps/engine_ecu/updates",
                 ],
             ),
         ]);
@@ -388,7 +388,7 @@ mod tests {
                 [
                     "/vehicle/v1/status",
                     "/v1/status",
-                    "/v1/components/cvc/status",
+                    "/v1/components/hpc/status",
                 ],
             ),
             (
@@ -396,7 +396,7 @@ mod tests {
                 [
                     "/vehicle/v1/status/restart",
                     "/v1/status/restart",
-                    "/v1/components/cvc/status/restart",
+                    "/v1/components/hpc/status/restart",
                 ],
             ),
             (
@@ -405,7 +405,7 @@ mod tests {
                     "/vehicle/v1/status/x-boot-id",
                     "/v1/status/x-boot-id",
                     // Not served by SOVDd's node form (only /status, /status/restart).
-                    "/v1/components/cvc/status/x-boot-id",
+                    "/v1/components/hpc/status/x-boot-id",
                 ],
             ),
             (
@@ -413,7 +413,7 @@ mod tests {
                 [
                     "/vehicle/v1/updates",
                     "/v1/updates",
-                    "/v1/components/cvc/updates",
+                    "/v1/components/hpc/updates",
                 ],
             ),
             (
@@ -421,7 +421,7 @@ mod tests {
                 [
                     "/vehicle/v1/data/x-update-state",
                     "/v1/data/x-update-state",
-                    "/v1/components/cvc/data/x-update-state",
+                    "/v1/components/hpc/data/x-update-state",
                 ],
             ),
             (
@@ -429,7 +429,7 @@ mod tests {
                 [
                     "/vehicle/v1/operations/x-update-commit/executions",
                     "/v1/operations/x-update-commit/executions",
-                    "/v1/components/cvc/operations/x-update-commit/executions",
+                    "/v1/components/hpc/operations/x-update-commit/executions",
                 ],
             ),
             (
@@ -437,7 +437,7 @@ mod tests {
                 [
                     "/vehicle/v1/operations/factory-reset/executions",
                     "/v1/operations/factory-reset/executions",
-                    "/v1/components/cvc/operations/factory-reset/executions",
+                    "/v1/components/hpc/operations/factory-reset/executions",
                 ],
             ),
         ]);
@@ -460,9 +460,9 @@ mod tests {
         assert!(!Paths::legacy().is_v1());
         assert!(Paths::legacy().is_legacy());
         assert_eq!(Paths::legacy().dialect(), Dialect::Legacy);
-        let node = Paths::v1(Some("cvc".into()));
+        let node = Paths::v1(Some("hpc".into()));
         assert!(node.is_v1() && !node.is_legacy());
-        assert_eq!(node.node(), Some("cvc"));
+        assert_eq!(node.node(), Some("hpc"));
         assert_eq!(Paths::v1(None).node(), None);
     }
 }

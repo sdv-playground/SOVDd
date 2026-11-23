@@ -422,7 +422,7 @@ Opt-in: a server without a node serves `/v1` flat, as before.
 | `/v1/components/{node}/status[/...]`, `.../updates[/...]`, `.../operations[/...]`, `.../data[/...]` | the node-level resources: whatever serves the root form (`/v1/updates/...`, an embedder's `/v1/status`, `/v1/status/restart` or `/v1/status/x-boot-id`, node verdict operations or node-level data items such as `/v1/data/x-update-state`, ...), query kept |
 | `GET /v1/components/{node}/data`, `GET .../operations` | the node-level collections: an embedder's `GET /v1/data` / `GET /v1/operations` route when it has one, else SOVDd's listing of the items the embedder contributes to the capability description (below); `{"items": []}` when there are none |
 | any other `/v1/components/{node}/...` | 404 (`GenericError`) |
-| `/v1/components/{id}/...` of any other id (the flat form) | 404 `incomplete-request`, naming the node form: `No resource at /v1/components/vm1/data: on /v1 this server is node 'cvc', whose path for it is /v1/components/cvc/subcomponents/vm1/data` |
+| `/v1/components/{id}/...` of any other id (the flat form) | 404 `incomplete-request`, naming the node form: `No resource at /v1/components/vm1/data: on /v1 this server is node 'hpc', whose path for it is /v1/components/hpc/subcomponents/vm1/data` |
 | root forms `/v1/status[/...]`, `/v1/updates[/...]`, `/v1/operations[/...]`, `/v1/data[/...]` | 404 alike, naming the node form |
 | `/v1`, `/v1/`, `/v1/components`, `/v1/docs` | served: what a client reads before it knows the node (the root document's `updates` link is the node's) |
 
@@ -433,9 +433,9 @@ backend's or not, before authentication: they tell nothing of the members.
 The node does not alias any backend's resources: it carries node-level resources only. The node id
 must be a path segment no backend has as its id (`with_node` refuses it otherwise).
 `NodeTopology::with_identification(..)` (`[server.node] identification` in `sovdd`, optional) sets
-the unit's own name, its mDNS/TLS identity (e.g. `cvc-host-f88a13a329a72db1`), carried on the
+the unit's own name, its mDNS/TLS identity (e.g. `hpc-host-f88a13a329a72db1`), carried on the
 node's document as `x-identification` and absent when not set. It is distinct from the node id, the
-logical component id (`cvc`). An embedder that learns the identity at runtime (from its HSM) sets it
+logical component id (`hpc`). An embedder that learns the identity at runtime (from its HSM) sets it
 on the `NodeTopology` before building the state; there is no runtime setter. `x-` rather than
 `x-sovd-`: that prefix is reserved for spec-defined names (§5.4.5). `/vehicle/v1` is
 frozen: no node, and its responses are byte-identical to a server without one.

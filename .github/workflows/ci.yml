@@ -34,6 +34,15 @@ jobs:
       - name: Unit tests
         run: cargo test --lib
 
+  neutral-names:
+    name: neutral names
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No downstream product/organisation names in the tree; the denylist and
+      # its allow-list live in the script.
+      - run: bash scripts/check-neutral-names.sh
+
   docker:
     name: Docker build
     runs-on: ubuntu-latest

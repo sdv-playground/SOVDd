@@ -1493,7 +1493,7 @@ mod tests {
         let present = dir.join(format!("sovdd-ident-present-{pid}.toml"));
         std::fs::write(
             &present,
-            "[server]\nport = 9080\nidentification = \"cvc\"\n",
+            "[server]\nport = 9080\nidentification = \"hpc\"\n",
         )
         .unwrap();
         let absent = dir.join(format!("sovdd-ident-absent-{pid}.toml"));
@@ -1504,7 +1504,7 @@ mod tests {
         let _ = std::fs::remove_file(&present);
         let _ = std::fs::remove_file(&absent);
 
-        assert_eq!(got_present.unwrap().as_deref(), Some("cvc"));
+        assert_eq!(got_present.unwrap().as_deref(), Some("hpc"));
         assert_eq!(got_absent.unwrap(), None);
     }
 
@@ -1522,20 +1522,20 @@ mod tests {
 
         let named = load(
             "named",
-            "[server]\nport = 9080\n[server.node]\nid = \"cvc\"\nname = \"CVC\"\n",
+            "[server]\nport = 9080\n[server.node]\nid = \"hpc\"\nname = \"HPC\"\n",
         );
-        assert_eq!(named.unwrap(), Some(NodeTopology::new("cvc", "CVC")));
-        let unnamed = load("unnamed", "[server.node]\nid = \"cvc\"\n");
-        assert_eq!(unnamed.unwrap(), Some(NodeTopology::new("cvc", "cvc")));
+        assert_eq!(named.unwrap(), Some(NodeTopology::new("hpc", "HPC")));
+        let unnamed = load("unnamed", "[server.node]\nid = \"hpc\"\n");
+        assert_eq!(unnamed.unwrap(), Some(NodeTopology::new("hpc", "hpc")));
         let identified = load(
             "identified",
-            "[server.node]\nid = \"cvc\"\nidentification = \"cvc-host-f88a13a329a72db1\"\n",
+            "[server.node]\nid = \"hpc\"\nidentification = \"hpc-host-f88a13a329a72db1\"\n",
         );
         assert_eq!(
             identified.unwrap(),
-            Some(NodeTopology::new("cvc", "cvc").with_identification("cvc-host-f88a13a329a72db1"))
+            Some(NodeTopology::new("hpc", "hpc").with_identification("hpc-host-f88a13a329a72db1"))
         );
         assert_eq!(load("absent", "[server]\nport = 9080\n").unwrap(), None);
-        assert!(load("no-id", "[server.node]\nname = \"CVC\"\n").is_err());
+        assert!(load("no-id", "[server.node]\nname = \"HPC\"\n").is_err());
     }
 }

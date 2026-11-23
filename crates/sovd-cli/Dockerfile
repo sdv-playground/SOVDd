@@ -4,15 +4,14 @@
 # (examples/autoloader/sovd-get-logs.sh) can pull logs from a device with no
 # local Rust toolchain.
 #
-# Built + published from supernova-towers (which submodules SOVDd) as
-#   <registry>/tools/supernova-towers/sovd-cli
-# alongside sumo-towers + sumo-minter. Build context = the SOVDd workspace root.
+# A consumer's CI can build and publish it (e.g. as <registry>/tools/sovd-cli)
+# alongside its other tool images. Build context = the SOVDd workspace root.
 #
 # Build from the SOVDd repo root:
 #   docker build -t sovd-cli -f crates/sovd-cli/Dockerfile .
 #
 # Run (mint a token elsewhere; see sovd-get-logs.sh for the dance):
-#   docker run --rm sovd-cli --server https://cvc.local:4000 --token "$JWT" \
+#   docker run --rm sovd-cli --server https://hpc.local:4000 --token "$JWT" \
 #     --insecure logs list <ecu>
 #
 # TLS: reqwest uses rustls (no OpenSSL). The default path verifies against the
