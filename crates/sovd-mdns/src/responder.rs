@@ -8,7 +8,7 @@
 //!
 //! - [`simple-dns`] — a pure-Rust DNS wire codec (its only dep is `bitflags`);
 //! - [`socket2`] — a thin libc UDP-socket wrapper (its only dep is `libc`, the
-//!   same `0.6` line the supernova QNX cross-build already carries);
+//!   same `0.6` line the node manager's QNX cross-build already carries);
 //! - [`libc`] itself, for `getifaddrs` / `if_nametoindex` only.
 //!
 //! The module is compiled on *every* target (so it is testable on Linux) but is
@@ -20,7 +20,7 @@
 //! The responder serves every interface that is up, multicast-capable, not
 //! loopback, and holds an IPv4 and/or IPv6 address ([`interfaces`], read with
 //! `getifaddrs`): a host whose guests sit on their own point-to-point links (the
-//! CVC: the LAN plus one link per VM) must be found on each of them, at that
+//! an HPC: the LAN plus one link per VM) must be found on each of them, at that
 //! link's address. Each interface gets its own record set — an `A` for its
 //! IPv4 address, an `AAAA` per IPv6 address (link-local included) — which is
 //! announced, answered and withdrawn on that interface over both families
@@ -37,7 +37,7 @@
 //!   QNX: there a socket bound to `0.0.0.0` gets each datagram's source address
 //!   from a route lookup toward the destination, multicast with
 //!   `IP_MULTICAST_IF` included, so while the default gateway does not answer
-//!   ARP every such send fails with `EHOSTUNREACH` (seen on the CVC in ~20 s
+//!   ARP every such send fails with `EHOSTUNREACH` (seen on target hardware in ~20 s
 //!   stretches). A socket bound to the interface address has a fixed source
 //!   and consults no route. `IP_PKTINFO` has no `nto` path, so the interface a
 //!   query arrived on is inferred from its sender's subnet.
@@ -1086,10 +1086,10 @@ mod tests {
 
     fn sample() -> SovdAdvertiser {
         SovdAdvertiser {
-            instance: "cvc-host-deadbeef".into(),
+            instance: "hpc-host-deadbeef".into(),
             port: 4000,
-            identification: "cvc-host-deadbeef".into(),
-            accessurl: "https://cvc-host-deadbeef.local:4000/v1".into(),
+            identification: "hpc-host-deadbeef".into(),
+            accessurl: "https://hpc-host-deadbeef.local:4000/v1".into(),
         }
     }
 
@@ -1119,15 +1119,15 @@ mod tests {
                 RData::PTR(ptr) => {
                     saw_ptr = true;
                     assert_eq!(rr.name.to_string(), "_sovd._tcp.local");
-                    assert_eq!(ptr.0.to_string(), "cvc-host-deadbeef._sovd._tcp.local");
+                    assert_eq!(ptr.0.to_string(), "hpc-host-deadbeef._sovd._tcp.local");
                     assert_eq!(rr.ttl, TTL_SHARED);
                     assert!(!rr.cache_flush, "shared PTR must not set cache-flush");
                 }
                 RData::SRV(srv) => {
                     saw_srv = true;
-                    assert_eq!(rr.name.to_string(), "cvc-host-deadbeef._sovd._tcp.local");
+                    assert_eq!(rr.name.to_string(), "hpc-host-deadbeef._sovd._tcp.local");
                     assert_eq!(srv.port, 4000);
-                    assert_eq!(srv.target.to_string(), "cvc-host-deadbeef.local");
+                    assert_eq!(srv.target.to_string(), "hpc-host-deadbeef.local");
                     assert_eq!(rr.ttl, TTL_HOST);
                     assert!(rr.cache_flush, "unique SRV should set cache-flush");
                 }
@@ -1136,17 +1136,17 @@ mod tests {
                     let attrs = txt.attributes();
                     assert_eq!(
                         attrs.get("identification"),
-                        Some(&Some("cvc-host-deadbeef".to_string()))
+                        Some(&Some("hpc-host-deadbeef".to_string()))
                     );
                     assert_eq!(
                         attrs.get("accessurl"),
-                        Some(&Some("https://cvc-host-deadbeef.local:4000/v1".to_string()))
+                        Some(&Some("https://hpc-host-deadbeef.local:4000/v1".to_string()))
                     );
                     assert!(rr.cache_flush, "unique TXT should set cache-flush");
                 }
                 RData::A(a) => {
                     saw_a = true;
-                    assert_eq!(rr.name.to_string(), "cvc-host-deadbeef.local");
+                    assert_eq!(rr.name.to_string(), "hpc-host-deadbeef.local");
                     assert_eq!(Ipv4Addr::from(a.address), Ipv4Addr::new(10, 1, 2, 3));
                     assert_eq!(rr.ttl, TTL_HOST);
                 }
@@ -1211,7 +1211,7 @@ mod tests {
         // mixed-case name (DNS names are case-insensitive).
         let mut srv_q = Packet::new_query(0);
         srv_q.questions.push(Question::new(
-            Name::new_unchecked("CVC-HOST-DEADBEEF._sovd._tcp.local"),
+            Name::new_unchecked("HPC-HOST-DEADBEEF._sovd._tcp.local"),
             QTYPE::TYPE(TYPE::SRV),
             QCLASS::CLASS(CLASS::IN),
             true,
@@ -1240,7 +1240,7 @@ mod tests {
     fn aaaa_queries_on_the_host_are_answered() {
         let mut q = Packet::new_query(0);
         q.questions.push(Question::new(
-            Name::new_unchecked("cvc-host-deadbeef.local"),
+            Name::new_unchecked("hpc-host-deadbeef.local"),
             QTYPE::TYPE(TYPE::AAAA),
             QCLASS::CLASS(CLASS::IN),
             false,
@@ -1435,7 +1435,7 @@ mod tests {
 
     #[test]
     fn a_query_is_answered_by_the_interface_it_came_from() {
-        // The CVC host: the LAN, a /30 to vm1, and an IPv6-only link.
+        // The HPC host: the LAN, a /30 to vm1, and an IPv6-only link.
         let links = [
             served(
                 "lan",
@@ -1578,21 +1578,21 @@ mod tests {
                     _ => {}
                 }
             }
-            if ptr_target.as_deref() == Some("cvc-host-deadbeef._sovd._tcp.local") {
+            if ptr_target.as_deref() == Some("hpc-host-deadbeef._sovd._tcp.local") {
                 assert_eq!(port, Some(4000), "SRV port");
                 assert_eq!(
                     host.as_deref(),
-                    Some("cvc-host-deadbeef.local"),
+                    Some("hpc-host-deadbeef.local"),
                     "SRV target"
                 );
                 assert_eq!(
                     ident.as_deref(),
-                    Some("cvc-host-deadbeef"),
+                    Some("hpc-host-deadbeef"),
                     "TXT identification"
                 );
                 assert_eq!(
                     url.as_deref(),
-                    Some("https://cvc-host-deadbeef.local:4000/v1"),
+                    Some("https://hpc-host-deadbeef.local:4000/v1"),
                     "TXT accessurl"
                 );
                 assert!(a_addr.is_some(), "A record present");

@@ -12,7 +12,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let instance = args
         .next()
-        .unwrap_or_else(|| "cvc-host-deadbeef".to_string());
+        .unwrap_or_else(|| "hpc-host-deadbeef".to_string());
     let port: u16 = args.next().and_then(|s| s.parse().ok()).unwrap_or(4000);
     let secs: u64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(30);
 

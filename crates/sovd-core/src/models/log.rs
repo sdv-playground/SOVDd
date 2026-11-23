@@ -44,7 +44,7 @@ pub struct LogEntry {
     /// Monotonic runtime at which this entry was logged — seconds since the
     /// producer's boot (CLOCK_MONOTONIC on the host slog2 path,
     /// `__MONOTONIC_TIMESTAMP` on guest journald). Unlike `timestamp` (wall clock,
-    /// unreliable on the CVC — boots at epoch, jumps when NTP sets it), this is
+    /// unreliable on the ECU — boots at epoch, jumps when NTP sets it), this is
     /// jump-proof and is the axis the `x-log-runtime` window filters on. `None`
     /// when the source doesn't carry a monotonic clock.
     #[serde(skip_serializing_if = "Option::is_none", rename = "x-log-uptime-secs")]
@@ -209,7 +209,7 @@ pub struct LogFilter {
     /// RUNTIME window in seconds — keep only entries within the last N seconds of
     /// the producer's runtime (monotonic uptime), measured back from the newest
     /// record (the "tip"). Unlike `since`/`until` (absolute wall-clock times, which
-    /// the CVC's unreliable clock makes useless — especially offboard, where the
+    /// the ECU's unreliable clock makes useless — especially offboard, where the
     /// server clock is the workstation's), this is jump-proof and resolved by the
     /// BACKEND against each source's tip uptime (the only party that knows it), not
     /// by wall-clock in the API layer. Wire name `x-log-runtime` (a duration like

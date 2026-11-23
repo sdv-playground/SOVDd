@@ -21,7 +21,7 @@ tracing = { workspace = true }
 # Linux. `simple-dns` is a pure-Rust DNS wire codec (no mio / if-addrs /
 # socket-pktinfo / build-script C); `socket2` 0.6 is the thin libc UDP-socket
 # wrapper (kept direct, distinct from this workspace's 0.5 used by the DoIP
-# transport — the responder doesn't share it; supernova's QNX cross-build patches
+# transport — the responder doesn't share it; the node manager's QNX cross-build patches
 # the 0.6). Both cross-compile cleanly to aarch64-unknown-nto-qnx710 — verify with
 # `cargo tree -p sovd-mdns --target aarch64-unknown-nto-qnx710`.
 simple-dns = "0.11"

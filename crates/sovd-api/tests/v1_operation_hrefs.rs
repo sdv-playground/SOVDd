@@ -139,7 +139,7 @@ async fn server(node: bool) -> TestServer {
     let mut state = legacy_href_state();
     if node {
         state = state
-            .with_node(NodeTopology::new("cvc", "CVC"))
+            .with_node(NodeTopology::new("hpc", "HPC"))
             .expect("valid node");
     }
     TestServer::start(with_node_topology(create_router(state.clone()), &state))
@@ -224,7 +224,7 @@ async fn v1_operations_render_no_legacy_href() {
 #[tokio::test]
 async fn v1_operations_render_no_legacy_href_with_a_node() {
     let server = server(true).await;
-    check_operations_under(&server, "/v1/components/cvc/subcomponents/ecu").await;
+    check_operations_under(&server, "/v1/components/hpc/subcomponents/ecu").await;
     // The flat form is not served on a node server.
     let (status, _) = get(&server, "/v1/components/ecu/operations", None).await;
     assert_eq!(status, 404);

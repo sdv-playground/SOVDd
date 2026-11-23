@@ -746,14 +746,14 @@ timeouts:
         let node = FlashConfig::builder("http://localhost:8080")
             .gateway_id("uds_gw")
             .component_id("engine_ecu")
-            .paths(Paths::v1(Some("cvc".into())))
+            .paths(Paths::v1(Some("hpc".into())))
             .build();
         assert_eq!(
             node.updates_collection_path(),
-            "/v1/components/cvc/subcomponents/uds_gw/apps/engine_ecu/updates"
+            "/v1/components/hpc/subcomponents/uds_gw/apps/engine_ecu/updates"
         );
         let back = FlashConfig::from_yaml(&node.to_yaml().unwrap()).unwrap();
-        assert_eq!(back.paths, Paths::v1(Some("cvc".into())));
+        assert_eq!(back.paths, Paths::v1(Some("hpc".into())));
 
         let flat = FlashConfig::from_yaml(
             "connection:\n  base_url: http://x\ncomponent_id: vm1\npaths:\n  dialect: v1\n",

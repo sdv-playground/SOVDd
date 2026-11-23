@@ -112,7 +112,7 @@ pub struct LogFilterQuery {
     /// Vendor extension: RUNTIME window — keep only entries within the last
     /// `<N>{s,m,h,d}` of the producer's MONOTONIC runtime, measured back from the
     /// newest record. The jump-proof alternative to `since`/`until` (which use the
-    /// CVC's unreliable wall clock). Resolved in the backend against the source's
+    /// ECU's unreliable wall clock). Resolved in the backend against the source's
     /// tip uptime, NOT here against wall-clock. Wire name `x-log-runtime`
     /// (e.g. `x-log-runtime=3h`).
     #[serde(rename = "x-log-runtime")]
