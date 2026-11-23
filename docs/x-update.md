@@ -27,8 +27,9 @@ that list from its executor, so a client that lost its state finds its updates b
 server or executor restart; SOVDd does, merging the updates its executor holds into the ones it
 has registered. An update only the executor holds is described (`GET {entity}/updates/{id}`, with
 the id as its name and the size of its held parts), reports its status (the held state, per the
-table under "Status member") and lists its held parts; a verdict, `prepare` or `execute` on it
-answers 404 until it is adopted (see "Not in this version").
+table under "Status member") and lists its held parts. A verdict on it adopts it when the executor
+holds it EXECUTING or EXECUTED (see "Verdict after a restart"); `prepare` and `execute` on it
+answer 404, as does a verdict on one held in another state.
 
 ## Bulk data
 
@@ -156,6 +157,19 @@ the component's capabilities tells a client so before it sends a verdict.
 
 Served by this crate, which forwards the verdict to the update's executor and reports what it
 answers.
+
+### Verdict after a restart
+
+A restart of the node (a power cycle, or the tester's own `PUT {entity}/status/restart`) drops the
+server's registry, while the executor keeps the update it staged: EXECUTING until it sees the
+reset, EXECUTED while its trial runs. A verdict (`x-update-commit`, `x-update-rollback`, on the
+component's or the node-level collection) on an update the server no longer has registered, and
+that the executor holds EXECUTING or EXECUTED, adopts it: the server registers it again as the
+orchestrated execute leaves it, awaiting its verdict, and the verdict is then accepted, refused
+and applied as on any other update (a commit still requires EXECUTED). Without it the verdict
+answered 404, and the update was left in a trial no verdict can settle, which an orchestrated
+execute is there to rule out. An update the executor holds in another state, or does not hold,
+is not adopted; an update registered with the server is never adopted again.
 
 ### Per node (operations)
 
@@ -305,5 +319,6 @@ restart and the verdict.
 
 - Executors that need a verdict refusing `automated` with 409 under `/vehicle/v1`.
 - Retiring the x-ota names.
-- Adopting a re-registration the executor still holds.
+- Adopting a re-registration the executor still holds (a verdict adopts; see "Verdict after a
+  restart").
 - Executor-side recording of the update id (which the listing needs).
