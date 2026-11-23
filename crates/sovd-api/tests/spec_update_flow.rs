@@ -430,6 +430,7 @@ async fn spawn_with_watchdog_and_state(
     );
     let state = AppState::new(backends).with_updates_config(UpdatesConfig {
         orchestrated_watchdog: watchdog,
+        executed_poll: Duration::from_millis(10),
     });
     let router = create_router(state.clone());
     let server = TestServer::start(router).await.expect("test server");
@@ -874,13 +875,28 @@ async fn opposing_verdicts_cannot_both_be_accepted() {
 }
 
 #[tokio::test]
-async fn orchestrated_banked_watchdog_auto_rollback() {
+async fn orchestrated_banked_watchdog_counts_from_executed_and_rolls_back() {
     // Short watchdog so the test doesn't wait the default 10 minutes.
     let (server, backend) = spawn_with_watchdog("banked", Duration::from_millis(250)).await;
     let id = open_update(&server).await;
     upload_part(&server, &id, "manifest", b"banked").await;
     upload_part(&server, &id, "#kernel", b"\xCAfake").await;
     prepare_and_orchestrated_execute(&server, &id).await;
+    wait_for_substate(&server, &id, "awaiting-verdict").await;
+
+    // EXECUTING, awaiting its reset: no clock runs, however long that takes.
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    let body = get_status(&server, &id).await;
+    assert_eq!(body["x-ota-substate"], "awaiting-verdict");
+    assert_eq!(body["x-update"]["state"], "EXECUTING");
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::AwaitingReboot);
+
+    // The reset came: EXECUTED, and the watchdog's clock starts.
+    *backend.flash_state.lock() = CoreFlashState::Activated;
+    assert_eq!(
+        get_status(&server, &id).await["x-update"]["state"],
+        "EXECUTED"
+    );
 
     // Don't post a verdict — watchdog should fire and roll back.
     let final_body = poll_terminal(&server, &id).await;
@@ -900,6 +916,9 @@ async fn watchdog_claims_verdict_before_backend_rollback() {
     let id = open_update(&server).await;
     upload_part(&server, &id, "manifest", b"banked").await;
     prepare_and_orchestrated_execute(&server, &id).await;
+    // EXECUTED: the watchdog's clock starts.
+    wait_for_substate(&server, &id, "awaiting-verdict").await;
+    *backend.flash_state.lock() = CoreFlashState::Activated;
 
     backend.rollback_flash_gate.entered.notified().await;
     {

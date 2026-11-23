@@ -286,21 +286,27 @@ impl Status {
 }
 
 /// Per-server tuning for the `/updates` collection.  The orchestrated
-/// watchdog gates how long the execute task will pause at
+/// watchdog gates how long an EXECUTED update waits at
 /// `substate=awaiting-verdict` before auto-rolling-back; the default
 /// matches the upper bound a real OEM workshop tester typically needs
 /// to complete a multi-ECU health check.
 #[derive(Clone, Debug)]
 pub struct UpdatesConfig {
-    /// Time the execute task will wait for an `x-ota-commit` or
-    /// `x-ota-rollback` verdict before timing out.
+    /// Time an EXECUTED update waits for an `x-ota-commit` or
+    /// `x-ota-rollback` verdict before timing out. The clock starts when the
+    /// backend reports the update activated (EXECUTED), not at execute: an
+    /// EXECUTING update waits for its reset however long that takes.
     pub orchestrated_watchdog: std::time::Duration,
+    /// How often the execute task reads the backend's activation state to
+    /// see the update EXECUTED and start the watchdog's clock.
+    pub executed_poll: std::time::Duration,
 }
 
 impl Default for UpdatesConfig {
     fn default() -> Self {
         Self {
             orchestrated_watchdog: std::time::Duration::from_secs(600),
+            executed_poll: std::time::Duration::from_secs(1),
         }
     }
 }

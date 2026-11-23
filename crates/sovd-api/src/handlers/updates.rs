@@ -1321,9 +1321,24 @@ async fn put_execute_inner(
         });
 
         // Phase B watchdog: default 10 min, configurable via
-        // AppState::updates_config.  On expiry the verdict is forced
-        // to Rollback so the device doesn't stay stuck in trial.
+        // AppState::updates_config.  Its clock starts once the update is
+        // EXECUTED (the backend reports it activated, after the reset it
+        // awaited): while it is EXECUTING it waits for that reset, which on
+        // the road is a power cycle that comes when it comes.  On expiry the
+        // verdict is forced to Rollback so the device doesn't stay stuck in
+        // its trial.
         let watchdog = task_state.updates_config.orchestrated_watchdog;
+        let executed_poll = task_state.updates_config.executed_poll;
+        let watched = backend.clone();
+        let expired = async move {
+            while !matches!(
+                watched.get_activation_state().await.map(|a| a.state),
+                Ok(sovd_core::FlashState::Activated)
+            ) {
+                tokio::time::sleep(executed_poll).await;
+            }
+            tokio::time::sleep(watchdog).await;
+        };
         let verdict = tokio::select! {
             res = verdict_rx.changed() => {
                 if res.is_err() {
@@ -1333,7 +1348,7 @@ async fn put_execute_inner(
                     *verdict_rx.borrow()
                 }
             }
-            _ = tokio::time::sleep(watchdog) => {
+            _ = expired => {
                 let claimed = {
                     let mut store = task_state.updates.0.lock();
                     match store

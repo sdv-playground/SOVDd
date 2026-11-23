@@ -118,9 +118,11 @@ An unknown update answers 404 first; then the state checks answer as before (409
 request serves every update shape: a single-shot update takes it and commits on its own as before.
 The capability description (`GET /v1/docs`) lists execute without parameters.
 
-A banked update then awaits its verdict for at most the server's verdict watchdog
-(`UpdatesConfig::orchestrated_watchdog`, 10 minutes unless the embedding server sets it): when it
-expires the server rolls the update back as `x-update-rollback` would, and it ends ROLLED_BACK. A
+A banked update then awaits its verdict. While it is EXECUTING it awaits its reset, and no clock
+runs: on the road the reset is a power cycle that comes when it comes. Once it is EXECUTED, it
+awaits its verdict for at most the server's verdict watchdog (`UpdatesConfig::orchestrated_watchdog`,
+10 minutes unless the embedding server sets it, counted from EXECUTED): when it expires the server
+rolls the update back as `x-update-rollback` would, and it ends ROLLED_BACK. A
 `DELETE` before the verdict rolls it back the same way. A restart of the server ends the wait
 without a verdict: the update is no longer registered, and what becomes of it is the executor's
 (issue #30).
