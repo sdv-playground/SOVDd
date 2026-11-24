@@ -95,8 +95,8 @@ async fn both_bases_serve_identical_bodies() {
 }
 
 /// Both bases serve the same value: `/v1` as an ISO 17978-3 `ReadValue`
-/// (`{"id", "data"}`), the frozen `/vehicle/v1` as its `DidResponse`, whose
-/// `timestamp` the data handler stamps with the read time.
+/// (`{"id", "data"}`), the frozen `/vehicle/v1` as its complete `DidResponse`,
+/// whose `timestamp` the data handler stamps with the read time.
 #[tokio::test]
 async fn both_bases_serve_the_same_data_resource() {
     let server = open_server().await;
@@ -106,10 +106,16 @@ async fn both_bases_serve_the_same_data_resource() {
 
     let (status, body) = get(&server, "/vehicle/v1/components/ecu_a/data/rpm", None).await;
     assert_eq!(status, 200);
-    let body = json(&body);
+    let mut body = json(&body);
     assert!(body["timestamp"].is_string(), "{body}");
-    assert_eq!(body["id"], "rpm", "{body}");
-    assert_eq!(body["value"], 850, "{body}");
+    body.as_object_mut().unwrap().remove("timestamp");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "id": "rpm", "did": "", "value": 850, "unit": "rpm",
+            "raw": "", "length": 0, "converted": false,
+        })
+    );
 }
 
 // ---------------------------------------------------------------------------
