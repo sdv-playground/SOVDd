@@ -7,6 +7,7 @@
 //! Definitions can be loaded from YAML files or registered dynamically.
 
 use axum::extract::{Path, Query, RawQuery, State};
+use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -122,6 +123,29 @@ pub struct DidResponse {
     pub converted: bool,
     /// Server-side read time, RFC 3339 (ISO 17978-3 C-050).
     pub timestamp: String,
+}
+
+/// ISO 17978-3 `ReadValue` (§7.9.3): the body of a data read under `/v1`, the
+/// read value under `data`.
+#[derive(Serialize)]
+pub struct ReadValue {
+    /// The data resource's id.
+    pub id: String,
+    /// The value read: what the legacy tree's [`DidResponse`] carries as `value`.
+    pub data: serde_json::Value,
+}
+
+/// The body of a data read on `tree`: under `/v1` the [`ReadValue`] of `read`,
+/// under the frozen `/vehicle/v1` the [`DidResponse`] itself, as before.
+pub(crate) fn data_read_body(tree: Tree, read: DidResponse) -> Response {
+    match tree {
+        Tree::V1 => Json(ReadValue {
+            id: read.id,
+            data: read.value,
+        })
+        .into_response(),
+        Tree::Legacy => Json(read).into_response(),
+    }
 }
 
 /// Request for a DID write — spec `{value}` body (ISO 17978-2 ≈line 489:
@@ -343,14 +367,16 @@ fn param_info_to_did_info(
 }
 
 /// GET /vehicle/v1/components/:component_id/data/:did
-/// Read a DID value (applies conversion if registered)
+/// Read a DID value (applies conversion if registered): a [`ReadValue`] under
+/// `/v1`, a [`DidResponse`] under `/vehicle/v1` (see [`data_read_body`]).
 pub async fn read_parameter(
     State(state): State<AppState>,
     Extension(tree): Extension<Tree>,
     Path((component_id, did)): Path<(String, String)>,
     Query(query): Query<ReadQuery>,
-) -> Result<Json<DidResponse>, ApiError> {
-    read_did_internal(&state, tree, &component_id, &did, query.raw).await
+) -> Result<Response, ApiError> {
+    let Json(read) = read_did_internal(&state, tree, &component_id, &did, query.raw).await?;
+    Ok(data_read_body(tree, read))
 }
 
 /// PUT /vehicle/v1/components/:component_id/data/:did — 204 No Content per spec.

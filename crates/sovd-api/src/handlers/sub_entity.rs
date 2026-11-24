@@ -311,12 +311,33 @@ pub async fn list_sub_entity_parameters(
     Ok(Json(DidListResponse { count, items }))
 }
 
-/// GET .../apps/:app_id/data/:param_id
+/// GET .../apps/:app_id/data/:param_id: a `ReadValue` under `/v1`, a
+/// `DidResponse` under `/vehicle/v1` (see `data::data_read_body`).
 pub async fn read_sub_entity_parameter(
     State(state): State<AppState>,
+    Extension(tree): Extension<Tree>,
     Path((component_id, app_id, param_id)): Path<(String, String, String)>,
     Query(query): Query<ReadQuery>,
+) -> Result<axum::response::Response, ApiError> {
+    let Json(read) =
+        read_sub_entity_did(&state, &component_id, &app_id, &param_id, query.raw).await?;
+    Ok(super::data::data_read_body(tree, read))
+}
+
+async fn read_sub_entity_did(
+    state: &AppState,
+    component_id: &str,
+    app_id: &str,
+    param_id: &str,
+    raw: bool,
 ) -> Result<Json<DidResponse>, ApiError> {
+    let (state, component_id, app_id, param_id) = (
+        state.clone(),
+        component_id.to_string(),
+        app_id.to_string(),
+        param_id.to_string(),
+    );
+    let query = ReadQuery { raw };
     let backend = resolve(&state, &component_id, &app_id).await?;
     let sub_entity_id = backend.entity_info().id.clone();
     let did_store = state.did_store();
