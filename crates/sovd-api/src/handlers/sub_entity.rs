@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::{Extension, Json};
@@ -25,7 +26,8 @@ use crate::state::AppState;
 use crate::Tree;
 
 // Re-use response types from sibling handler modules.
-use super::data::{DidInfoResponse, DidListResponse, DidResponse, ReadQuery};
+use super::configurations::SchemaQuery;
+use super::data::{Bounds, DidInfoResponse, DidListResponse, DidResponse, ReadQuery};
 use super::faults::{FaultFilterQuery, FaultInfoResponse, FaultsResponse};
 // F.D8b: handlers::files + handlers::flash deleted along with the
 // /flash and /files wires; the legacy sub-entity handlers below
@@ -318,10 +320,17 @@ pub async fn read_sub_entity_parameter(
     Extension(tree): Extension<Tree>,
     Path((component_id, app_id, param_id)): Path<(String, String, String)>,
     Query(query): Query<ReadQuery>,
+    schema: Result<Query<SchemaQuery>, QueryRejection>,
 ) -> Result<axum::response::Response, ApiError> {
-    let Json(read) =
+    let include_schema = super::data::include_schema(tree, schema)?;
+    let (read, bounds) =
         read_sub_entity_did(&state, &component_id, &app_id, &param_id, query.raw).await?;
-    Ok(super::data::data_read_body(tree, read))
+    Ok(super::data::data_read_body(
+        tree,
+        read,
+        bounds,
+        include_schema,
+    ))
 }
 
 async fn read_sub_entity_did(
@@ -330,7 +339,7 @@ async fn read_sub_entity_did(
     app_id: &str,
     param_id: &str,
     raw: bool,
-) -> Result<Json<DidResponse>, ApiError> {
+) -> Result<(DidResponse, Bounds), ApiError> {
     let (state, component_id, app_id, param_id) = (
         state.clone(),
         component_id.to_string(),
@@ -356,37 +365,53 @@ async fn read_sub_entity_did(
             let raw_bytes = backend.read_raw_did(did_u16).await?;
 
             if query.raw {
-                return Ok(Json(DidResponse {
-                    id: semantic_id,
-                    did: sovd_conv::format_did(did_u16),
-                    value: serde_json::json!(hex::encode(&raw_bytes)),
-                    unit: None,
-                    raw: hex::encode(&raw_bytes),
-                    length: raw_bytes.len(),
-                    converted: false,
-                    timestamp: Utc::now().to_rfc3339(),
-                }));
+                return Ok((
+                    DidResponse {
+                        id: semantic_id,
+                        did: sovd_conv::format_did(did_u16),
+                        value: serde_json::json!(hex::encode(&raw_bytes)),
+                        unit: None,
+                        raw: hex::encode(&raw_bytes),
+                        length: raw_bytes.len(),
+                        converted: false,
+                        timestamp: Utc::now().to_rfc3339(),
+                    },
+                    (None, None),
+                ));
             }
 
-            let (value, unit, converted) = if let Some(def) = component_def {
+            let (value, unit, converted, bounds) = if let Some(def) = component_def {
                 match did_store.decode(did_u16, &raw_bytes) {
-                    Ok(decoded) => (decoded, def.unit, true),
-                    Err(_) => (serde_json::json!(hex::encode(&raw_bytes)), None, false),
+                    Ok(decoded) => (decoded, def.unit, true, (def.min, def.max)),
+                    Err(_) => (
+                        serde_json::json!(hex::encode(&raw_bytes)),
+                        None,
+                        false,
+                        (None, None),
+                    ),
                 }
             } else {
-                (serde_json::json!(hex::encode(&raw_bytes)), None, false)
+                (
+                    serde_json::json!(hex::encode(&raw_bytes)),
+                    None,
+                    false,
+                    (None, None),
+                )
             };
 
-            return Ok(Json(DidResponse {
-                id: semantic_id,
-                did: sovd_conv::format_did(did_u16),
-                value,
-                unit,
-                raw: hex::encode(&raw_bytes),
-                length: raw_bytes.len(),
-                converted,
-                timestamp: Utc::now().to_rfc3339(),
-            }));
+            return Ok((
+                DidResponse {
+                    id: semantic_id,
+                    did: sovd_conv::format_did(did_u16),
+                    value,
+                    unit,
+                    raw: hex::encode(&raw_bytes),
+                    length: raw_bytes.len(),
+                    converted,
+                    timestamp: Utc::now().to_rfc3339(),
+                },
+                bounds,
+            ));
         }
     }
 
@@ -405,20 +430,23 @@ async fn read_sub_entity_did(
     let length = dv.length.unwrap_or(0);
     let has_raw = !raw.is_empty();
 
-    Ok(Json(DidResponse {
-        id: param_id,
-        did: dv.did.unwrap_or_default(),
-        value: if query.raw && has_raw {
-            serde_json::json!(raw)
-        } else {
-            dv.value
+    Ok((
+        DidResponse {
+            id: param_id,
+            did: dv.did.unwrap_or_default(),
+            value: if query.raw && has_raw {
+                serde_json::json!(raw)
+            } else {
+                dv.value
+            },
+            unit: if query.raw { None } else { dv.unit },
+            raw,
+            length,
+            converted: !query.raw && has_raw,
+            timestamp: Utc::now().to_rfc3339(),
         },
-        unit: if query.raw { None } else { dv.unit },
-        raw,
-        length,
-        converted: !query.raw && has_raw,
-        timestamp: Utc::now().to_rfc3339(),
-    }))
+        (None, None),
+    ))
 }
 
 /// PUT .../apps/:app_id/data/:param_id — 204 No Content per spec.

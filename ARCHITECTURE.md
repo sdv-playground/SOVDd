@@ -354,7 +354,7 @@ sequenceDiagram
         H->>B: read_data(param_id)
         B-->>H: DataValue
     end
-    H-->>C: DidResponse {id, value, unit, raw, …} or §11 error
+    H-->>C: ReadValue {id, data} (/v1) · DidResponse {id, value, unit, raw, …} (/vehicle/v1) · §11 error
 ```
 
 1. **Bind** (`crates/sovdd/src/main.rs`): `TcpListener::bind` + `axum::serve`, or rustls TLS when
@@ -366,8 +366,15 @@ sequenceDiagram
    semantic names); fall back to `backend.read_data` for proxy/app backends, else `backend.read_raw_did`.
 5. **Decode:** `did_store.decode(did, raw)` → physical value; non-ECU entities can synthesize from
    `entity_info()`.
-6. **Respond:** a `DidResponse` (id, value, unit, raw, length, converted, RFC-3339 timestamp), or an
-   error funneled through §11.
+6. **Respond** (`data::data_read_body`), per tree, or an error funneled through §11:
+   - `/v1`: an ISO 17978-3 `ReadValue` (Table 85): `id`, `data` (the value read), and with
+     `?include-schema=true` a `schema`, an OpenAPI Schema Object of the response whose `data`
+     carries the value's JSON type, the DID definition's `minimum`/`maximum` for a converted
+     number, and the unit as `x-sovd-unit` (`display_name`, Table 11). `errors` is never set.
+     The raw bytes are read with `?raw=true`: `data` is then their hex string.
+   - `/vehicle/v1` (frozen): a `DidResponse`: `id`, `did`, `value`, `unit` (when known), `raw`,
+     `length`, `converted`, `timestamp` (RFC 3339 read time); it ignores `include-schema`. `did`,
+     `raw`, `length`, `converted` and `timestamp` are members of the legacy tree only.
 
 ### 6.5 Vendor data parameters (`x-<ext>-…`)
 

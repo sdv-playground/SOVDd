@@ -6,6 +6,7 @@
 //! Conversions are managed via the DidStore from sovd-conv.
 //! Definitions can be loaded from YAML files or registered dynamically.
 
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{Path, Query, RawQuery, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
@@ -13,8 +14,9 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sovd_conv::format_did;
 use sovd_core::error::BackendError;
-use sovd_core::DataCategory;
+use sovd_core::{DataCategory, DataError};
 
+use super::configurations::SchemaQuery;
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::Tree;
@@ -133,19 +135,99 @@ pub struct ReadValue {
     pub id: String,
     /// The value read: what the legacy tree's [`DidResponse`] carries as `value`.
     pub data: serde_json::Value,
+    /// ISO 17978-3 Table 85 C1: only set when `data` represents an error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub errors: Option<Vec<DataError>>,
+    /// ISO 17978-3 Table 85 C2: only provided when `include-schema` is `true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<serde_json::Value>,
+}
+
+/// The `min` and `max` a DID definition gives a converted value; `(None, None)`
+/// for any other read.
+pub(crate) type Bounds = (Option<f64>, Option<f64>);
+
+/// `include-schema` of a data read on `tree` (ISO 17978-3 Table 83, default
+/// `false`). The frozen `/vehicle/v1` does not read the parameter, so its
+/// answer does not depend on it.
+pub(crate) fn include_schema(
+    tree: Tree,
+    query: Result<Query<SchemaQuery>, QueryRejection>,
+) -> Result<bool, ApiError> {
+    match tree {
+        Tree::V1 => query
+            .map(|Query(query)| query.include_schema)
+            .map_err(|rejection| ApiError::BadRequest(rejection.body_text())),
+        Tree::Legacy => Ok(false),
+    }
 }
 
 /// The body of a data read on `tree`: under `/v1` the [`ReadValue`] of `read`,
-/// under the frozen `/vehicle/v1` the [`DidResponse`] itself, as before.
-pub(crate) fn data_read_body(tree: Tree, read: DidResponse) -> Response {
+/// with its schema when `include_schema`; under the frozen `/vehicle/v1` the
+/// [`DidResponse`] itself, as before.
+pub(crate) fn data_read_body(
+    tree: Tree,
+    read: DidResponse,
+    bounds: Bounds,
+    include_schema: bool,
+) -> Response {
     match tree {
-        Tree::V1 => Json(ReadValue {
-            id: read.id,
-            data: read.value,
-        })
-        .into_response(),
+        Tree::V1 => {
+            let schema = include_schema
+                .then(|| read_value_schema(&read.value, read.unit.as_deref(), bounds));
+            Json(ReadValue {
+                id: read.id,
+                data: read.value,
+                errors: None,
+                schema,
+            })
+            .into_response()
+        }
         Tree::Legacy => Json(read).into_response(),
     }
+}
+
+/// The OpenAPI Schema Object of a [`ReadValue`] (ISO 17978-3 Table 85 `schema`,
+/// shaped as the example after Table 85): an object with `id` and `data`.
+/// `data` has the JSON type of the value read, `minimum`/`maximum` from
+/// `bounds` when the value is a number, and `x-sovd-unit` (ISO 17978-3
+/// Table 11, `display_name`) when the unit is known. An object or array value
+/// is described by its type only.
+fn read_value_schema(
+    data: &serde_json::Value,
+    unit: Option<&str>,
+    bounds: Bounds,
+) -> serde_json::Value {
+    use serde_json::{json, Value};
+    let kind = match data {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(n) if n.is_f64() => "number",
+        Value::Number(_) => "integer",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    };
+    let mut data_schema = json!({ "type": kind });
+    if data.is_number() {
+        let (min, max) = bounds;
+        if let Some(min) = min {
+            data_schema["minimum"] = json!(min);
+        }
+        if let Some(max) = max {
+            data_schema["maximum"] = json!(max);
+        }
+    }
+    if let Some(unit) = unit {
+        data_schema["x-sovd-unit"] = json!({ "display_name": unit });
+    }
+    json!({
+        "type": "object",
+        "properties": {
+            "id": { "type": "string" },
+            "data": data_schema,
+        }
+    })
 }
 
 /// Request for a DID write — spec `{value}` body (ISO 17978-2 ≈line 489:
@@ -374,9 +456,11 @@ pub async fn read_parameter(
     Extension(tree): Extension<Tree>,
     Path((component_id, did)): Path<(String, String)>,
     Query(query): Query<ReadQuery>,
+    schema: Result<Query<SchemaQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
-    let Json(read) = read_did_internal(&state, tree, &component_id, &did, query.raw).await?;
-    Ok(data_read_body(tree, read))
+    let include_schema = include_schema(tree, schema)?;
+    let (read, bounds) = read_did_internal(&state, tree, &component_id, &did, query.raw).await?;
+    Ok(data_read_body(tree, read, bounds, include_schema))
 }
 
 /// PUT /vehicle/v1/components/:component_id/data/:did — 204 No Content per spec.
@@ -399,7 +483,7 @@ async fn read_did_internal(
     component_id: &str,
     param_id: &str,
     raw_only: bool,
-) -> Result<Json<DidResponse>, ApiError> {
+) -> Result<(DidResponse, Bounds), ApiError> {
     let backend = state.get_backend(component_id)?;
     let did_store = state.did_store();
 
@@ -422,20 +506,23 @@ async fn read_did_internal(
                 let raw = dv.raw.clone().unwrap_or_default();
                 let length = dv.length.unwrap_or(0);
                 let has_raw = !raw.is_empty();
-                return Ok(Json(DidResponse {
-                    id: param_id.to_string(),
-                    did: dv.did.unwrap_or_default(),
-                    value: if raw_only && has_raw {
-                        serde_json::json!(raw)
-                    } else {
-                        dv.value
+                return Ok((
+                    DidResponse {
+                        id: param_id.to_string(),
+                        did: dv.did.unwrap_or_default(),
+                        value: if raw_only && has_raw {
+                            serde_json::json!(raw)
+                        } else {
+                            dv.value
+                        },
+                        unit: if raw_only { None } else { dv.unit },
+                        raw,
+                        length,
+                        converted: !raw_only && has_raw,
+                        timestamp: Utc::now().to_rfc3339(),
                     },
-                    unit: if raw_only { None } else { dv.unit },
-                    raw,
-                    length,
-                    converted: !raw_only && has_raw,
-                    timestamp: Utc::now().to_rfc3339(),
-                }));
+                    (None, None),
+                ));
             }
 
             return Err(ApiError::BadRequest(format!(
@@ -465,16 +552,19 @@ async fn read_did_internal(
             // Synthesize identification data from entity metadata
             if let Some(value) = synthesize_entity_did(did_u16, backend.entity_info()) {
                 let raw = hex::encode(value.as_bytes());
-                return Ok(Json(DidResponse {
-                    id: semantic_id,
-                    did: format_did(did_u16),
-                    value: serde_json::json!(value),
-                    unit: None,
-                    raw,
-                    length: value.len(),
-                    converted: true,
-                    timestamp: Utc::now().to_rfc3339(),
-                }));
+                return Ok((
+                    DidResponse {
+                        id: semantic_id,
+                        did: format_did(did_u16),
+                        value: serde_json::json!(value),
+                        unit: None,
+                        raw,
+                        length: value.len(),
+                        converted: true,
+                        timestamp: Utc::now().to_rfc3339(),
+                    },
+                    (None, None),
+                ));
             }
             let entity = tree.component(component_id);
             return Err(ApiError::NotFound(format!(
@@ -490,39 +580,55 @@ async fn read_did_internal(
 
     // If raw_only requested, skip conversion
     if raw_only {
-        return Ok(Json(DidResponse {
-            id: semantic_id,
-            did: format_did(did_u16),
-            value: serde_json::json!(hex::encode(&raw_bytes)),
-            unit: None,
-            raw: hex::encode(&raw_bytes),
-            length: raw_bytes.len(),
-            converted: false,
-            timestamp: Utc::now().to_rfc3339(),
-        }));
+        return Ok((
+            DidResponse {
+                id: semantic_id,
+                did: format_did(did_u16),
+                value: serde_json::json!(hex::encode(&raw_bytes)),
+                unit: None,
+                raw: hex::encode(&raw_bytes),
+                length: raw_bytes.len(),
+                converted: false,
+                timestamp: Utc::now().to_rfc3339(),
+            },
+            (None, None),
+        ));
     }
 
     // Try to decode using DidStore
-    let (value, unit, converted) = if let Some(def) = component_def {
+    let (value, unit, converted, bounds) = if let Some(def) = component_def {
         match did_store.decode(did_u16, &raw_bytes) {
-            Ok(decoded) => (decoded, def.unit, true),
-            Err(_) => (serde_json::json!(hex::encode(&raw_bytes)), None, false),
+            Ok(decoded) => (decoded, def.unit, true, (def.min, def.max)),
+            Err(_) => (
+                serde_json::json!(hex::encode(&raw_bytes)),
+                None,
+                false,
+                (None, None),
+            ),
         }
     } else {
         // No definition - return raw hex
-        (serde_json::json!(hex::encode(&raw_bytes)), None, false)
+        (
+            serde_json::json!(hex::encode(&raw_bytes)),
+            None,
+            false,
+            (None, None),
+        )
     };
 
-    Ok(Json(DidResponse {
-        id: semantic_id,
-        did: format_did(did_u16),
-        value,
-        unit,
-        raw: hex::encode(&raw_bytes),
-        length: raw_bytes.len(),
-        converted,
-        timestamp: Utc::now().to_rfc3339(),
-    }))
+    Ok((
+        DidResponse {
+            id: semantic_id,
+            did: format_did(did_u16),
+            value,
+            unit,
+            raw: hex::encode(&raw_bytes),
+            length: raw_bytes.len(),
+            converted,
+            timestamp: Utc::now().to_rfc3339(),
+        },
+        bounds,
+    ))
 }
 
 async fn write_did_internal(
