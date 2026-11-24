@@ -25,7 +25,9 @@ use crate::state::AppState;
 use crate::Tree;
 
 // Re-use response types from sibling handler modules.
-use super::data::{DidInfoResponse, DidListResponse, DidResponse, ReadQuery};
+use super::data::{
+    add_v1_items, value_read, DidInfoResponse, DidListResponse, DidResponse, ReadQuery,
+};
 use super::faults::{FaultFilterQuery, FaultInfoResponse, FaultsResponse};
 // F.D8b: handlers::files + handlers::flash deleted along with the
 // /flash and /files wires; the legacy sub-entity handlers below
@@ -275,6 +277,9 @@ pub async fn list_sub_entity_parameters(
                 }
             })
             .collect();
+        if tree == Tree::V1 {
+            add_v1_items(backend.as_ref(), tree, &component_id, &base, &mut items).await?;
+        }
         items.sort_by(|a, b| a.id.cmp(&b.id));
         let count = items.len();
         return Ok(Json(DidListResponse { count, items }));
@@ -282,14 +287,8 @@ pub async fn list_sub_entity_parameters(
 
     // Fall back to backend.list_parameters() (proxy backends that get params from upstream)
     let params = backend.list_parameters().await.map_err(ApiError::from)?;
-    // The backend's items the frozen `/vehicle/v1` does not list.
-    let v1_only = match tree {
-        Tree::V1 => Vec::new(),
-        Tree::Legacy => backend.v1_only_data(),
-    };
-    let items: Vec<DidInfoResponse> = params
+    let mut items: Vec<DidInfoResponse> = params
         .into_iter()
-        .filter(|p| !v1_only.contains(&p.id))
         .map(|p| {
             let did = p.did.unwrap_or_default();
             // §7.9 category from the backend, or DID-number default.
@@ -313,6 +312,9 @@ pub async fn list_sub_entity_parameters(
             }
         })
         .collect();
+    if tree == Tree::V1 {
+        add_v1_items(backend.as_ref(), tree, &component_id, &base, &mut items).await?;
+    }
     let count = items.len();
     Ok(Json(DidListResponse { count, items }))
 }
@@ -397,11 +399,11 @@ async fn read_sub_entity_did(
         }
     }
 
-    let unknown = || ApiError::NotFound(format!("Parameter not found: {}", param_id));
-    // The frozen `/vehicle/v1` answers an item the backend serves on `/v1`
-    // only as an item the backend does not know.
-    if tree == Tree::Legacy && backend.v1_only_data().contains(&param_id) {
-        return Err(unknown());
+    // On `/v1`, one of the backend's `/v1`-only items.
+    if tree == Tree::V1 {
+        if let Some(dv) = backend.read_v1_data(&param_id).await? {
+            return Ok(Json(value_read(&param_id, dv, query.raw)));
+        }
     }
 
     // Fall back to backend.read_data() (proxy backends resolve params via upstream)
@@ -410,7 +412,10 @@ async fn read_sub_entity_did(
         .await
         .map_err(ApiError::from)?;
 
-    let dv = values.into_iter().next().ok_or_else(unknown)?;
+    let dv = values
+        .into_iter()
+        .next()
+        .ok_or_else(|| ApiError::NotFound(format!("Parameter not found: {}", param_id)))?;
 
     let raw = dv.raw.clone().unwrap_or_default();
     let length = dv.length.unwrap_or(0);
