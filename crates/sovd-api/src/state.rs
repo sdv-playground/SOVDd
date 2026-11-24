@@ -285,26 +285,6 @@ impl Status {
     }
 }
 
-/// Per-server tuning for the `/updates` collection.  The orchestrated
-/// watchdog gates how long the execute task will pause at
-/// `substate=awaiting-verdict` before auto-rolling-back; the default
-/// matches the upper bound a real OEM workshop tester typically needs
-/// to complete a multi-ECU health check.
-#[derive(Clone, Debug)]
-pub struct UpdatesConfig {
-    /// Time the execute task will wait for an `x-ota-commit` or
-    /// `x-ota-rollback` verdict before timing out.
-    pub orchestrated_watchdog: std::time::Duration,
-}
-
-impl Default for UpdatesConfig {
-    fn default() -> Self {
-        Self {
-            orchestrated_watchdog: std::time::Duration::from_secs(600),
-        }
-    }
-}
-
 /// Capability-description content contributed by the embedding server, merged
 /// into the ISO 17978-3 §7.5 document (`GET /vehicle/v1/docs` and the
 /// entity-scoped `{entity}/docs`). Neutral: SOVDd attaches no meaning to the
@@ -379,8 +359,6 @@ pub struct AppState {
     pub clear_data_status: ClearDataStatusStore,
     /// Per-update part tracking for the `/updates` collection.
     pub updates: UpdatesStore,
-    /// Tunable knobs for the `/updates` lifecycle.
-    pub updates_config: Arc<UpdatesConfig>,
     /// Client→SOVDd authentication context (JWT-bearer slice). Defaults to
     /// disabled (open surface); set via [`AppState::with_auth`].
     auth: Arc<dyn Authorizer>,
@@ -406,7 +384,6 @@ impl AppState {
             log_config: LogConfigStore::default(),
             clear_data_status: ClearDataStatusStore::default(),
             updates: UpdatesStore::default(),
-            updates_config: Arc::new(UpdatesConfig::default()),
             auth: Arc::new(AuthContext::default()),
             capability_extensions: Arc::new(CapabilityExtensions::default()),
             node: None,
@@ -427,7 +404,6 @@ impl AppState {
             log_config: LogConfigStore::default(),
             clear_data_status: ClearDataStatusStore::default(),
             updates: UpdatesStore::default(),
-            updates_config: Arc::new(UpdatesConfig::default()),
             auth: Arc::new(AuthContext::default()),
             capability_extensions: Arc::new(CapabilityExtensions::default()),
             node: None,
@@ -449,18 +425,10 @@ impl AppState {
             log_config: LogConfigStore::default(),
             clear_data_status: ClearDataStatusStore::default(),
             updates: UpdatesStore::default(),
-            updates_config: Arc::new(UpdatesConfig::default()),
             auth: Arc::new(AuthContext::default()),
             capability_extensions: Arc::new(CapabilityExtensions::default()),
             node: None,
         }
-    }
-
-    /// Override the `/updates` collection's tuning knobs (watchdog,
-    /// future limits).  Builder-style consume + return.
-    pub fn with_updates_config(mut self, config: UpdatesConfig) -> Self {
-        self.updates_config = Arc::new(config);
-        self
     }
 
     /// Attach the client-authentication context (JWT-bearer slice).

@@ -16,7 +16,7 @@ use parking_lot::Mutex;
 use serde_json::Value;
 use sovd_api::{
     create_router,
-    state::{Status as UpdateStatus, UpdateKey, UpdateState, UpdatesConfig},
+    state::{Status as UpdateStatus, UpdateKey, UpdateState},
     AppState,
 };
 use sovd_client::testing::TestServer;
@@ -70,7 +70,6 @@ struct MockBackend {
     verify_part_gate: AsyncGate,
     flash_status_gate: AsyncGate,
     activation_query_gate: AsyncGate,
-    rollback_flash_gate: AsyncGate,
     abort_flash_gate: AsyncGate,
     /// Hook calls in arrival order: `note:<id>`, `start_flash`, `part:<id>`,
     /// and the execute-phase calls (`finalize_flash`, `validate`, `activate`,
@@ -127,7 +126,6 @@ impl MockBackend {
             verify_part_gate: AsyncGate::default(),
             flash_status_gate: AsyncGate::default(),
             activation_query_gate: AsyncGate::default(),
-            rollback_flash_gate: AsyncGate::default(),
             abort_flash_gate: AsyncGate::default(),
             hook_log: Mutex::new(Vec::new()),
             note_update_id_mode: AtomicU64::new(0),
@@ -384,7 +382,6 @@ impl DiagnosticBackend for MockBackend {
     }
 
     async fn rollback_flash(&self) -> BackendResult<()> {
-        self.rollback_flash_gate.wait_if_enabled().await;
         *self.flash_state.lock() = CoreFlashState::RolledBack;
         Ok(())
     }
@@ -407,33 +404,8 @@ impl DiagnosticBackend for MockBackend {
 // ---------------------------------------------------------------------------
 
 async fn spawn_with(shape: &'static str) -> (TestServer, Arc<MockBackend>) {
-    spawn_with_watchdog(shape, Duration::from_secs(600)).await
-}
-
-async fn spawn_with_watchdog(
-    shape: &'static str,
-    watchdog: Duration,
-) -> (TestServer, Arc<MockBackend>) {
-    let (server, backend, _) = spawn_with_watchdog_and_state(shape, watchdog).await;
+    let (server, backend, _) = spawn_with_state(shape).await;
     (server, backend)
-}
-
-async fn spawn_with_watchdog_and_state(
-    shape: &'static str,
-    watchdog: Duration,
-) -> (TestServer, Arc<MockBackend>, AppState) {
-    let backend = Arc::new(MockBackend::new("dev1", shape));
-    let mut backends = HashMap::new();
-    backends.insert(
-        "dev1".to_string(),
-        backend.clone() as Arc<dyn DiagnosticBackend>,
-    );
-    let state = AppState::new(backends).with_updates_config(UpdatesConfig {
-        orchestrated_watchdog: watchdog,
-    });
-    let router = create_router(state.clone());
-    let server = TestServer::start(router).await.expect("test server");
-    (server, backend, state)
 }
 
 async fn spawn_with_state(shape: &'static str) -> (TestServer, Arc<MockBackend>, AppState) {
@@ -874,59 +846,31 @@ async fn opposing_verdicts_cannot_both_be_accepted() {
 }
 
 #[tokio::test]
-async fn orchestrated_banked_watchdog_auto_rollback() {
-    // Short watchdog so the test doesn't wait the default 10 minutes.
-    let (server, backend) = spawn_with_watchdog("banked", Duration::from_millis(250)).await;
+async fn orchestrated_banked_waits_for_verdict_without_time_limit() {
+    let (server, backend) = spawn_with("banked").await;
     let id = open_update(&server).await;
     upload_part(&server, &id, "manifest", b"banked").await;
     upload_part(&server, &id, "#kernel", b"\xCAfake").await;
     prepare_and_orchestrated_execute(&server, &id).await;
+    wait_for_substate(&server, &id, "awaiting-verdict").await;
 
-    // Don't post a verdict — watchdog should fire and roll back.
+    // No verdict posted: the update keeps waiting and nothing rolls back.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let body = get_status(&server, &id).await;
+    assert_eq!(body["status"], "inProgress");
+    assert_eq!(body["x-ota-substate"], "awaiting-verdict");
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::AwaitingReboot);
+
+    *backend.flash_state.lock() = CoreFlashState::Activated;
+    let resp = put(
+        &server,
+        &format!("/vehicle/v1/components/dev1/updates/{id}/x-ota-commit"),
+    )
+    .await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
     let final_body = poll_terminal(&server, &id).await;
-    assert_eq!(final_body["status"], "failed");
-    assert_eq!(final_body["error"]["error_code"], "x-ota-verdict-rollback");
-    assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
-}
-
-#[tokio::test]
-async fn watchdog_claims_verdict_before_backend_rollback() {
-    let (server, backend, state) =
-        spawn_with_watchdog_and_state("banked", Duration::from_millis(50)).await;
-    backend
-        .rollback_flash_gate
-        .enabled
-        .store(true, Ordering::SeqCst);
-    let id = open_update(&server).await;
-    upload_part(&server, &id, "manifest", b"banked").await;
-    prepare_and_orchestrated_execute(&server, &id).await;
-
-    backend.rollback_flash_gate.entered.notified().await;
-    {
-        let store = state.updates.0.lock();
-        let entry = store
-            .get(&UpdateKey::new("dev1", &id))
-            .expect("update entry");
-        assert_eq!(entry.substate, Some("rolling-back"));
-        assert!(entry.verdict_tx.is_none());
-    }
-
-    for verdict in ["commit", "rollback"] {
-        let resp = put(
-            &server,
-            &format!("/vehicle/v1/components/dev1/updates/{id}/x-ota-{verdict}"),
-        )
-        .await;
-        assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
-    }
-
-    backend
-        .rollback_flash_gate
-        .enabled
-        .store(false, Ordering::SeqCst);
-    backend.rollback_flash_gate.release.notify_one();
-    assert_eq!(poll_terminal(&server, &id).await["status"], "failed");
-    assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
+    assert_eq!(final_body["status"], "completed");
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::Committed);
 }
 
 #[tokio::test]
