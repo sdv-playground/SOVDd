@@ -130,7 +130,7 @@ Method groups (see `backend.rs` for the full list):
 | Group | Methods (representative) |
 |---|---|
 | Entity | `entity_info`, `capabilities` |
-| Data | `list_parameters`, `read_data`, `write_data`, `read_raw_did`, `write_raw_did`, `define_data_identifier`, `clear_data_identifier`, `subscribe_data` (→ `broadcast::Receiver<DataPoint>`), `ecu_reset` |
+| Data | `list_parameters`, `read_data`, `v1_only_data`, `write_data`, `read_raw_did`, `write_raw_did`, `define_data_identifier`, `clear_data_identifier`, `subscribe_data` (→ `broadcast::Receiver<DataPoint>`), `ecu_reset` |
 | Faults | `get_faults`, `get_fault_detail`, `clear_faults` |
 | Logs | `get_logs`, `get_log`, `get_log_content`, `delete_log`, `stream_logs` |
 | Configurations | `list_configurations`, `read_configuration`, `write_configuration`, `read_bulk_configuration`, `write_bulk_configuration`, `reset_configuration`, `reset_all_configurations` (§7.12 — a configuration is always read/written as a whole) |
@@ -389,6 +389,12 @@ rollback support) readable before any flash. Each parameter additionally carries
 `category` (Table 70: identData/currentData/storedData/sysInfo), letting clients filter
 `GET /data?categories=identData` for "what is installed".
 
+A backend serves an item on the `/v1` tree only by naming its id in `v1_only_data` (default: none).
+`/v1` lists and reads it like any other item; the frozen `/vehicle/v1` leaves it out of the
+component's and a sub-entity's `/data` listing (`count` follows) and answers a read of it exactly as
+it answers an id the backend does not know, without calling `read_data`. The legacy tree is
+otherwise unaffected, and a backend that names none serves every item on both trees, as before.
+
 ---
 
 ## 7. Multi-component, gateways & sub-entities
@@ -426,8 +432,8 @@ Opt-in: a server without a node serves `/v1` flat, as before.
 | `/v1/components/{node}` | the node's document: `id`, `name`, `type`, `x-identification` (when set), links to `status`, `updates` (when a backend supports update, as on the root document), `operations`, `data` and `subcomponents` |
 | `/v1/components/{node}/subcomponents` | the backends with node-form hrefs, scope-filtered |
 | `/v1/components/{node}/subcomponents/{id}/...` | backend `id`'s entity API: everything a node-less `/v1/components/{id}/...` serves, embedder routes included |
-| `/v1/components/{node}/status[/...]`, `.../updates[/...]`, `.../operations[/...]`, `.../data[/...]` | the node-level resources: whatever serves the root form (`/v1/updates/...`, an embedder's `/v1/status`, `/v1/status/restart` or `/v1/status/x-boot-id`, node verdict operations or node-level data items such as `/v1/data/x-update-state`, ...), query kept |
-| `GET /v1/components/{node}/data`, `GET .../operations` | the node-level collections: an embedder's `GET /v1/data` / `GET /v1/operations` route when it has one, else SOVDd's listing of the items the embedder contributes to the capability description (below); `{"items": []}` when there are none |
+| `/v1/components/{node}/status[/...]`, `.../updates[/...]`, `.../operations[/...]`, `.../data[/...]` | the node-level resources: whatever serves the root form (`/v1/updates/...`, an embedder's `/v1/status`, `/v1/status/restart` or `/v1/status/x-boot-id`, node verdict operations, node-level data items such as `/v1/data/x-update-state` from an embedder route or SOVDd's node-level data provider (below), ...), query kept |
+| `GET /v1/components/{node}/data`, `GET .../operations` | the node-level collections: an embedder's `GET /v1/data` / `GET /v1/operations` route when it has one, else SOVDd's listing of the items the embedder contributes to the capability description and, for `data`, of its node-level data provider (below); `{"items": []}` when there are none |
 | any other `/v1/components/{node}/...` | 404 (`GenericError`) |
 | `/v1/components/{id}/...` of any other id (the flat form) | 404 `incomplete-request`, naming the node form: `No resource at /v1/components/vm1/data: on /v1 this server is node 'hpc', whose path for it is /v1/components/hpc/subcomponents/vm1/data` |
 | root forms `/v1/status[/...]`, `/v1/updates[/...]`, `/v1/operations[/...]`, `/v1/data[/...]` | 404 alike, naming the node form |
@@ -475,9 +481,32 @@ one of `.../operations`: `{ "id", "name", "href" }`, `name` the path's `summary`
 embedder makes an item appear by contributing its row, as it does for `/docs`; an item it serves
 but does not describe is not listed. SOVDd registers no route for the collections: the rewritten
 `GET /v1/data` / `GET /v1/operations` reaches the router's fallback when no embedder route serves
-it, and the fallback answers the listing (on a node server only; a node-less server's `/v1/data` stays
-404). So an embedder route for the root collection, merged in like any other, wins without a
-conflict.
+it, and the fallback answers the listing (on a node server, and for `data` on a server with a
+node-level data provider; otherwise a node-less server's `/v1/data` stays 404). So an embedder
+route for the root collection, merged in like any other, wins without a conflict.
+
+**Node-level data provider.** An embedder serves its node-level data items either on routes of its
+own (as above) or through SOVDd: it implements `sovd_core::NodeData` (`list_data`, `read_data(id)`)
+and sets it with `AppState::with_node_data(..)`. SOVDd then serves, on `/v1` only and only with a
+provider set:
+
+- `GET /v1/data/{data_id}`: the item as an ISO 17978-3 `ReadValue` (Tables 82–85), built as a
+  component's read is (§6.4): `{"id", "data"}`, a `schema` with `?include-schema=true` (the unit
+  from the item's `DataValue.unit`), and with `?raw=true` the item's raw bytes as hex when it has
+  any. An id the provider does not serve (`BackendError::ParameterNotFound`) is 404, any other
+  failure its mapped error (§11), never a value.
+- `GET /v1/data`: the provider's items (`{ "id", "name", "href" }`, `name` the provider's) merged
+  into the listing above; an id that is both a provider item and a contributed row is listed once,
+  as the provider's, the source of its read.
+
+On a node server both are reached in the node form (`/v1/components/{node}/data[/{data_id}]`) through
+the rewrite, the root forms answering 404 as every root form does. The read is a route, so an
+embedder's literal `/v1/data/{item}` route merged beside it still wins for its own item; the listing
+stays the fallback's. Both are scope-checked as the node's collections are (on a node-less server: a
+client that may access any component), and their capability is that of a component's data read
+(`DataRead`). `/v1/docs` lists `GET /v1/data` and `GET /v1/data/{data_id}` (node form on a node
+server) only with a provider set. `/vehicle/v1/data...` is not affected by a provider: it answers
+as without one.
 
 A contributed row is listed on both trees: a path under either base is rebased onto the tree
 documented, and a path under neither is copied into both. A route the embedder serves on `/v1` only
@@ -538,8 +567,9 @@ no trial: `… → Activated → commit_flash() → Complete`.
   backend's `ActivationState`, not stored separately; `reset_kind` maps `None`/`Local`/
   `RequiresEcuReset` to `none`/`component`/`node`. `PUT …/x-update-commit`/`-rollback` reuse the x-ota
   verdict plumbing (the same `watch` channel and precondition checks as `x-ota-commit`/
-  `x-ota-rollback`). The node-level verdict operations and `data/x-update-state` are served by the
-  embedding machine manager, not by this crate. `GET /updates`, the detail, `status` and
+  `x-ota-rollback`). The node-level verdict operations are served by the embedding machine
+  manager, not by this crate; a node-level data item such as `data/x-update-state` is the
+  embedder's too, served on its own route or through its node-level data provider (§7.1). `GET /updates`, the detail, `status` and
   `bulk-data` also serve the updates the backend reports from `held_updates` but this server never
   registered (e.g. after a restart), read-only; bulk-data items carry `present`, matched by part name.
 
