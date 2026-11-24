@@ -338,6 +338,11 @@ async fn resolve_data_items(
     component_id: &str,
 ) -> Result<Vec<DidInfoResponse>, ApiError> {
     let backend = state.get_backend(component_id)?;
+    // The backend's items the frozen `/vehicle/v1` does not list.
+    let v1_only = match tree {
+        Tree::V1 => Vec::new(),
+        Tree::Legacy => backend.v1_only_data(),
+    };
 
     // For entities with sub-entities (gateways, app entities), return only the
     // entity's own parameters via backend.list_parameters(). Don't use DidStore
@@ -348,6 +353,7 @@ async fn resolve_data_items(
         let params = backend.list_parameters().await.unwrap_or_default();
         return Ok(params
             .into_iter()
+            .filter(|p| !v1_only.contains(&p.id))
             .map(|p| param_info_to_did_info(p, tree, component_id))
             .collect());
     }
@@ -362,6 +368,7 @@ async fn resolve_data_items(
             if !params.is_empty() {
                 return Ok(params
                     .into_iter()
+                    .filter(|p| !v1_only.contains(&p.id))
                     .map(|p| param_info_to_did_info(p, tree, component_id))
                     .collect());
             }
@@ -498,6 +505,12 @@ async fn read_did_internal(
     let did_u16 = match did_store.resolve_did(param_id) {
         Some(did) => did,
         None => {
+            let unknown = || ApiError::BadRequest(format!("Unknown parameter: {}", param_id));
+            // The frozen `/vehicle/v1` answers an item the backend serves on
+            // `/v1` only as an item the backend does not know.
+            if tree == Tree::Legacy && backend.v1_only_data().iter().any(|id| id == param_id) {
+                return Err(unknown());
+            }
             // DID not in local store — fall back to backend.read_data() for
             // proxy/app backends that resolve parameters via upstream HTTP.
             let values = backend.read_data(&[param_id.to_string()]).await?;
@@ -525,10 +538,7 @@ async fn read_did_internal(
                 ));
             }
 
-            return Err(ApiError::BadRequest(format!(
-                "Unknown parameter: {}",
-                param_id
-            )));
+            return Err(unknown());
         }
     };
 
