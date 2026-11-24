@@ -1349,6 +1349,19 @@ pub trait DiagnosticBackend: Send + Sync {
     }
 }
 
+/// The data items of the server itself, as opposed to those of a component's
+/// backend: the node-level `data` collection, served on the `/v1` tree only
+/// (`/v1/data`, on a server with a node `/v1/components/{node}/data`).
+#[async_trait]
+pub trait NodeData: Send + Sync {
+    /// The node-level data items.
+    async fn list_data(&self) -> BackendResult<Vec<ParameterInfo>>;
+
+    /// Read the node-level data item `id`. An id it does not serve is
+    /// [`BackendError::ParameterNotFound`](crate::error::BackendError::ParameterNotFound).
+    async fn read_data(&self, id: &str) -> BackendResult<DataValue>;
+}
+
 /// Software/version information
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SoftwareInfo {
