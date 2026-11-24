@@ -6,6 +6,8 @@
 //! Conversions are managed via the DidStore from sovd-conv.
 //! Definitions can be loaded from YAML files or registered dynamically.
 
+use std::sync::Arc;
+
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Path, Query, RawQuery, State};
 use axum::response::{IntoResponse, Response};
@@ -14,9 +16,10 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sovd_conv::format_did;
 use sovd_core::error::BackendError;
-use sovd_core::{DataCategory, DataError};
+use sovd_core::{DataCategory, DataError, DataValue, NodeData};
 
 use super::configurations::SchemaQuery;
+use crate::auth::ClientContext;
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::Tree;
@@ -480,9 +483,50 @@ pub async fn write_parameter(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+/// GET /v1/data/{data_id}, on a server with a node-level data provider
+/// ([`AppState::with_node_data`]) only: the provider's item as a [`ReadValue`]
+/// (ISO 17978-3 Tables 82–85), its read as a backend item's
+/// ([`value_read`]). Scope-checked as the node-level listing is.
+pub async fn read_node_data(
+    State(state): State<AppState>,
+    Extension(node_data): Extension<Arc<dyn NodeData>>,
+    Path(data_id): Path<String>,
+    Query(query): Query<ReadQuery>,
+    schema: Result<Query<SchemaQuery>, QueryRejection>,
+    client: Option<Extension<ClientContext>>,
+) -> Result<Response, ApiError> {
+    let client = client.as_ref().map(|Extension(c)| c);
+    super::components::check_node_visible(&state, client)?;
+    let include_schema = include_schema(Tree::V1, schema)?;
+    let read = value_read(&data_id, node_data.read_data(&data_id).await?, query.raw);
+    Ok(data_read_body(Tree::V1, read, (None, None), include_schema))
+}
+
 // =============================================================================
 // Internal Implementation
 // =============================================================================
+
+/// The [`DidResponse`] of `param_id` read as `dv`: with `raw_only`, its raw
+/// bytes (when it has any) as hex and no unit.
+fn value_read(param_id: &str, dv: DataValue, raw_only: bool) -> DidResponse {
+    let raw = dv.raw.clone().unwrap_or_default();
+    let length = dv.length.unwrap_or(0);
+    let has_raw = !raw.is_empty();
+    DidResponse {
+        id: param_id.to_string(),
+        did: dv.did.unwrap_or_default(),
+        value: if raw_only && has_raw {
+            serde_json::json!(raw)
+        } else {
+            dv.value
+        },
+        unit: if raw_only { None } else { dv.unit },
+        raw,
+        length,
+        converted: !raw_only && has_raw,
+        timestamp: Utc::now().to_rfc3339(),
+    }
+}
 
 async fn read_did_internal(
     state: &AppState,
@@ -516,26 +560,7 @@ async fn read_did_internal(
             let values = backend.read_data(&[param_id.to_string()]).await?;
 
             if let Some(dv) = values.into_iter().next() {
-                let raw = dv.raw.clone().unwrap_or_default();
-                let length = dv.length.unwrap_or(0);
-                let has_raw = !raw.is_empty();
-                return Ok((
-                    DidResponse {
-                        id: param_id.to_string(),
-                        did: dv.did.unwrap_or_default(),
-                        value: if raw_only && has_raw {
-                            serde_json::json!(raw)
-                        } else {
-                            dv.value
-                        },
-                        unit: if raw_only { None } else { dv.unit },
-                        raw,
-                        length,
-                        converted: !raw_only && has_raw,
-                        timestamp: Utc::now().to_rfc3339(),
-                    },
-                    (None, None),
-                ));
+                return Ok((value_read(param_id, dv, raw_only), (None, None)));
             }
 
             return Err(unknown());

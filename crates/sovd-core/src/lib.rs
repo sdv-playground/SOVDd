@@ -11,7 +11,7 @@ pub mod routing;
 pub use backend::{
     default_descriptor_from_context, ActivationState, DiagnosticBackend, EcuResetOutcome,
     EntityStatus, EntityStatusBody, FlashProgress, FlashState, FlashStatus, HeldPart, HeldState,
-    HeldUpdate, PackageInfo, PackageStatus, PackageStream, ResetKind, SoftwareInfo,
+    HeldUpdate, NodeData, PackageInfo, PackageStatus, PackageStream, ResetKind, SoftwareInfo,
     UpdatePackageContext, UpdatePackageDescriptor, UpdatePartRef, VerdictScope, VerifyResult,
 };
 pub use error::{BackendError, BackendResult};

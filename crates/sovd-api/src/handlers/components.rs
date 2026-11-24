@@ -236,28 +236,25 @@ pub struct NodeItem {
 }
 
 /// GET /v1/components/{node}/data and /v1/components/{node}/operations (node
-/// topology only, `collection` being `"data"` or `"operations"`), when no
-/// embedder route serves the root form: the node-level items the embedder
-/// contributes to the capability description ([`AppState::with_capability_extensions`],
+/// topology, `collection` being `"data"` or `"operations"`), and GET /v1/data
+/// on a server with a node-level data provider ([`AppState::with_node_data`]),
+/// when no embedder route serves the root form: the node-level items the
+/// embedder contributes to the capability description ([`AppState::with_capability_extensions`],
 /// `paths` and `v1_paths` alike),
 /// a `GET {base}/data/{item}` path an item of `data`, a
 /// `{base}/operations/{op}[/executions]` path one of `operations` (either
 /// base). An item's `name` is its path's summary (the `{op}` path's `get`
-/// before the `executions` path's `post`), else its id.
+/// before the `executions` path's `post`), else its id. The provider's items
+/// are items of `data` too, named by the provider; an id both name is listed
+/// once, as the provider's, since the provider serves its read.
 ///
-/// Scope-checked as the node's document is.
-pub(crate) fn node_collection(
+/// Scope-checked as the node's document is ([`check_node_visible`]).
+pub(crate) async fn node_collection(
     state: &AppState,
-    node: &NodeTopology,
     client: Option<&ClientContext>,
     collection: &str,
 ) -> Result<Json<NodeItemsResponse>, ApiError> {
-    if !node_visible(state, node, client) {
-        return Err(ApiError::Forbidden(format!(
-            "no scope for node {} or any of its subcomponents",
-            node.id()
-        )));
-    }
+    check_node_visible(state, client)?;
     let mut names = std::collections::BTreeMap::<String, Option<String>>::new();
     let extensions = state.capability_extensions();
     for (template, item) in extensions.paths.iter().chain(&extensions.v1_paths) {
@@ -283,10 +280,18 @@ pub(crate) fn node_collection(
             }
         }
     }
+    if let Some(node_data) = state.node_data().filter(|_| collection == "data") {
+        for item in node_data.list_data().await? {
+            names.insert(item.id, Some(item.name));
+        }
+    }
+    let base = state
+        .node()
+        .map_or_else(|| Tree::V1.base().to_owned(), |node| node.href());
     let items = names
         .into_iter()
         .map(|(id, name)| NodeItem {
-            href: format!("{}/{collection}/{id}", node.href()),
+            href: format!("{base}/{collection}/{id}"),
             name: name.unwrap_or_else(|| id.clone()),
             id,
         })
@@ -315,6 +320,28 @@ fn backend_items<'a>(
                 href: href(id),
             }
         })
+}
+
+/// Forbidden unless `client` sees the server's node-level resources: on a
+/// server with a node when it sees the node ([`node_visible`]), on one without
+/// when it may access any component (no `ClientContext` ⇒ auth disabled ⇒ it
+/// sees them).
+pub(crate) fn check_node_visible(
+    state: &AppState,
+    client: Option<&ClientContext>,
+) -> Result<(), ApiError> {
+    match state.node() {
+        Some(node) if !node_visible(state, node, client) => Err(ApiError::Forbidden(format!(
+            "no scope for node {} or any of its subcomponents",
+            node.id()
+        ))),
+        None if !client
+            .is_none_or(|c| state.backends().keys().any(|id| c.can_access_component(id))) =>
+        {
+            Err(ApiError::Forbidden("no scope for any component".to_owned()))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Whether `client` sees the node: when it may access the node or any of its

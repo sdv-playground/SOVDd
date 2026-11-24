@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use sovd_conv::DidStore;
-use sovd_core::{DiagnosticBackend, OperationExecution};
+use sovd_core::{DiagnosticBackend, NodeData, OperationExecution};
 use sovd_uds::config::OutputConfig;
 
 use crate::auth::{AuthContext, Authorizer};
@@ -370,6 +370,9 @@ pub struct AppState {
     /// subcomponents; `None` keeps every backend a top-level component only.
     /// Set via [`AppState::with_node`].
     node: Option<Arc<NodeTopology>>,
+    /// The node-level data items SOVDd serves under `/v1/data`; `None` leaves
+    /// that path to the embedder. Set via [`AppState::with_node_data`].
+    node_data: Option<Arc<dyn NodeData>>,
 }
 
 impl AppState {
@@ -387,6 +390,7 @@ impl AppState {
             auth: Arc::new(AuthContext::default()),
             capability_extensions: Arc::new(CapabilityExtensions::default()),
             node: None,
+            node_data: None,
         }
     }
 
@@ -407,6 +411,7 @@ impl AppState {
             auth: Arc::new(AuthContext::default()),
             capability_extensions: Arc::new(CapabilityExtensions::default()),
             node: None,
+            node_data: None,
         }
     }
 
@@ -428,6 +433,7 @@ impl AppState {
             auth: Arc::new(AuthContext::default()),
             capability_extensions: Arc::new(CapabilityExtensions::default()),
             node: None,
+            node_data: None,
         }
     }
 
@@ -494,6 +500,20 @@ impl AppState {
     /// The node this server is on `/v1`, if one is configured.
     pub fn node(&self) -> Option<&Arc<NodeTopology>> {
         self.node.as_ref()
+    }
+
+    /// Serve `node_data`'s items as the node-level data items on `/v1`:
+    /// `GET /v1/data/{id}` reads one, `GET /v1/data` lists them with the
+    /// node-level items of the capability extensions. Builder-style consume +
+    /// return.
+    pub fn with_node_data(mut self, node_data: Arc<dyn NodeData>) -> Self {
+        self.node_data = Some(node_data);
+        self
+    }
+
+    /// The node-level data items, if a provider is set.
+    pub fn node_data(&self) -> Option<&Arc<dyn NodeData>> {
+        self.node_data.as_ref()
     }
 
     /// Create AppState from a single backend (for simple single-entity servers)

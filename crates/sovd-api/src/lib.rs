@@ -156,6 +156,7 @@ pub fn create_router(state: AppState) -> Router {
         .merge(api_routes(Tree::V1))
         .merge(api_routes(Tree::Legacy))
         .merge(node_routes(state.node()))
+        .merge(node_data_routes(state.node_data()))
         // Fallback for unknown paths / methods so the error body
         // matches the spec `GenericError` shape (axum's defaults are
         // plain text otherwise).
@@ -737,6 +738,24 @@ fn node_routes(node: Option<&Arc<NodeTopology>>) -> Router<AppState> {
             get(handlers::components::list_subcomponents),
         )
         .layer(axum::Extension(node.clone()))
+}
+
+/// The read of a node-level data item, `GET /v1/data/{data_id}`, on a server
+/// with a node-level data provider ([`AppState::with_node_data`]); none
+/// otherwise, and never on the frozen `/vehicle/v1`. The node-level listing
+/// `GET /v1/data` is the router's fallback ([`handlers::meta::not_found_fallback`]),
+/// so an embedder route for it wins without a conflict; on a server with a
+/// node both are reached in the node form through [`with_node_topology`].
+fn node_data_routes(node_data: Option<&Arc<dyn sovd_core::NodeData>>) -> Router<AppState> {
+    let Some(node_data) = node_data else {
+        return Router::new();
+    };
+    Router::new()
+        .route(
+            &format!("{}/data/{{data_id}}", Tree::V1.base()),
+            get(handlers::data::read_node_data),
+        )
+        .layer(axum::Extension(node_data.clone()))
 }
 
 /// Tree-specific restart status routes.  `/v1` serves the app's `status`

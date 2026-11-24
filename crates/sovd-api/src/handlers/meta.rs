@@ -123,6 +123,8 @@ pub async fn version_info() -> Json<VersionInfoResponse> {
 ///    `/v1/data`, see [`crate::topology`]) reaches the fallback when no
 ///    embedder route serves `/v1/data`, and is answered by
 ///    [`crate::handlers::components::node_collection`]; `operations` alike.
+///    `GET /v1/data` likewise on a server with a node-level data provider
+///    ([`AppState::with_node_data`]), with or without a node.
 ///
 /// 3. **Spec-conforming 404** for everything else — emit `GenericError`
 ///    with the spec shape instead of axum's plain-text default.
@@ -133,12 +135,15 @@ pub async fn not_found_fallback(
     client: Option<Extension<ClientContext>>,
 ) -> Response {
     let path = uri.path();
-    if let (Some(node), Method::GET, Some((Tree::V1, rest @ ("/data" | "/operations")))) =
-        (state.node(), method, Tree::split_path(path))
+    if let (Method::GET, Some((Tree::V1, rest @ ("/data" | "/operations")))) =
+        (method, Tree::split_path(path))
     {
-        let client = client.as_ref().map(|Extension(c)| c);
-        return crate::handlers::components::node_collection(&state, node, client, &rest[1..])
-            .into_response();
+        if state.node().is_some() || (rest == "/data" && state.node_data().is_some()) {
+            let client = client.as_ref().map(|Extension(c)| c);
+            return crate::handlers::components::node_collection(&state, client, &rest[1..])
+                .await
+                .into_response();
+        }
     }
     if let Some(entity) = path.strip_suffix("/docs") {
         // Strip a trailing slash if the entity itself ended with one
@@ -684,10 +689,36 @@ pub async fn capability_description(
     Extension(tree): Extension<Tree>,
 ) -> Json<serde_json::Value> {
     let mut doc = build_capability_doc_for(tree, None, state.capability_extensions());
+    if tree == Tree::V1 && state.node_data().is_some() {
+        add_node_data_paths(&mut doc);
+    }
     if let Some(node) = state.node().filter(|_| tree == Tree::V1) {
         add_node_paths(&mut doc, node);
     }
     Json(doc)
+}
+
+/// The node-level data paths of a global `/v1` doc of a server with a
+/// node-level data provider ([`AppState::with_node_data`]): `GET /v1/data`
+/// and `GET /v1/data/{data_id}`, unless an embedder contributed its own.
+fn add_node_data_paths(doc: &mut serde_json::Value) {
+    let Some(paths) = doc.get_mut("paths").and_then(|p| p.as_object_mut()) else {
+        return;
+    };
+    paths
+        .entry(format!("{}/data", Tree::V1.base()))
+        .or_insert_with(
+            || serde_json::json!({ "get": operation("List the node-level data items.") }),
+        );
+    paths
+        .entry(format!("{}/data/{{data_id}}", Tree::V1.base()))
+        .or_insert_with(|| {
+            serde_json::json!({
+                "get": operation("Read a node-level data item (ReadValue); `?include-schema=true` adds its schema."),
+                // ISO 17978-3 Table 23, as on the component's `/data/{param_id}`.
+                "x-sovd-data-category": "x-multiple",
+            })
+        });
 }
 
 /// Build the `/vehicle/v1` OpenAPI 3.1.0 capability description (§7.5,
