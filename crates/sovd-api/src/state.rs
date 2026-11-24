@@ -172,10 +172,14 @@ pub struct UpdatesEntry {
     /// `Some` when `PUT /execute?x-ota-control=orchestrated` runs
     /// and the task pauses at `substate=awaiting-verdict`.
     pub verdict_tx: Option<tokio::sync::watch::Sender<Verdict>>,
-    /// Adopted for a verdict after a restart: the executor held the update
-    /// EXECUTING or EXECUTED, this server had no entry for it, and a verdict
-    /// registered it again at `awaiting-verdict`.
-    pub adopted: bool,
+    /// The held update this entry was adopted from, for a verdict after a
+    /// restart: the executor held it EXECUTING or EXECUTED, this server had
+    /// no entry for it, and a valid verdict on `/v1` registered it again at
+    /// `awaiting-verdict`. Its parts and size describe the update (no
+    /// register body or upload is known), and while no verdict is claimed
+    /// the entry follows what the executor reports (`reconcile_adopted`).
+    /// `None` for an update registered here.
+    pub adopted: Option<sovd_core::HeldUpdate>,
 }
 
 /// Subset of `GenericError` (sovd-core) carried in `UpdatesEntry.error`.

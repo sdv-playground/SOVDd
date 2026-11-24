@@ -27,9 +27,10 @@ that list from its executor, so a client that lost its state finds its updates b
 server or executor restart; SOVDd does, merging the updates its executor holds into the ones it
 has registered. An update only the executor holds is described (`GET {entity}/updates/{id}`, with
 the id as its name and the size of its held parts), reports its status (the held state, per the
-table under "Status member") and lists its held parts. A verdict on it adopts it when the executor
-holds it EXECUTING or EXECUTED (see "Verdict after a restart"); `prepare` and `execute` on it
-answer 404, as does a verdict on one held in another state.
+table under "Status member") and lists its held parts. Under `/v1`, a valid verdict on it adopts it
+when the executor holds it EXECUTING or EXECUTED (see "Verdict after a restart"); `prepare` and
+`execute` on it answer 404, as does a verdict on one held in another state, and any verdict on it
+under `/vehicle/v1`.
 
 ## Bulk data
 
@@ -162,14 +163,29 @@ answers.
 
 A restart of the node (a power cycle, or the tester's own `PUT {entity}/status/restart`) drops the
 server's registry, while the executor keeps the update it staged: EXECUTING until it sees the
-reset, EXECUTED while its trial runs. A verdict (`x-update-commit`, `x-update-rollback`, on the
-component's or the node-level collection) on an update the server no longer has registered, and
-that the executor holds EXECUTING or EXECUTED, adopts it: the server registers it again as the
-orchestrated execute leaves it, awaiting its verdict, and the verdict is then accepted, refused
-and applied as on any other update (a commit still requires EXECUTED). Without it the verdict
-answered 404, and the update was left in a trial no verdict can settle, which an orchestrated
-execute is there to rule out. An update the executor holds in another state, or does not hold,
-is not adopted; an update registered with the server is never adopted again.
+reset, EXECUTED while its trial runs. Without an entry a verdict on it answered 404, and the
+update was left in a trial no verdict can settle, which an orchestrated execute is there to rule
+out. Under `/v1`, a verdict (`x-update-commit`, `x-update-rollback`, on the component's or the
+node-level collection) on such an update adopts it:
+
+- The verdict is checked first, as on a registered update: a commit needs the update EXECUTED
+  (409 while the executor holds it EXECUTING), a rollback needs it EXECUTING or EXECUTED. A refused
+  verdict registers nothing.
+- A component whose updates are settled per node (`verdict_scope` `node`) refuses the per-update
+  verdict before anything is adopted, as it refuses it on a registered update.
+- A valid verdict registers the update again as the orchestrated execute leaves it, awaiting its
+  verdict, and the verdict is then applied as on any other update. It reaches the update's own
+  component, nothing more.
+- The adopted update is described by the held update it was adopted from: its id as the name, the
+  size and the parts of the held parts.
+- Until its verdict is claimed, an adopted update follows the executor: when the executor no
+  longer holds it (a node-level verdict, its own rollback), it reads COMMITTED if the backend
+  reports its activation committed, ROLLED_BACK otherwise
+  (`error_code` `x-update-settled-by-executor`).
+
+An update the executor holds in another state, or does not hold, is not adopted; an update
+registered with the server is never adopted again. The frozen `/vehicle/v1` tree adopts nothing:
+a verdict there on an update only the executor holds answers 404, as before.
 
 ### Per node (operations)
 

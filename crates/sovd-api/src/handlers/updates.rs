@@ -505,7 +505,7 @@ async fn register(
                 transfer_id: None,
                 task_handle: None,
                 verdict_tx: None,
-                adopted: false,
+                adopted: None,
             },
         );
         prior
@@ -705,23 +705,38 @@ pub async fn get_update(
     // Snapshot what the describer needs, then DROP the lock before the
     // (async, possibly I/O-bound) describe call — never hold a parking_lot
     // guard across `.await`.
-    let snapshot: Option<(Option<serde_json::Value>, Vec<UpdatePart>)> = state
-        .updates
-        .0
-        .lock()
-        .get(&UpdateKey::new(&component_id, &update_id))
-        .map(|entry| (entry.manifest.clone(), entry.parts.clone()));
-    let Some((register_body, parts)) = snapshot else {
-        // Not registered here, but possibly held by the executor (e.g. after
-        // a server restart): describe it from what the executor reports.
-        let held = held_update(backend, &update_id).await?;
-        let descriptor = held_descriptor(&component_id, &held);
-        return Ok(Json(update_detail(
-            tree,
-            &component_id,
-            backend.as_ref(),
-            descriptor,
-        )));
+    let key = UpdateKey::new(&component_id, &update_id);
+    reconcile_adopted(&state, backend, &key).await;
+    type Snapshot = (
+        Option<serde_json::Value>,
+        Vec<UpdatePart>,
+        Option<HeldUpdate>,
+    );
+    let snapshot: Option<Snapshot> = state.updates.0.lock().get(&key).map(|entry| {
+        (
+            entry.manifest.clone(),
+            entry.parts.clone(),
+            entry.adopted.clone(),
+        )
+    });
+    let (register_body, parts) = match snapshot {
+        Some((register_body, parts, None)) => (register_body, parts),
+        adopted_or_unregistered => {
+            // Adopted after a restart (no register body or upload is known
+            // here), or not registered here but possibly held by the executor
+            // (e.g. after a server restart): the held update describes it.
+            let held = match adopted_or_unregistered {
+                Some((_, _, Some(held))) => held,
+                _ => held_update(backend, &update_id).await?,
+            };
+            let descriptor = held_descriptor(&component_id, &held);
+            return Ok(Json(update_detail(
+                tree,
+                &component_id,
+                backend.as_ref(),
+                descriptor,
+            )));
+        }
     };
 
     let part_refs: Vec<UpdatePartRef<'_>> = parts
@@ -1582,22 +1597,35 @@ async fn apply_verdict(
     }
 }
 
-/// Adopt an update only the component's executor holds, for a verdict on it.
-/// A restart of the node (a power cycle, or the tester's own
-/// `PUT status/restart`) drops this server's registry, while the executor
+/// Adopt an update only the component's executor holds, for a valid verdict
+/// on it under `/v1`. A restart of the node (a power cycle, or the tester's
+/// own `PUT status/restart`) drops this server's registry, while the executor
 /// keeps the update it staged: EXECUTING until it sees the reset, EXECUTED
 /// while its trial runs. Without an entry the verdict would answer 404 and
-/// leave the trial to no verdict. A verdict on such an update registers it
-/// again exactly as the orchestrated execute task leaves it at
-/// `awaiting-verdict`, marked adopted, with a task that applies the verdict
-/// once it is claimed; the verdict then takes the path it takes on any
-/// orchestrated update. An update registered here, one the executor holds in
-/// another state, or one it does not hold is left as it is.
+/// leave the trial to no verdict.
+///
+/// The verdict is checked before anything is registered, so a refused one
+/// leaves no entry behind: a commit needs the update EXECUTED and the backend
+/// `Activated` (409 otherwise, as on a registered update), a rollback needs it
+/// EXECUTING or EXECUTED. A valid verdict registers the update again as the
+/// orchestrated execute task leaves it at `awaiting-verdict`, keeping the held
+/// update it was adopted from, with a task that applies the verdict once it is
+/// claimed; the verdict then takes the path it takes on any orchestrated
+/// update, which reaches the update's own component only.
+///
+/// Nothing is adopted on the frozen `/vehicle/v1` tree, for an update
+/// registered here, or for one the executor holds in another state or does
+/// not hold; the verdict then answers as before (404 for an unknown id).
 async fn adopt_held_for_verdict(
     state: &AppState,
+    tree: Tree,
     component_id: &str,
     update_id: &str,
+    verdict: crate::state::Verdict,
 ) -> Result<(), ApiError> {
+    if tree != Tree::V1 {
+        return Ok(());
+    }
     let key = UpdateKey::new(component_id, update_id);
     if state.updates.0.lock().contains_key(&key) {
         return Ok(());
@@ -1608,14 +1636,25 @@ async fn adopt_held_for_verdict(
         Err(ApiError::NotFound(_)) => return Ok(()),
         Err(e) => return Err(e),
     };
-    if !matches!(held.state, HeldState::Executing | HeldState::Executed) {
-        return Ok(());
+    let activation = backend.get_activation_state().await.ok();
+    match (verdict, &held.state) {
+        (crate::state::Verdict::Commit, HeldState::Executing | HeldState::Executed) => {
+            let current = activation.as_ref().map(|a| a.state);
+            if held.state != HeldState::Executed
+                || current != Some(sovd_core::FlashState::Activated)
+            {
+                return Err(ApiError::Conflict(format!(
+                    "x-update-commit requires the update EXECUTED; the executor holds it {:?} \
+                     (activation state {})",
+                    held.state,
+                    current.map_or_else(|| "unknown".to_string(), |s| format!("{s:?}"))
+                )));
+            }
+        }
+        (crate::state::Verdict::Rollback, HeldState::Executing | HeldState::Executed) => {}
+        _ => return Ok(()),
     }
-    let reset_kind = backend
-        .get_activation_state()
-        .await
-        .ok()
-        .map(|a| a.reset_kind);
+    let reset_kind = activation.map(|a| a.reset_kind);
     let (verdict_tx, mut verdict_rx) = tokio::sync::watch::channel(crate::state::Verdict::Pending);
     let registration_token = Uuid::new_v4();
     {
@@ -1639,7 +1678,7 @@ async fn adopt_held_for_verdict(
                 substate: Some("awaiting-verdict"),
                 reset_kind,
                 verdict_tx: Some(verdict_tx),
-                adopted: true,
+                adopted: Some(held.clone()),
                 ..Default::default()
             },
         );
@@ -1655,7 +1694,18 @@ async fn adopt_held_for_verdict(
     let task_component_id = component_id.to_string();
     let join = tokio::spawn(async move {
         let verdict = if verdict_rx.changed().await.is_err() {
-            // Sender dropped (entry deleted) — treat as rollback intent.
+            // The sender is gone. An entry deleted while it awaited its
+            // verdict asks for a rollback; one the executor settled itself
+            // (`reconcile_adopted` re-tokened it) is no longer this task's.
+            let re_tokened = task_state
+                .updates
+                .0
+                .lock()
+                .get(&task_key)
+                .is_some_and(|entry| entry.registration_token != registration_token);
+            if re_tokened {
+                return;
+            }
             crate::state::Verdict::Rollback
         } else {
             *verdict_rx.borrow()
@@ -1680,6 +1730,87 @@ async fn adopt_held_for_verdict(
         entry.task_handle = Some(join.abort_handle());
     }
     Ok(())
+}
+
+/// Bring an adopted entry whose verdict is not claimed yet in line with the
+/// executor. Its update may have been settled another way (a node-level
+/// verdict, the executor's own rollback); with no watchdog the entry would
+/// then await a verdict forever. When the executor no longer holds the update
+/// EXECUTING or EXECUTED, the entry ends as the backend reports it: COMMITTED
+/// when its activation state is `Committed`, ROLLED_BACK otherwise. Its task
+/// is stopped without touching the backend. Entries registered here, adopted
+/// entries whose verdict is claimed, and an executor that cannot report are
+/// left as they are.
+async fn reconcile_adopted(
+    state: &AppState,
+    backend: &Arc<dyn sovd_core::DiagnosticBackend>,
+    key: &UpdateKey,
+) {
+    let unclaimed = |entry: &UpdatesEntry| {
+        entry.adopted.is_some()
+            && entry.verdict_tx.is_some()
+            && entry.substate == Some("awaiting-verdict")
+    };
+    let Some(token) = state
+        .updates
+        .0
+        .lock()
+        .get(key)
+        .filter(|entry| unclaimed(entry))
+        .map(|entry| entry.registration_token)
+    else {
+        return;
+    };
+    let Ok(held) = held_updates(backend).await else {
+        return;
+    };
+    if held.iter().any(|h| {
+        h.id == key.update_id() && matches!(h.state, HeldState::Executing | HeldState::Executed)
+    }) {
+        return;
+    }
+    let committed = matches!(
+        backend.get_activation_state().await.map(|a| a.state),
+        Ok(sovd_core::FlashState::Committed)
+    );
+    let mut store = state.updates.0.lock();
+    let Some(entry) = store
+        .get_mut(key)
+        .filter(|entry| entry.registration_token == token && unclaimed(entry))
+    else {
+        return;
+    };
+    // A new token first: the task, woken by the dropped sender, then knows the
+    // entry is no longer its own and leaves the backend alone.
+    entry.registration_token = Uuid::new_v4();
+    if let Some(handle) = entry.task_handle.take() {
+        handle.abort();
+    }
+    entry.verdict_tx = None;
+    entry.substate = None;
+    if committed {
+        entry.status = Status::Completed;
+        entry.state = UpdateState::Committed;
+        entry.progress = Some(100);
+        entry.step = Some("committed by the executor, without a verdict here".into());
+    } else {
+        entry.status = Status::Failed;
+        entry.state = UpdateState::RolledBack;
+        entry.step = Some("rolled back by the executor, without a verdict here".into());
+        entry.error = Some(crate::state::UpdateError {
+            error_code: "x-update-settled-by-executor".into(),
+            message: "the executor no longer holds the update: it was rolled back without a \
+                      verdict through this server"
+                .into(),
+            parameters: None,
+        });
+    }
+    tracing::info!(
+        component = %key.component_id(),
+        update_id = %key.update_id(),
+        committed,
+        "the executor settled an adopted update without a verdict here"
+    );
 }
 
 /// `PUT /vehicle/v1/components/{component_id}/updates/{update_id}/x-ota-commit`
@@ -1771,7 +1902,20 @@ async fn x_update_commit(
     update_id: &str,
 ) -> Result<(StatusCode, HeaderMap), ApiError> {
     refuse_node_verdict(state, tree, component_id, Some(update_id))?;
-    adopt_held_for_verdict(state, component_id, update_id).await?;
+    adopt_held_for_verdict(
+        state,
+        tree,
+        component_id,
+        update_id,
+        crate::state::Verdict::Commit,
+    )
+    .await?;
+    reconcile_adopted(
+        state,
+        state.get_backend(component_id)?,
+        &UpdateKey::new(component_id, update_id),
+    )
+    .await;
     if settled_as(state, component_id, update_id, XUpdateState::Committed).await? {
         return accepted_with_status_location(tree, at, component_id, update_id);
     }
@@ -1806,7 +1950,20 @@ async fn x_update_rollback(
     update_id: &str,
 ) -> Result<(StatusCode, HeaderMap), ApiError> {
     refuse_node_verdict(state, tree, component_id, Some(update_id))?;
-    adopt_held_for_verdict(state, component_id, update_id).await?;
+    adopt_held_for_verdict(
+        state,
+        tree,
+        component_id,
+        update_id,
+        crate::state::Verdict::Rollback,
+    )
+    .await?;
+    reconcile_adopted(
+        state,
+        state.get_backend(component_id)?,
+        &UpdateKey::new(component_id, update_id),
+    )
+    .await;
     if settled_as(state, component_id, update_id, XUpdateState::RolledBack).await? {
         return accepted_with_status_location(tree, at, component_id, update_id);
     }
@@ -2004,6 +2161,7 @@ pub async fn get_status(
 ) -> Result<Json<UpdateStatusBody>, ApiError> {
     let backend = state.get_backend(&component_id)?;
     let key = UpdateKey::new(&component_id, &update_id);
+    reconcile_adopted(&state, backend, &key).await;
     if !state.updates.0.lock().contains_key(&key) {
         let held = held_update(backend, &update_id).await?;
         let reset_kind = backend
@@ -2124,40 +2282,29 @@ async fn bulk_data_list(
     update_id: String,
 ) -> Result<Json<BulkDataListResponse>, ApiError> {
     let backend = state.get_backend(&component_id)?;
-    let parts: Option<Vec<UpdatePart>> = state
+    let key = UpdateKey::new(&component_id, &update_id);
+    reconcile_adopted(&state, backend, &key).await;
+    let snapshot: Option<(Vec<UpdatePart>, Option<HeldUpdate>)> = state
         .updates
         .0
         .lock()
-        .get(&UpdateKey::new(&component_id, &update_id))
-        .map(|entry| entry.parts.clone());
-    let Some(parts) = parts else {
-        // Held only: list the executor's parts themselves.
-        let held = held_update(backend, &update_id).await?;
-        let items = held
-            .parts
-            .into_iter()
-            .map(|p| {
-                let part_id = if p.name.starts_with('#') {
-                    p.name
-                } else {
-                    format!("#{}", p.name)
-                };
-                let mut item = PartStatusEntry {
-                    id: None,
-                    mimetype: None,
-                    part_id,
-                    size: p.size,
-                    sha256: p.sha256,
-                    hash: None,
-                    hash_algorithm: None,
-                    href: None,
-                    present: true,
-                };
-                describe_part(tree, &mut item, None);
-                item
-            })
-            .collect();
-        return Ok(Json(BulkDataListResponse { items }));
+        .get(&key)
+        .map(|entry| (entry.parts.clone(), entry.adopted.clone()));
+    let parts = match snapshot {
+        Some((parts, None)) => parts,
+        // Adopted after a restart: its parts are the held update's.
+        Some((_, Some(held))) => {
+            return Ok(Json(BulkDataListResponse {
+                items: held_part_items(tree, held),
+            }))
+        }
+        None => {
+            // Held only: list the executor's parts themselves.
+            let held = held_update(backend, &update_id).await?;
+            return Ok(Json(BulkDataListResponse {
+                items: held_part_items(tree, held),
+            }));
+        }
     };
     // `present` is advisory: an executor that cannot report never fails the
     // listing of a registered update, whose parts come from the store.
@@ -2940,6 +3087,34 @@ fn part_status_entry(
     };
     describe_part(tree, &mut item, p.mimetype.as_deref());
     item
+}
+
+/// The bulk-data items of a held update: its parts as the executor stores
+/// them, each named `#name`, all present.
+fn held_part_items(tree: Tree, held: HeldUpdate) -> Vec<PartStatusEntry> {
+    held.parts
+        .into_iter()
+        .map(|p| {
+            let part_id = if p.name.starts_with('#') {
+                p.name
+            } else {
+                format!("#{}", p.name)
+            };
+            let mut item = PartStatusEntry {
+                id: None,
+                mimetype: None,
+                part_id,
+                size: p.size,
+                sha256: p.sha256,
+                hash: None,
+                hash_algorithm: None,
+                href: None,
+                present: true,
+            };
+            describe_part(tree, &mut item, None);
+            item
+        })
+        .collect()
 }
 
 /// Fill the Table 298 members of a listed part under `/v1`; the legacy

@@ -24,6 +24,7 @@ use sovd_core::{
     BackendError, BackendResult, Capabilities, DataValue, DiagnosticBackend, EntityInfo,
     FaultFilter, FaultsResult, FlashProgress, FlashState as CoreFlashState, FlashStatus, HeldPart,
     HeldState, HeldUpdate, OperationExecution, OperationInfo, PackageStream, ParameterInfo,
+    VerdictScope,
 };
 
 // ---------------------------------------------------------------------------
@@ -84,6 +85,8 @@ struct MockBackend {
     held_error: AtomicBool,
     /// The bytes received per file_id, for `read_part`.
     received: Mutex<HashMap<String, Vec<u8>>>,
+    /// What `verdict_scope` answers (per update unless a test sets it).
+    verdict_scope: Mutex<VerdictScope>,
     /// Make `read_part` answer as a backend that cannot read parts back.
     read_part_unsupported: AtomicBool,
     /// Optional gateway-style child sub-entity (drives the C-073
@@ -134,6 +137,7 @@ impl MockBackend {
             held: Mutex::new(Vec::new()),
             held_error: AtomicBool::new(false),
             received: Mutex::new(HashMap::new()),
+            verdict_scope: Mutex::new(VerdictScope::Update),
             read_part_unsupported: AtomicBool::new(false),
             child,
             data_tx: tokio::sync::broadcast::channel(16).0,
@@ -143,6 +147,10 @@ impl MockBackend {
 
 #[async_trait::async_trait]
 impl DiagnosticBackend for MockBackend {
+    fn verdict_scope(&self) -> VerdictScope {
+        *self.verdict_scope.lock()
+    }
+
     fn entity_info(&self) -> &EntityInfo {
         &self.info
     }
@@ -2650,88 +2658,320 @@ async fn held_state_maps_to_phase_status_and_x_update_state() {
     }
 }
 
+/// The frozen `/vehicle/v1` tree adopts nothing: every verb on an update only
+/// the executor holds answers 404 there, as before adoption existed.
 #[tokio::test]
-async fn prepare_and_execute_on_a_held_only_update_are_404() {
+async fn verbs_on_a_held_only_update_are_404() {
     let (server, backend) = spawn_with("banked").await;
     *backend.held.lock() = vec![held("pkg-held", HeldState::Executed, &[("kernel", 1)])];
-    for verb in ["prepare", "execute"] {
+    for verb in ["x-update-commit", "x-update-rollback", "prepare", "execute"] {
         let resp = put(&server, &x_update_path("pkg-held", verb)).await;
         assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND, "{verb}");
     }
 }
 
-/// After a restart the executor still holds the update it executed; the
-/// client's commit adopts it and settles it as on an orchestrated update.
+/// `/v1` path of an update on dev1, or of one of its verbs.
+fn v1_update_path(id: &str, verb: &str) -> String {
+    if verb.is_empty() {
+        format!("/v1/components/dev1/updates/{id}")
+    } else {
+        format!("/v1/components/dev1/updates/{id}/{verb}")
+    }
+}
+
+fn commits(backend: &MockBackend) -> usize {
+    backend
+        .hook_log
+        .lock()
+        .iter()
+        .filter(|hook| *hook == "commit_flash")
+        .count()
+}
+
 #[tokio::test]
-async fn a_commit_adopts_the_executed_update_the_executor_held_through_a_restart() {
+async fn on_v1_prepare_and_execute_on_a_held_only_update_are_404() {
+    let (server, backend) = spawn_with("banked").await;
+    *backend.held.lock() = vec![held("pkg-held", HeldState::Executed, &[("kernel", 1)])];
+    for verb in ["prepare", "execute"] {
+        let resp = put(&server, &v1_update_path("pkg-held", verb)).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND, "{verb}");
+    }
+}
+
+/// After a restart the executor still holds the update it executed; under `/v1`
+/// the client's commit adopts it and settles it as on an orchestrated update.
+#[tokio::test]
+async fn on_v1_a_commit_adopts_the_executed_update_the_executor_held_through_a_restart() {
     let (server, backend) = spawn_with("banked").await;
     *backend.held.lock() = vec![held("pkg-held", HeldState::Executed, &[("kernel", 1)])];
     *backend.flash_state.lock() = CoreFlashState::Activated;
 
-    let resp = put(&server, &x_update_path("pkg-held", "x-update-commit")).await;
+    let resp = put(&server, &v1_update_path("pkg-held", "x-update-commit")).await;
     assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
-    let body = poll_terminal(&server, "pkg-held").await;
+    let body = poll_terminal_at(&server, &v1_update_path("pkg-held", "")).await;
     assert_eq!(body["status"], "completed", "{body}");
     assert_eq!(body["x-update"]["state"], "COMMITTED", "{body}");
     assert_eq!(*backend.flash_state.lock(), CoreFlashState::Committed);
+    assert_eq!(commits(&backend), 1);
 
     // A repeated commit changes nothing; a rollback now is refused.
-    let resp = put(&server, &x_update_path("pkg-held", "x-update-commit")).await;
+    let resp = put(&server, &v1_update_path("pkg-held", "x-update-commit")).await;
     assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
-    let resp = put(&server, &x_update_path("pkg-held", "x-update-rollback")).await;
+    let resp = put(&server, &v1_update_path("pkg-held", "x-update-rollback")).await;
     assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(commits(&backend), 1);
 }
 
-/// The executor still awaits the reset (EXECUTING): a commit is refused, as on
-/// an orchestrated update before EXECUTED, and the update stays adopted; a
-/// rollback then settles it.
+/// The executor still awaits the reset (EXECUTING): a commit is refused before
+/// anything is adopted, so the update stays held only; a rollback then adopts
+/// and settles it.
 #[tokio::test]
-async fn a_rollback_adopts_the_update_still_executing_through_a_restart() {
-    let (server, backend) = spawn_with("banked").await;
+async fn on_v1_a_commit_on_an_update_still_executing_is_refused_and_adopts_nothing() {
+    let (server, backend, state) = spawn_with_state("banked").await;
     *backend.held.lock() = vec![held("pkg-held", HeldState::Executing, &[("kernel", 1)])];
     *backend.flash_state.lock() = CoreFlashState::AwaitingReboot;
 
-    let resp = put(&server, &x_update_path("pkg-held", "x-update-commit")).await;
+    let resp = put(&server, &v1_update_path("pkg-held", "x-update-commit")).await;
     assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
-    let body = get_status(&server, "pkg-held").await;
-    assert_eq!(body["x-ota-substate"], "awaiting-verdict", "{body}");
+    assert!(
+        state.updates.0.lock().is_empty(),
+        "a refused verdict registered the update"
+    );
+    let (status, body) = get_json(&server, &v1_update_path("pkg-held", "status")).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
     assert_eq!(body["x-update"]["state"], "EXECUTING", "{body}");
+    assert!(body.get("x-ota-substate").is_none(), "{body}");
 
-    let resp = put(&server, &x_update_path("pkg-held", "x-update-rollback")).await;
+    let resp = put(&server, &v1_update_path("pkg-held", "x-update-rollback")).await;
     assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
-    let body = poll_terminal(&server, "pkg-held").await;
+    let body = poll_terminal_at(&server, &v1_update_path("pkg-held", "")).await;
     assert_eq!(body["x-update"]["state"], "ROLLED_BACK", "{body}");
     assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
-    let resp = put(&server, &x_update_path("pkg-held", "x-update-rollback")).await;
+    let resp = put(&server, &v1_update_path("pkg-held", "x-update-rollback")).await;
     assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(commits(&backend), 0);
 }
 
 /// The node-level collection reaches the held update's component and adopts it
 /// the same way.
 #[tokio::test]
-async fn a_verdict_on_the_node_level_collection_adopts_a_held_update() {
+async fn on_v1_a_verdict_on_the_node_level_collection_adopts_a_held_update() {
     let (server, backend) = spawn_with("banked").await;
     *backend.held.lock() = vec![held("pkg-held", HeldState::Executed, &[("kernel", 1)])];
     *backend.flash_state.lock() = CoreFlashState::Activated;
 
     let resp = put(&server, "/v1/updates/pkg-held/x-update-commit").await;
     assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
-    let body = poll_terminal(&server, "pkg-held").await;
+    let body = poll_terminal_at(&server, "/v1/updates/pkg-held").await;
     assert_eq!(body["x-update"]["state"], "COMMITTED", "{body}");
     assert_eq!(*backend.flash_state.lock(), CoreFlashState::Committed);
 }
 
+/// A component whose updates are settled per node refuses the per-update
+/// verdict first, so nothing is adopted and nothing reaches its executor.
 #[tokio::test]
-async fn a_verdict_adopts_nothing_held_before_execute_or_not_held() {
+async fn on_v1_a_node_scope_component_is_refused_before_adoption() {
+    let (server, backend, state) = spawn_with_state("banked").await;
+    *backend.verdict_scope.lock() = VerdictScope::Node;
+    *backend.held.lock() = vec![held("pkg-held", HeldState::Executed, &[("kernel", 1)])];
+    *backend.flash_state.lock() = CoreFlashState::Activated;
+
+    for path in [
+        v1_update_path("pkg-held", "x-update-commit"),
+        v1_update_path("pkg-held", "x-update-rollback"),
+        "/v1/updates/pkg-held/x-update-commit".to_string(),
+    ] {
+        let resp = put(&server, &path).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT, "{path}");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(
+            body["error_code"], "precondition-not-fulfilled",
+            "{path}: {body}"
+        );
+    }
+    assert!(
+        state.updates.0.lock().is_empty(),
+        "a refused verdict adopted the update"
+    );
+    assert_eq!(*backend.flash_state.lock(), CoreFlashState::Activated);
+    assert_eq!(commits(&backend), 0);
+}
+
+/// Two verdicts at once adopt the update once and reach the executor once:
+/// the first claims the verdict, the second is accepted as a repeat (the same
+/// verdict, settled) or refused (409), never applied again.
+#[tokio::test]
+async fn on_v1_two_concurrent_verdicts_adopt_and_apply_once() {
+    for second in ["x-update-commit", "x-update-rollback"] {
+        let (server, backend, state) = spawn_with_state("banked").await;
+        *backend.held.lock() = vec![held("pkg-held", HeldState::Executed, &[("kernel", 1)])];
+        *backend.flash_state.lock() = CoreFlashState::Activated;
+
+        let commit = v1_update_path("pkg-held", "x-update-commit");
+        let other = v1_update_path("pkg-held", second);
+        let (a, b) = tokio::join!(put(&server, &commit), put(&server, &other));
+        let statuses = [a.status(), b.status()];
+        assert!(
+            statuses.contains(&reqwest::StatusCode::ACCEPTED),
+            "{second}: {statuses:?}"
+        );
+        for status in statuses {
+            assert!(
+                status == reqwest::StatusCode::ACCEPTED || status == reqwest::StatusCode::CONFLICT,
+                "{second}: {statuses:?}"
+            );
+        }
+        let body = poll_terminal_at(&server, &v1_update_path("pkg-held", "")).await;
+        let settled = body["x-update"]["state"].as_str().unwrap().to_string();
+        assert_eq!(state.updates.0.lock().len(), 1, "{second}");
+        match settled.as_str() {
+            "COMMITTED" => {
+                assert_eq!(commits(&backend), 1, "{second}");
+                assert_eq!(*backend.flash_state.lock(), CoreFlashState::Committed);
+            }
+            "ROLLED_BACK" => {
+                assert_eq!(commits(&backend), 0, "{second}");
+                assert_eq!(*backend.flash_state.lock(), CoreFlashState::RolledBack);
+            }
+            other => panic!("{second}: settled as {other}: {body}"),
+        }
+        if second == "x-update-rollback" {
+            // Opposite verdicts: exactly one of them was applied.
+            assert_eq!(
+                statuses
+                    .iter()
+                    .filter(|s| **s == reqwest::StatusCode::ACCEPTED)
+                    .count(),
+                1,
+                "{statuses:?}"
+            );
+        }
+    }
+}
+
+/// An adopted update whose verdict is not claimed yet, as a verdict leaves it
+/// when it fails between adoption and its claim.
+fn insert_unclaimed_adoption(state: &AppState, adopted: HeldUpdate) {
+    let (verdict_tx, _verdict_rx) = tokio::sync::watch::channel(sovd_api::state::Verdict::Pending);
+    state.updates.0.lock().insert(
+        UpdateKey::new("dev1", &adopted.id),
+        sovd_api::state::UpdatesEntry {
+            component_id: "dev1".into(),
+            registration_token: uuid::Uuid::new_v4(),
+            state: UpdateState::Finalized,
+            phase: sovd_api::state::Phase::Execute,
+            status: UpdateStatus::InProgress,
+            substate: Some("awaiting-verdict"),
+            verdict_tx: Some(verdict_tx),
+            adopted: Some(adopted),
+            ..Default::default()
+        },
+    );
+}
+
+/// The executor settled an adopted update another way (a node-level verdict,
+/// its own rollback): when it is read the entry follows the executor, and the
+/// server neither waits for a verdict forever nor touches the backend.
+#[tokio::test]
+async fn on_v1_an_adopted_update_the_executor_settled_itself_follows_the_executor() {
+    for (activation, settled) in [
+        (CoreFlashState::Committed, "COMMITTED"),
+        (CoreFlashState::RolledBack, "ROLLED_BACK"),
+    ] {
+        let (server, backend, state) = spawn_with_state("banked").await;
+        insert_unclaimed_adoption(
+            &state,
+            held("pkg-held", HeldState::Executed, &[("kernel", 1)]),
+        );
+        // Still held EXECUTED: the entry awaits its verdict.
+        *backend.held.lock() = vec![held("pkg-held", HeldState::Executed, &[("kernel", 1)])];
+        *backend.flash_state.lock() = CoreFlashState::Activated;
+        let (_, body) = get_json(&server, &v1_update_path("pkg-held", "status")).await;
+        assert_eq!(body["x-update"]["state"], "EXECUTED", "{body}");
+
+        // Settled by the executor: no longer held.
+        backend.held.lock().clear();
+        *backend.flash_state.lock() = activation;
+        let (status, body) = get_json(&server, &v1_update_path("pkg-held", "status")).await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        assert_eq!(body["x-update"]["state"], settled, "{body}");
+        if settled == "ROLLED_BACK" {
+            assert_eq!(
+                body["error"]["error_code"], "x-update-settled-by-executor",
+                "{body}"
+            );
+        }
+        let entry_awaits = state
+            .updates
+            .0
+            .lock()
+            .values()
+            .any(|entry| entry.verdict_tx.is_some());
+        assert!(!entry_awaits, "the reconciled entry still awaits a verdict");
+        assert_eq!(
+            *backend.flash_state.lock(),
+            activation,
+            "the backend was touched"
+        );
+        assert_eq!(commits(&backend), 0);
+
+        // A verdict now: the matching one is a repeat, the opposite one refused.
+        let (repeat, opposite) = if settled == "COMMITTED" {
+            ("x-update-commit", "x-update-rollback")
+        } else {
+            ("x-update-rollback", "x-update-commit")
+        };
+        let resp = put(&server, &v1_update_path("pkg-held", repeat)).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED, "{settled}");
+        let resp = put(&server, &v1_update_path("pkg-held", opposite)).await;
+        assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT, "{settled}");
+        assert_eq!(commits(&backend), 0);
+    }
+}
+
+/// An adopted update keeps what the held update said of it: its size and its
+/// parts, not the empty lists of an entry without a register body.
+#[tokio::test]
+async fn on_v1_an_adopted_update_is_described_by_its_held_parts() {
     let (server, backend) = spawn_with("banked").await;
+    let parts = [("kernel", 3000), ("rootfs", 5000)];
+    *backend.held.lock() = vec![held("pkg-held", HeldState::Executing, &parts)];
+    *backend.flash_state.lock() = CoreFlashState::AwaitingReboot;
+    let (_, before) = get_json(&server, &v1_update_path("pkg-held", "")).await;
+    let (_, parts_before) = get_json(&server, &v1_update_path("pkg-held", "bulk-data")).await;
+
+    let resp = put(&server, &v1_update_path("pkg-held", "x-update-rollback")).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+    poll_terminal_at(&server, &v1_update_path("pkg-held", "")).await;
+
+    let (status, after) = get_json(&server, &v1_update_path("pkg-held", "")).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(after["size"], before["size"], "{after}");
+    assert_eq!(after["size"], 8, "{after}");
+    let (status, parts_after) = get_json(&server, &v1_update_path("pkg-held", "bulk-data")).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(parts_after, parts_before);
+    let names: Vec<&str> = parts_after["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["part_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["#kernel", "#rootfs"]);
+}
+
+#[tokio::test]
+async fn on_v1_a_verdict_adopts_nothing_held_before_execute_or_not_held() {
+    let (server, backend, state) = spawn_with_state("banked").await;
     *backend.held.lock() = vec![held("pkg-prepared", HeldState::Prepared, &[("kernel", 1)])];
     *backend.flash_state.lock() = CoreFlashState::Activated;
     for id in ["pkg-prepared", "pkg-unknown"] {
         for verb in ["x-update-commit", "x-update-rollback"] {
-            let resp = put(&server, &x_update_path(id, verb)).await;
+            let resp = put(&server, &v1_update_path(id, verb)).await;
             assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND, "{id} {verb}");
         }
     }
+    assert!(state.updates.0.lock().is_empty());
     assert_eq!(*backend.flash_state.lock(), CoreFlashState::Activated);
 }
 
