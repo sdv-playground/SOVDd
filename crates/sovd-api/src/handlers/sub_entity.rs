@@ -282,8 +282,14 @@ pub async fn list_sub_entity_parameters(
 
     // Fall back to backend.list_parameters() (proxy backends that get params from upstream)
     let params = backend.list_parameters().await.map_err(ApiError::from)?;
+    // The backend's items the frozen `/vehicle/v1` does not list.
+    let v1_only = match tree {
+        Tree::V1 => Vec::new(),
+        Tree::Legacy => backend.v1_only_data(),
+    };
     let items: Vec<DidInfoResponse> = params
         .into_iter()
+        .filter(|p| !v1_only.contains(&p.id))
         .map(|p| {
             let did = p.did.unwrap_or_default();
             // §7.9 category from the backend, or DID-number default.
@@ -320,12 +326,13 @@ pub async fn read_sub_entity_parameter(
     Query(query): Query<ReadQuery>,
 ) -> Result<axum::response::Response, ApiError> {
     let Json(read) =
-        read_sub_entity_did(&state, &component_id, &app_id, &param_id, query.raw).await?;
+        read_sub_entity_did(&state, tree, &component_id, &app_id, &param_id, query.raw).await?;
     Ok(super::data::data_read_body(tree, read))
 }
 
 async fn read_sub_entity_did(
     state: &AppState,
+    tree: Tree,
     component_id: &str,
     app_id: &str,
     param_id: &str,
@@ -390,16 +397,20 @@ async fn read_sub_entity_did(
         }
     }
 
+    let unknown = || ApiError::NotFound(format!("Parameter not found: {}", param_id));
+    // The frozen `/vehicle/v1` answers an item the backend serves on `/v1`
+    // only as an item the backend does not know.
+    if tree == Tree::Legacy && backend.v1_only_data().contains(&param_id) {
+        return Err(unknown());
+    }
+
     // Fall back to backend.read_data() (proxy backends resolve params via upstream)
     let values = backend
         .read_data(std::slice::from_ref(&param_id))
         .await
         .map_err(ApiError::from)?;
 
-    let dv = values
-        .into_iter()
-        .next()
-        .ok_or_else(|| ApiError::NotFound(format!("Parameter not found: {}", param_id)))?;
+    let dv = values.into_iter().next().ok_or_else(unknown)?;
 
     let raw = dv.raw.clone().unwrap_or_default();
     let length = dv.length.unwrap_or(0);
