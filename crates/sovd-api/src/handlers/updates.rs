@@ -1174,7 +1174,6 @@ async fn put_execute_inner(
     };
 
     let task_state = state.clone();
-    let task_update_id = update_id.clone();
     let task_component_id = component_id.clone();
     let task_key = key.clone();
     let join = tokio::spawn(async move {
@@ -1307,10 +1306,11 @@ async fn put_execute_inner(
         }
 
         // Orchestrated mode: install verdict channel and pause until
-        // the orchestrator commits or rolls back (or the watchdog
-        // fires).  Watch::changed() returns Ok on any transition
-        // away from Pending, including Commit and Rollback; we
-        // re-read .borrow() to discriminate.
+        // the orchestrator commits or rolls back.  The wait has no time
+        // limit: only a posted verdict (or deleting the entry) ends it.
+        // Watch::changed() returns Ok on any transition away from
+        // Pending, including Commit and Rollback; we re-read .borrow()
+        // to discriminate.
         let (verdict_tx, mut verdict_rx) =
             tokio::sync::watch::channel(crate::state::Verdict::Pending);
         let _ = mutate_entry(&task_state, &task_key, registration_token, |entry| {
@@ -1320,50 +1320,11 @@ async fn put_execute_inner(
             entry.verdict_tx = Some(verdict_tx);
         });
 
-        // Phase B watchdog: default 10 min, configurable via
-        // AppState::updates_config.  On expiry the verdict is forced
-        // to Rollback so the device doesn't stay stuck in trial.
-        let watchdog = task_state.updates_config.orchestrated_watchdog;
-        let verdict = tokio::select! {
-            res = verdict_rx.changed() => {
-                if res.is_err() {
-                    // Sender dropped (entry deleted) — treat as rollback intent.
-                    crate::state::Verdict::Rollback
-                } else {
-                    *verdict_rx.borrow()
-                }
-            }
-            _ = tokio::time::sleep(watchdog) => {
-                let claimed = {
-                    let mut store = task_state.updates.0.lock();
-                    match store
-                        .get_mut(&task_key)
-                        .filter(|entry| entry.registration_token == registration_token)
-                    {
-                        Some(entry) if entry.substate == Some("awaiting-verdict") => {
-                            if entry.verdict_tx.take().is_some() {
-                                entry.step = Some("rolling back".into());
-                                entry.substate = Some("rolling-back");
-                                true
-                            } else {
-                                false
-                            }
-                        }
-                        _ => return,
-                    }
-                };
-                if claimed {
-                    tracing::warn!(
-                        update_id = %task_update_id,
-                        "orchestrator verdict watchdog fired — auto-rollback"
-                    );
-                    crate::state::Verdict::Rollback
-                } else {
-                    // A posted verdict claimed the sender concurrently with
-                    // expiry. Preserve that verdict instead of overriding it.
-                    *verdict_rx.borrow()
-                }
-            }
+        let verdict = if verdict_rx.changed().await.is_err() {
+            // Sender dropped (entry deleted) — treat as rollback intent.
+            crate::state::Verdict::Rollback
+        } else {
+            *verdict_rx.borrow()
         };
 
         match verdict {

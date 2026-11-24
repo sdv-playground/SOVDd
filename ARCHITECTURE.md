@@ -525,7 +525,7 @@ no trial: `… → Activated → commit_flash() → Complete`.
   detail view); `PUT prepare`/`execute` spawn tracked async tasks (`202` + `Location`); `GET status`;
   `DELETE` aborts via a stored `AbortHandle`. **Orchestrated mode** (`PUT execute?x-ota-control=orchestrated`)
   pauses at `substate=awaiting-verdict` on a `watch` channel until `x-ota-commit`/`x-ota-rollback`
-  (or a watchdog fires; default 600 s). See the C-026 note in §1 for the vendor-verb status.
+  (no time limit: only a verdict, or deleting the update, ends the wait). See the C-026 note in §1 for the vendor-verb status.
 - **x-update aliases** ([docs/x-update.md](docs/x-update.md)) are served beside the x-ota names.
   The `x-update` status member (`state`, `reset_kind`) is derived from the update entry and the
   backend's `ActivationState`, not stored separately; `reset_kind` maps `None`/`Local`/
