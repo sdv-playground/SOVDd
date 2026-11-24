@@ -94,22 +94,22 @@ async fn both_bases_serve_identical_bodies() {
     }
 }
 
-/// The data handler stamps `timestamp` with the read time, so the bodies are
-/// compared with that one member removed.
+/// Both bases serve the same value: `/v1` as an ISO 17978-3 `ReadValue`
+/// (`{"id", "data"}`), the frozen `/vehicle/v1` as its `DidResponse`, whose
+/// `timestamp` the data handler stamps with the read time.
 #[tokio::test]
-async fn both_bases_serve_identical_data_resource() {
+async fn both_bases_serve_the_same_data_resource() {
     let server = open_server().await;
-    let mut bodies = Vec::new();
-    for base in BASES {
-        let (status, body) = get(&server, &format!("{base}/components/ecu_a/data/rpm"), None).await;
-        assert_eq!(status, 200, "{base}");
-        let mut body = json(&body);
-        assert!(body["timestamp"].is_string(), "{base}: {body}");
-        body.as_object_mut().unwrap().remove("timestamp");
-        bodies.push(body);
-    }
-    assert_eq!(bodies[0], bodies[1]);
-    assert_eq!(bodies[0]["value"], 850);
+    let (status, body) = get(&server, "/v1/components/ecu_a/data/rpm", None).await;
+    assert_eq!(status, 200);
+    assert_eq!(json(&body), serde_json::json!({ "id": "rpm", "data": 850 }));
+
+    let (status, body) = get(&server, "/vehicle/v1/components/ecu_a/data/rpm", None).await;
+    assert_eq!(status, 200);
+    let body = json(&body);
+    assert!(body["timestamp"].is_string(), "{body}");
+    assert_eq!(body["id"], "rpm", "{body}");
+    assert_eq!(body["value"], 850, "{body}");
 }
 
 // ---------------------------------------------------------------------------
