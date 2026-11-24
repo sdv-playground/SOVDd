@@ -169,7 +169,11 @@ pub struct ParametersResponse {
 pub struct DataResponse {
     /// DID in hex format
     pub did: Option<String>,
-    /// Decoded value (or raw hex if no conversion)
+    /// Decoded value (or raw hex if no conversion). A body carries it as one of
+    /// two members, never both (a body with both fails to parse): the legacy
+    /// `/vehicle/v1` `value`, or `data` of the ISO 17978-3 `ReadValue` that a
+    /// `/v1` data read is.
+    #[serde(alias = "data")]
     pub value: serde_json::Value,
     /// Unit (if conversion registered)
     #[serde(default)]

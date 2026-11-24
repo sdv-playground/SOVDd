@@ -945,6 +945,22 @@ mod tests {
         }
     }
 
+    /// A node-level data read or listing needs what a component's does, and
+    /// addresses no component (its handler scope-checks it as the node).
+    #[test]
+    fn node_level_data_maps_to_data_read() {
+        let get = Method::GET;
+        assert_eq!(
+            route_capability(&get, "/v1/components/a/data/x"),
+            Capability::DataRead
+        );
+        for path in ["/v1/data", "/v1/data/x"] {
+            assert_eq!(route_capability(&get, path), Capability::DataRead, "{path}");
+            assert_eq!(component_in_path(path), None, "{path}");
+            assert!(!is_public_path(path), "{path}");
+        }
+    }
+
     /// The security property: for every base-relative path, the auth decision
     /// (public / capability / component) is the same under both bases.
     #[test]

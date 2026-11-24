@@ -6,14 +6,18 @@
 //! Conversions are managed via the DidStore from sovd-conv.
 //! Definitions can be loaded from YAML files or registered dynamically.
 
+use std::sync::Arc;
+
 use axum::extract::{Path, Query, RawQuery, State};
+use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sovd_conv::format_did;
 use sovd_core::error::BackendError;
-use sovd_core::DataCategory;
+use sovd_core::{DataCategory, DataValue, NodeData};
 
+use crate::auth::ClientContext;
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::Tree;
@@ -124,6 +128,29 @@ pub struct DidResponse {
     pub timestamp: String,
 }
 
+/// ISO 17978-3 `ReadValue` (§7.9.3): the body of a data read under `/v1`, the
+/// read value under `data`.
+#[derive(Serialize)]
+pub struct ReadValue {
+    /// The data resource's id.
+    pub id: String,
+    /// The value read: what the legacy tree's [`DidResponse`] carries as `value`.
+    pub data: serde_json::Value,
+}
+
+/// The body of a data read on `tree`: under `/v1` the [`ReadValue`] of `read`,
+/// under the frozen `/vehicle/v1` the [`DidResponse`] itself, as before.
+pub(crate) fn data_read_body(tree: Tree, read: DidResponse) -> Response {
+    match tree {
+        Tree::V1 => Json(ReadValue {
+            id: read.id,
+            data: read.value,
+        })
+        .into_response(),
+        Tree::Legacy => Json(read).into_response(),
+    }
+}
+
 /// Request for a DID write — spec `{value}` body (ISO 17978-2 ≈line 489:
 /// "the value(s) to be written").
 ///
@@ -232,6 +259,11 @@ async fn resolve_data_items(
     component_id: &str,
 ) -> Result<Vec<DidInfoResponse>, ApiError> {
     let backend = state.get_backend(component_id)?;
+    // The backend's items the frozen `/vehicle/v1` does not list.
+    let v1_only = match tree {
+        Tree::V1 => Vec::new(),
+        Tree::Legacy => backend.v1_only_data(),
+    };
 
     // For entities with sub-entities (gateways, app entities), return only the
     // entity's own parameters via backend.list_parameters(). Don't use DidStore
@@ -242,6 +274,7 @@ async fn resolve_data_items(
         let params = backend.list_parameters().await.unwrap_or_default();
         return Ok(params
             .into_iter()
+            .filter(|p| !v1_only.contains(&p.id))
             .map(|p| param_info_to_did_info(p, tree, component_id))
             .collect());
     }
@@ -256,6 +289,7 @@ async fn resolve_data_items(
             if !params.is_empty() {
                 return Ok(params
                     .into_iter()
+                    .filter(|p| !v1_only.contains(&p.id))
                     .map(|p| param_info_to_did_info(p, tree, component_id))
                     .collect());
             }
@@ -343,14 +377,16 @@ fn param_info_to_did_info(
 }
 
 /// GET /vehicle/v1/components/:component_id/data/:did
-/// Read a DID value (applies conversion if registered)
+/// Read a DID value (applies conversion if registered): a [`ReadValue`] under
+/// `/v1`, a [`DidResponse`] under `/vehicle/v1` (see [`data_read_body`]).
 pub async fn read_parameter(
     State(state): State<AppState>,
     Extension(tree): Extension<Tree>,
     Path((component_id, did)): Path<(String, String)>,
     Query(query): Query<ReadQuery>,
-) -> Result<Json<DidResponse>, ApiError> {
-    read_did_internal(&state, tree, &component_id, &did, query.raw).await
+) -> Result<Response, ApiError> {
+    let Json(read) = read_did_internal(&state, tree, &component_id, &did, query.raw).await?;
+    Ok(data_read_body(tree, read))
 }
 
 /// PUT /vehicle/v1/components/:component_id/data/:did — 204 No Content per spec.
@@ -363,9 +399,49 @@ pub async fn write_parameter(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+/// GET /v1/data/{data_id}, on a server with a node-level data provider
+/// ([`AppState::with_node_data`]) only: the provider's item as a [`ReadValue`]
+/// (ISO 17978-3 Tables 82–85), its read as a backend item's
+/// ([`value_read`]). On a server with a node, scope-checked as the node-level
+/// listing is.
+pub async fn read_node_data(
+    State(state): State<AppState>,
+    Extension(node_data): Extension<Arc<dyn NodeData>>,
+    Path(data_id): Path<String>,
+    Query(query): Query<ReadQuery>,
+    client: Option<Extension<ClientContext>>,
+) -> Result<Response, ApiError> {
+    let client = client.as_ref().map(|Extension(c)| c);
+    super::components::check_node_visible(&state, client)?;
+    let read = value_read(&data_id, node_data.read_data(&data_id).await?, query.raw);
+    Ok(data_read_body(Tree::V1, read))
+}
+
 // =============================================================================
 // Internal Implementation
 // =============================================================================
+
+/// The [`DidResponse`] of `param_id` read as `dv`: with `raw_only`, its raw
+/// bytes (when it has any) as hex and no unit.
+fn value_read(param_id: &str, dv: DataValue, raw_only: bool) -> DidResponse {
+    let raw = dv.raw.clone().unwrap_or_default();
+    let length = dv.length.unwrap_or(0);
+    let has_raw = !raw.is_empty();
+    DidResponse {
+        id: param_id.to_string(),
+        did: dv.did.unwrap_or_default(),
+        value: if raw_only && has_raw {
+            serde_json::json!(raw)
+        } else {
+            dv.value
+        },
+        unit: if raw_only { None } else { dv.unit },
+        raw,
+        length,
+        converted: !raw_only && has_raw,
+        timestamp: Utc::now().to_rfc3339(),
+    }
+}
 
 async fn read_did_internal(
     state: &AppState,
@@ -388,34 +464,21 @@ async fn read_did_internal(
     let did_u16 = match did_store.resolve_did(param_id) {
         Some(did) => did,
         None => {
+            let unknown = || ApiError::BadRequest(format!("Unknown parameter: {}", param_id));
+            // The frozen `/vehicle/v1` answers an item the backend serves on
+            // `/v1` only as an item the backend does not know.
+            if tree == Tree::Legacy && backend.v1_only_data().iter().any(|id| id == param_id) {
+                return Err(unknown());
+            }
             // DID not in local store — fall back to backend.read_data() for
             // proxy/app backends that resolve parameters via upstream HTTP.
             let values = backend.read_data(&[param_id.to_string()]).await?;
 
             if let Some(dv) = values.into_iter().next() {
-                let raw = dv.raw.clone().unwrap_or_default();
-                let length = dv.length.unwrap_or(0);
-                let has_raw = !raw.is_empty();
-                return Ok(Json(DidResponse {
-                    id: param_id.to_string(),
-                    did: dv.did.unwrap_or_default(),
-                    value: if raw_only && has_raw {
-                        serde_json::json!(raw)
-                    } else {
-                        dv.value
-                    },
-                    unit: if raw_only { None } else { dv.unit },
-                    raw,
-                    length,
-                    converted: !raw_only && has_raw,
-                    timestamp: Utc::now().to_rfc3339(),
-                }));
+                return Ok(Json(value_read(param_id, dv, raw_only)));
             }
 
-            return Err(ApiError::BadRequest(format!(
-                "Unknown parameter: {}",
-                param_id
-            )));
+            return Err(unknown());
         }
     };
 

@@ -417,6 +417,14 @@ pub trait DiagnosticBackend: Send + Sync {
     /// Read one or more data parameters
     async fn read_data(&self, param_ids: &[String]) -> BackendResult<Vec<DataValue>>;
 
+    /// The ids of the data items ([`Self::list_parameters`], [`Self::read_data`])
+    /// this backend serves on the `/v1` tree only. The frozen `/vehicle/v1` tree
+    /// does not list them and answers a read of one as it answers an id the
+    /// backend does not know. Empty by default: every item on both trees.
+    fn v1_only_data(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Write a data parameter (if supported)
     async fn write_data(&self, param_id: &str, value: &[u8]) -> BackendResult<()> {
         let _ = (param_id, value);
@@ -1339,6 +1347,19 @@ pub trait DiagnosticBackend: Send + Sync {
             "set_link_mode".to_string(),
         ))
     }
+}
+
+/// The data items of the server itself, as opposed to those of a component's
+/// backend: the node-level `data` collection, served on the `/v1` tree only
+/// (`/v1/data`, on a server with a node `/v1/components/{node}/data`).
+#[async_trait]
+pub trait NodeData: Send + Sync {
+    /// The node-level data items.
+    async fn list_data(&self) -> BackendResult<Vec<ParameterInfo>>;
+
+    /// Read the node-level data item `id`. An id it does not serve is
+    /// [`BackendError::ParameterNotFound`](crate::error::BackendError::ParameterNotFound).
+    async fn read_data(&self, id: &str) -> BackendResult<DataValue>;
 }
 
 /// Software/version information

@@ -12,7 +12,8 @@
 //! - `/v1/components/{node}/subcomponents/{id}/...` is backend `id`'s entity API;
 //! - `/v1/components/{node}/status[/...]`, `.../updates[/...]`, `.../operations[/...]` and
 //!   `.../data[/...]` are the node-level resources; the `data` and `operations` collections no
-//!   embedder route serves list the embedder's contributed items
+//!   embedder route serves list the embedder's contributed items, and `data` the items of the
+//!   node-level data provider (`crate::AppState::with_node_data`), which SOVDd also reads
 //!   (`handlers::components::node_collection`, served from the router's fallback);
 //! - any other `/v1/components/{node}/...` answers 404;
 //! - the flat and root forms those paths map onto (`/v1/components/{id}/...` of any other id,

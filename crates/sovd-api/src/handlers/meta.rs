@@ -123,6 +123,8 @@ pub async fn version_info() -> Json<VersionInfoResponse> {
 ///    `/v1/data`, see [`crate::topology`]) reaches the fallback when no
 ///    embedder route serves `/v1/data`, and is answered by
 ///    [`crate::handlers::components::node_collection`]; `operations` alike.
+///    `GET /v1/data` likewise on a server with a node-level data provider
+///    ([`AppState::with_node_data`]), with or without a node.
 ///
 /// 3. **Spec-conforming 404** for everything else — emit `GenericError`
 ///    with the spec shape instead of axum's plain-text default.
@@ -133,12 +135,15 @@ pub async fn not_found_fallback(
     client: Option<Extension<ClientContext>>,
 ) -> Response {
     let path = uri.path();
-    if let (Some(node), Method::GET, Some((Tree::V1, rest @ ("/data" | "/operations")))) =
-        (state.node(), method, Tree::split_path(path))
+    if let (Method::GET, Some((Tree::V1, rest @ ("/data" | "/operations")))) =
+        (method, Tree::split_path(path))
     {
-        let client = client.as_ref().map(|Extension(c)| c);
-        return crate::handlers::components::node_collection(&state, node, client, &rest[1..])
-            .into_response();
+        if state.node().is_some() || (rest == "/data" && state.node_data().is_some()) {
+            let client = client.as_ref().map(|Extension(c)| c);
+            return crate::handlers::components::node_collection(&state, client, &rest[1..])
+                .await
+                .into_response();
+        }
     }
     if let Some(entity) = path.strip_suffix("/docs") {
         // Strip a trailing slash if the entity itself ended with one
