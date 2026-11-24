@@ -81,6 +81,12 @@ impl DiagnosticBackend for Mock {
             category: Some(sovd_core::DataCategory::CurrentData),
         }])
     }
+    async fn read_raw_did(&self, did: u16) -> BackendResult<Vec<u8>> {
+        match did {
+            0xF190 => Ok(vec![0x01, 0x02, 0xAB]),
+            _ => Err(BackendError::NotSupported(format!("DID {did:04X}"))),
+        }
+    }
     async fn read_data(&self, ids: &[String]) -> BackendResult<Vec<DataValue>> {
         Ok(ids
             .iter()
@@ -527,6 +533,54 @@ async fn data_read_on_every_shape() {
             [
                 format!("GET {m}/data/coolant_temp"),
                 format!("GET {m}/status")
+            ],
+            "{shape:?}"
+        );
+    }
+}
+
+/// A raw read gives the raw bytes on every shape: the legacy body's `raw`, the
+/// `/v1` `ReadValue`'s hex string `data`.
+#[tokio::test]
+async fn raw_read_on_every_shape() {
+    for shape in SHAPES {
+        let s = Server::for_shape(shape).await;
+        let client = s.client(shape).await;
+        let by_did = client.read_did("vm1", 0xF190).await.unwrap();
+        let by_id = client.read_data_raw("vm1", "F190").await.unwrap();
+        for read in [&by_did, &by_id] {
+            assert_eq!(read.raw_bytes().unwrap(), [0x01, 0x02, 0xAB], "{shape:?}");
+            assert_eq!(read.value, serde_json::json!("0102ab"), "{shape:?}");
+            assert_eq!(read.raw.as_deref(), Some("0102ab"), "{shape:?}");
+            // The other legacy-tree members: only the legacy body has them.
+            let legacy = shape == Shape::Legacy;
+            assert_eq!(read.did.is_some(), legacy, "{shape:?}");
+            assert_eq!(read.length, legacy.then_some(3), "{shape:?}");
+            assert_eq!(read.converted, legacy.then_some(false), "{shape:?}");
+            assert_eq!(read.timestamp.is_some(), legacy, "{shape:?}");
+        }
+        // An item without raw bytes: the legacy body's empty `raw`; on `/v1`
+        // the value is no hex string, so there are no raw bytes.
+        let read = client.read_data_raw("vm1", "coolant_temp").await.unwrap();
+        assert_eq!(read.value, serde_json::json!(42), "{shape:?}");
+        match shape {
+            Shape::Legacy => assert_eq!(read.raw_bytes().unwrap(), Vec::<u8>::new()),
+            _ => assert!(read.raw_bytes().is_err(), "{shape:?}"),
+        }
+        let m = pick(
+            shape,
+            [
+                "/vehicle/v1/components/vm1",
+                "/v1/components/vm1",
+                "/v1/components/hpc/subcomponents/vm1",
+            ],
+        );
+        assert_eq!(
+            s.take(),
+            [
+                format!("GET {m}/data/F190?raw=true"),
+                format!("GET {m}/data/F190?raw=true"),
+                format!("GET {m}/data/coolant_temp?raw=true"),
             ],
             "{shape:?}"
         );

@@ -423,16 +423,27 @@ impl SovdClient {
         app_path: &str,
         param_id: &str,
     ) -> Result<DataResponse> {
-        let mut url = self.base_url.join(&format!(
+        let url = self.base_url.join(&format!(
             "{}/apps/{}/data/{}",
             self.paths.member(component_id),
             encode_path_segment(app_path),
             encode_path_segment(param_id)
         ))?;
-        url.set_query(Some("raw=true"));
+        self.read_raw(url).await
+    }
 
+    /// `GET url?raw=true`: a data read without server-side conversion. The
+    /// legacy body carries the hex bytes as `raw`. A `/v1` `ReadValue` has no
+    /// `raw` member: its `data` is the hex string, which on [`Dialect::V1`]
+    /// becomes `raw` too, so [`DataResponse::raw_bytes`] reads either tree.
+    async fn read_raw(&self, mut url: Url) -> Result<DataResponse> {
+        url.set_query(Some("raw=true"));
         let response = self.client.get(url).send().await?;
-        self.handle_response(response).await
+        let mut read: DataResponse = self.handle_response(response).await?;
+        if self.paths.is_v1() {
+            read.raw = read.value.as_str().map(str::to_owned);
+        }
+        Ok(read)
     }
 
     /// Find a parameter by semantic ID or DID from a parameters list
@@ -489,15 +500,12 @@ impl SovdClient {
     /// For client-side conversion of private data, see [`DataResponse::raw_bytes`].
     #[instrument(skip(self))]
     pub async fn read_data_raw(&self, component_id: &str, param_id: &str) -> Result<DataResponse> {
-        let mut url = self.base_url.join(&format!(
+        let url = self.base_url.join(&format!(
             "{}/data/{}",
             self.paths.member(component_id),
             encode_path_segment(param_id)
         ))?;
-        url.set_query(Some("raw=true"));
-
-        let response = self.client.get(url).send().await?;
-        self.handle_response(response).await
+        self.read_raw(url).await
     }
 
     /// Read multiple parameter values

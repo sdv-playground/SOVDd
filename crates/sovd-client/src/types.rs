@@ -169,15 +169,18 @@ pub struct ParametersResponse {
 pub struct DataResponse {
     /// DID in hex format
     pub did: Option<String>,
-    /// Decoded value (or raw hex if no conversion). Under `/v1` a data read is an
-    /// ISO 17978-3 `ReadValue`, which carries it as `data`; under `/vehicle/v1`
-    /// as `value`.
+    /// Decoded value (or raw hex if no conversion). A body carries it as one of
+    /// two members, never both (a body with both fails to parse): the legacy
+    /// `/vehicle/v1` `value`, or `data` of the ISO 17978-3 `ReadValue` that a
+    /// `/v1` data read is.
     #[serde(alias = "data")]
     pub value: serde_json::Value,
     /// Unit (if conversion registered)
     #[serde(default)]
     pub unit: Option<String>,
-    /// Raw hex bytes
+    /// Raw hex bytes: a legacy-tree member. On [`Dialect::V1`](crate::Dialect::V1)
+    /// a raw read ([`read_data_raw`](crate::SovdClient::read_data_raw)) sets it
+    /// from the hex string `data`.
     #[serde(default)]
     pub raw: Option<String>,
     /// Byte length
