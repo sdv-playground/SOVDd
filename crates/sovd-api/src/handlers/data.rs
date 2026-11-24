@@ -15,7 +15,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sovd_conv::format_did;
 use sovd_core::error::BackendError;
-use sovd_core::{DataCategory, DataValue, NodeData};
+use sovd_core::{DataCategory, DataValue, DiagnosticBackend, NodeData};
 
 use crate::auth::ClientContext;
 use crate::error::ApiError;
@@ -232,7 +232,7 @@ pub async fn list_parameters(
 ) -> Result<Json<DidListResponse>, ApiError> {
     let category_filter = parse_category_filter(&raw_query);
 
-    let mut items = resolve_data_items(&state, tree, &component_id).await?;
+    let mut items = data_items(&state, tree, &component_id).await?;
     apply_category_filter(&mut items, &category_filter);
 
     // Sort by id for consistent ordering
@@ -242,6 +242,41 @@ pub async fn list_parameters(
         count: items.len(),
         items,
     }))
+}
+
+/// The component's data parameters on `tree` ([`resolve_data_items`]), on `/v1`
+/// with the backend's `/v1`-only items ([`add_v1_items`]).
+async fn data_items(
+    state: &AppState,
+    tree: Tree,
+    component_id: &str,
+) -> Result<Vec<DidInfoResponse>, ApiError> {
+    let mut items = resolve_data_items(state, tree, component_id).await?;
+    if tree == Tree::V1 {
+        let backend = state.get_backend(component_id)?;
+        let base = format!("{}/data", tree.component(component_id));
+        add_v1_items(backend.as_ref(), tree, component_id, &base, &mut items).await?;
+    }
+    Ok(items)
+}
+
+/// Append `backend`'s `/v1`-only data items ([`DiagnosticBackend::list_v1_parameters`])
+/// to `items`, each under `{base}/{id}`; an id already listed keeps its entry.
+pub(crate) async fn add_v1_items(
+    backend: &dyn DiagnosticBackend,
+    tree: Tree,
+    component_id: &str,
+    base: &str,
+    items: &mut Vec<DidInfoResponse>,
+) -> Result<(), ApiError> {
+    for p in backend.list_v1_parameters().await? {
+        if !items.iter().any(|item| item.id == p.id) {
+            let mut item = param_info_to_did_info(p, tree, component_id);
+            item.href = format!("{base}/{}", item.id);
+            items.push(item);
+        }
+    }
+    Ok(())
 }
 
 /// Resolve the component's data parameters as category-bearing
@@ -259,11 +294,6 @@ async fn resolve_data_items(
     component_id: &str,
 ) -> Result<Vec<DidInfoResponse>, ApiError> {
     let backend = state.get_backend(component_id)?;
-    // The backend's items the frozen `/vehicle/v1` does not list.
-    let v1_only = match tree {
-        Tree::V1 => Vec::new(),
-        Tree::Legacy => backend.v1_only_data(),
-    };
 
     // For entities with sub-entities (gateways, app entities), return only the
     // entity's own parameters via backend.list_parameters(). Don't use DidStore
@@ -274,7 +304,6 @@ async fn resolve_data_items(
         let params = backend.list_parameters().await.unwrap_or_default();
         return Ok(params
             .into_iter()
-            .filter(|p| !v1_only.contains(&p.id))
             .map(|p| param_info_to_did_info(p, tree, component_id))
             .collect());
     }
@@ -289,7 +318,6 @@ async fn resolve_data_items(
             if !params.is_empty() {
                 return Ok(params
                     .into_iter()
-                    .filter(|p| !v1_only.contains(&p.id))
                     .map(|p| param_info_to_did_info(p, tree, component_id))
                     .collect());
             }
@@ -330,7 +358,7 @@ pub async fn list_data_categories(
     Extension(tree): Extension<Tree>,
     Path(component_id): Path<String>,
 ) -> Result<Json<DataCategoryListResponse>, ApiError> {
-    let items = resolve_data_items(&state, tree, &component_id).await?;
+    let items = data_items(&state, tree, &component_id).await?;
 
     // Distinct categories, in first-seen order for stable output.
     let mut seen: Vec<DataCategory> = Vec::new();
@@ -423,7 +451,7 @@ pub async fn read_node_data(
 
 /// The [`DidResponse`] of `param_id` read as `dv`: with `raw_only`, its raw
 /// bytes (when it has any) as hex and no unit.
-fn value_read(param_id: &str, dv: DataValue, raw_only: bool) -> DidResponse {
+pub(crate) fn value_read(param_id: &str, dv: DataValue, raw_only: bool) -> DidResponse {
     let raw = dv.raw.clone().unwrap_or_default();
     let length = dv.length.unwrap_or(0);
     let has_raw = !raw.is_empty();
@@ -464,11 +492,11 @@ async fn read_did_internal(
     let did_u16 = match did_store.resolve_did(param_id) {
         Some(did) => did,
         None => {
-            let unknown = || ApiError::BadRequest(format!("Unknown parameter: {}", param_id));
-            // The frozen `/vehicle/v1` answers an item the backend serves on
-            // `/v1` only as an item the backend does not know.
-            if tree == Tree::Legacy && backend.v1_only_data().iter().any(|id| id == param_id) {
-                return Err(unknown());
+            // On `/v1`, one of the backend's `/v1`-only items.
+            if tree == Tree::V1 {
+                if let Some(dv) = backend.read_v1_data(param_id).await? {
+                    return Ok(Json(value_read(param_id, dv, raw_only)));
+                }
             }
             // DID not in local store — fall back to backend.read_data() for
             // proxy/app backends that resolve parameters via upstream HTTP.
@@ -478,7 +506,10 @@ async fn read_did_internal(
                 return Ok(Json(value_read(param_id, dv, raw_only)));
             }
 
-            return Err(unknown());
+            return Err(ApiError::BadRequest(format!(
+                "Unknown parameter: {}",
+                param_id
+            )));
         }
     };
 

@@ -130,7 +130,7 @@ Method groups (see `backend.rs` for the full list):
 | Group | Methods (representative) |
 |---|---|
 | Entity | `entity_info`, `capabilities` |
-| Data | `list_parameters`, `read_data`, `v1_only_data`, `write_data`, `read_raw_did`, `write_raw_did`, `define_data_identifier`, `clear_data_identifier`, `subscribe_data` (→ `broadcast::Receiver<DataPoint>`), `ecu_reset` |
+| Data | `list_parameters`, `read_data`, `list_v1_parameters`, `read_v1_data`, `write_data`, `read_raw_did`, `write_raw_did`, `define_data_identifier`, `clear_data_identifier`, `subscribe_data` (→ `broadcast::Receiver<DataPoint>`), `ecu_reset` |
 | Faults | `get_faults`, `get_fault_detail`, `clear_faults` |
 | Logs | `get_logs`, `get_log`, `get_log_content`, `delete_log`, `stream_logs` |
 | Configurations | `list_configurations`, `read_configuration`, `write_configuration`, `read_bulk_configuration`, `write_bulk_configuration`, `reset_configuration`, `reset_all_configurations` (§7.12 — a configuration is always read/written as a whole) |
@@ -390,11 +390,13 @@ rollback support) readable before any flash. Each parameter additionally carries
 `category` (Table 70: identData/currentData/storedData/sysInfo), letting clients filter
 `GET /data?categories=identData` for "what is installed".
 
-A backend serves an item on the `/v1` tree only by naming its id in `v1_only_data` (default: none).
-`/v1` lists and reads it like any other item; the frozen `/vehicle/v1` leaves it out of the
-component's and a sub-entity's `/data` listing (`count` follows) and answers a read of it exactly as
-it answers an id the backend does not know, without calling `read_data`. The legacy tree is
-otherwise unaffected, and a backend that names none serves every item on both trees, as before.
+A backend serves items on the `/v1` tree only through a surface of their own: `list_v1_parameters`
+lists them, `read_v1_data(id)` reads one (`None` for an id that is not one of them; both default to
+none). On `/v1` the component's and a sub-entity's `/data` listing (and the component's
+`data-categories`) add them to the items listed otherwise, an id already listed keeping its entry;
+a read of an id the DID store does not resolve asks `read_v1_data` first: its value is the
+`ReadValue`, its error the answer (§11), and `None` goes on to `read_data` as before. The frozen
+`/vehicle/v1` never calls either method, so it answers exactly as the backend without those items.
 
 ---
 

@@ -417,12 +417,20 @@ pub trait DiagnosticBackend: Send + Sync {
     /// Read one or more data parameters
     async fn read_data(&self, param_ids: &[String]) -> BackendResult<Vec<DataValue>>;
 
-    /// The ids of the data items ([`Self::list_parameters`], [`Self::read_data`])
-    /// this backend serves on the `/v1` tree only. The frozen `/vehicle/v1` tree
-    /// does not list them and answers a read of one as it answers an id the
-    /// backend does not know. Empty by default: every item on both trees.
-    fn v1_only_data(&self) -> Vec<String> {
-        Vec::new()
+    /// The data items this backend serves on the `/v1` tree only, listed there
+    /// beside [`Self::list_parameters`]'s. The frozen `/vehicle/v1` tree never
+    /// asks for them. None by default.
+    async fn list_v1_parameters(&self) -> BackendResult<Vec<ParameterInfo>> {
+        Ok(Vec::new())
+    }
+
+    /// Read `id` if it is one of the items of [`Self::list_v1_parameters`]:
+    /// `Ok(None)` when it is not (the read goes on to [`Self::read_data`]),
+    /// `Ok(Some(value))` when it is, an error when it is and the read failed.
+    /// Asked on the `/v1` tree only. `Ok(None)` by default.
+    async fn read_v1_data(&self, id: &str) -> BackendResult<Option<DataValue>> {
+        let _ = id;
+        Ok(None)
     }
 
     /// Write a data parameter (if supported)
