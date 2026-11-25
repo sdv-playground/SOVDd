@@ -303,6 +303,8 @@ restart and the verdict.
 
 ## Not in this version
 
+- Pulling parts: the server stating, per part, whether it wants the part pushed or fetches it
+  itself at `prepare` (proposal: [x-update-transfer.md](x-update-transfer.md)).
 - Executors that need a verdict refusing `automated` with 409 under `/vehicle/v1`.
 - Retiring the x-ota names.
 - Adopting a re-registration the executor still holds.
